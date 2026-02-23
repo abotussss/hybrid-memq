@@ -114,6 +114,33 @@ No API LLM call is required for this idle consolidation loop.
 
 Both are budgeted to avoid prompt growth outliers.
 
+### MEMRULES Enforcement
+- Budget isolation:
+  - MEMCTX uses `memq.budgetTokens`
+  - MEMRULES uses `memq.rules.budgetTokens`
+- Deterministic rule sources:
+  - static hard rules (`memq.rules.hard`)
+  - critical profile rules (language/tone/policy)
+- Structured compact format is used to prevent long prompt inflation.
+- Quarantined/suspicious facts are never promoted into rules.
+
+### Output Audit Flow
+1. Sidecar runs primary policy audit and computes `riskScore`.
+2. If `riskScore` is below threshold, primary decision is used.
+3. If `riskScore` is high and secondary audit is enabled, sidecar calls the configured LLM auditor.
+4. Final decision applies block/redact policy before returning output.
+
+Typical high-risk signals:
+- secret/token patterns (`sk-`, JWT-like blobs, private-key markers)
+- override/exfiltration patterns (`ignore previous`, `reveal system prompt`, etc.)
+- language policy violations when `memq.rules.allowedLanguages` is configured
+
+Runtime checks:
+```bash
+scripts/memq-openclaw.sh audit-status
+curl -sS http://127.0.0.1:7781/audit/stats
+```
+
 ## Configuration
 Main knobs (OpenClaw plugin config):
 - `memq.sidecarUrl` (default `http://127.0.0.1:7781`)
@@ -143,6 +170,8 @@ scripts/memq-openclaw.sh disable
 - Secrets are never stored in MEMCTX.
 - Suspicious memory facts are quarantined and excluded from recall output.
 - High-risk output can trigger secondary LLM audit (optional).
+- MEMCTX and MEMRULES are budget-separated to prevent token blow-up.
+- High-risk output can be blocked/redacted by sidecar policy.
 
 ## Documentation
 - Setup: `docs/openclaw-setup.md`
@@ -243,6 +272,33 @@ curl -sS http://127.0.0.1:7781/health
 
 両方とも予算制約つきで、入力肥大化を防ぎます。
 
+### MEMRULES の厳格化
+- 予算を分離して運用:
+  - MEMCTX は `memq.budgetTokens`
+  - MEMRULES は `memq.rules.budgetTokens`
+- ルール生成元を限定:
+  - 静的ハードルール（`memq.rules.hard`）
+  - critical なプロファイルルール（言語/口調/方針）
+- ルールは短い構造化形式で注入し、長文化を防止
+- quarantine 対象や汚染疑い facts はルールへ昇格しない
+
+### 出力監査フロー
+1. sidecar が一次監査で `riskScore` を算出  
+2. 閾値未満なら一次監査結果を採用  
+3. 高リスクかつ二次監査有効時のみ、監査用LLMを呼び出し  
+4. 最終判定として block/redact ポリシーを適用
+
+高リスク判定の主なシグナル:
+- シークレット/トークン（`sk-`、JWT類似、private keyマーカー）
+- 上書き/漏えい誘導（`ignore previous`、`reveal system prompt` など）
+- `memq.rules.allowedLanguages` 設定時の言語ポリシー違反
+
+動作確認:
+```bash
+scripts/memq-openclaw.sh audit-status
+curl -sS http://127.0.0.1:7781/audit/stats
+```
+
 ### 設定項目（主要）
 - `memq.sidecarUrl`（既定: `http://127.0.0.1:7781`）
 - `memq.budgetTokens`（既定: `120`）
@@ -259,6 +315,8 @@ curl -sS http://127.0.0.1:7781/health
 - MEMCTX に秘密情報を保持しない
 - 汚染疑いの facts は quarantine して想起対象から除外
 - 必要に応じて高リスク出力のみ二次LLM監査を適用
+- MEMCTX と MEMRULES は別予算で運用し、トークン暴騰を防止
+- 高リスク応答は sidecar ポリシーで block/redact 可能
 
 ### 関連ドキュメント
 - `docs/openclaw-setup.md`
