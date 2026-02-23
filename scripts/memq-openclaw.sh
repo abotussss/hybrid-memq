@@ -351,6 +351,17 @@ PY
 }
 
 cmd_start_sidecar() {
+  if curl -fsS http://127.0.0.1:7781/health >/dev/null 2>&1; then
+    echo "sidecar already running (detected by health endpoint)"
+    if [[ ! -f "$PID_FILE" ]]; then
+      local ext_pid
+      ext_pid="$(lsof -nP -iTCP:7781 -sTCP:LISTEN -t 2>/dev/null | head -n 1 || true)"
+      if [[ -n "${ext_pid:-}" ]]; then
+        echo "$ext_pid" > "$PID_FILE"
+      fi
+    fi
+    return
+  fi
   if [[ -f "$PID_FILE" ]]; then
     local pid
     pid="$(cat "$PID_FILE" || true)"
@@ -482,16 +493,22 @@ cmd_stop_sidecar() {
 }
 
 cmd_status() {
+  local health
+  health="$(curl -sS http://127.0.0.1:7781/health 2>/dev/null || echo '{"ok":false}')"
   echo "plugin: $(openclaw plugins list | rg -n "$PLUGIN_ID|Memory MEMQ" -N || true)"
   echo "memory_slot: $(openclaw config get plugins.slots.memory 2>/dev/null || echo '<unset>')"
-  echo "sidecar_health: $(curl -sS http://127.0.0.1:7781/health 2>/dev/null || echo '{"ok":false}')"
+  echo "sidecar_health: $health"
   if [[ -f "$PID_FILE" ]]; then
     local pid
     pid="$(cat "$PID_FILE" || true)"
     if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
       echo "sidecar_pid: $pid (running)"
     else
-      echo "sidecar_pid: $pid (stale)"
+      if echo "$health" | rg -q '"ok"\s*:\s*true'; then
+        echo "sidecar_pid: $pid (stale, but sidecar is healthy/external)"
+      else
+        echo "sidecar_pid: $pid (stale)"
+      fi
     fi
   else
     echo "sidecar_pid: <none>"

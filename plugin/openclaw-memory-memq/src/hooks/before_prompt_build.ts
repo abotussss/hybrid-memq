@@ -346,11 +346,17 @@ export function createBeforePromptBuild(
       .filter(Boolean);
     const enableRuleChannel =
       strictRules || extraRules.length > 0 || allowedLang.length > 0 || preferenceRuleHints.length > 0;
+    const normalizedPrefHints = (() => {
+      const keep = preferenceRuleHints.filter((r) => !/^tone=|^verbosity=/.test(r));
+      if (styleProfile.tone) keep.push(`tone=${styleProfile.tone}`);
+      if (styleProfile.verbosity) keep.push(`verbosity=${styleProfile.verbosity}`);
+      return [...new Set(keep)];
+    })();
     const memrules = enableRuleChannel
       ? compileMemRules({
           budgetTokens: ruleBudget,
         hardRules: [...hardRules, ...extraRules],
-        preferenceRules: preferenceRuleHints,
+        preferenceRules: normalizedPrefHints,
         allowedLanguages: allowedLang,
         preferredLanguage: preferredLang || undefined,
         strict: strictRules
