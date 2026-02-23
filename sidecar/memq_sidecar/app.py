@@ -27,12 +27,15 @@ _idle_threshold_sec = int(os.getenv("MEMQ_IDLE_THRESHOLD_SEC", "90"))
 _consolidate_interval_sec = int(os.getenv("MEMQ_CONSOLIDATE_INTERVAL_SEC", "300"))
 _idle_poll_sec = int(os.getenv("MEMQ_IDLE_POLL_SEC", "30"))
 _llm_audit_enabled = os.getenv("MEMQ_LLM_AUDIT_ENABLED", "0").strip() in {"1", "true", "TRUE", "yes", "on"}
+_output_audit_enabled = os.getenv("MEMQ_OUTPUT_AUDIT_ENABLED", "1").strip() in {"1", "true", "TRUE", "yes", "on"}
 _llm_audit_threshold = float(os.getenv("MEMQ_LLM_AUDIT_THRESHOLD", "0.20"))
 _llm_audit_url = os.getenv("MEMQ_LLM_AUDIT_URL", "").strip()
 _llm_audit_model = os.getenv("MEMQ_LLM_AUDIT_MODEL", "").strip()
 _llm_audit_api_key = os.getenv("MEMQ_LLM_AUDIT_API_KEY", "").strip()
 _llm_audit_timeout_sec = float(os.getenv("MEMQ_LLM_AUDIT_TIMEOUT_SEC", "3.0"))
 _audit_block_threshold = float(os.getenv("MEMQ_AUDIT_BLOCK_THRESHOLD", "0.85"))
+_audit_lang_always_secondary = os.getenv("MEMQ_AUDIT_LANG_ALWAYS_SECONDARY", "1").strip() in {"1", "true", "TRUE", "yes", "on"}
+_audit_lang_repair_enabled = os.getenv("MEMQ_AUDIT_LANG_REPAIR_ENABLED", "1").strip() in {"1", "true", "TRUE", "yes", "on"}
 
 
 def _ensure_dir() -> None:
@@ -259,12 +262,25 @@ def _language_violations(text: str, allowed: List[str]) -> List[str]:
     kana = len(re.findall(r"[\u3040-\u30FF]", s))
     if "zh" not in allowed_set and han >= 4 and kana == 0 and ("ja" in allowed_set or "en" in allowed_set):
         violations.append("contains_non_japanese_han_heavy_text")
+    if "zh" not in allowed_set and "ja" in allowed_set:
+        segments = re.split(r"[。．.!?！？\n]+", s)
+        for seg in segments:
+            part = seg.strip()
+            if len(part) < 4:
+                continue
+            seg_han = len(re.findall(r"[\u4E00-\u9FFF]", part))
+            seg_kana = len(re.findall(r"[\u3040-\u30FF]", part))
+            if seg_han >= 3 and seg_kana == 0:
+                violations.append("contains_nonpreferred_han_segment")
+                break
     if "ru" not in allowed_set and DISALLOWED_LANG_CHARS["ru"].search(s):
         violations.append("contains_cyrillic")
+    if "ko" not in allowed_set and re.search(r"[\uAC00-\uD7AF]", s):
+        violations.append("contains_korean_but_not_allowed")
     if "ja" not in allowed_set and ALLOWED_LANG_CHARS["ja"].search(s):
-        violations.append("contains_ja_disallowed")
+        violations.append("contains_japanese_but_not_allowed")
     if "en" not in allowed_set and ALLOWED_LANG_CHARS["en"].search(s):
-        violations.append("contains_en_disallowed")
+        violations.append("contains_english_but_not_allowed")
     return sorted(set(violations))
 
 
@@ -290,6 +306,40 @@ def _sanitize_fact(key: str, value: str, source_text: str) -> Optional[tuple[str
     if enum is not None and v not in enum:
         return None
     return (k, v)
+
+
+def _deterministic_language_repair(text: str, allowed_languages: List[str], preferred_language: str = "") -> str:
+    s = str(text or "")
+    allowed = {str(x).strip().lower() for x in (allowed_languages or []) if str(x).strip()}
+    if not allowed:
+        return s
+    out = s
+    if "ru" not in allowed:
+        out = re.sub(r"[\u0400-\u04FF]+", " ", out)
+    if "ko" not in allowed:
+        out = re.sub(r"[\uAC00-\uD7AF]+", " ", out)
+    if "zh" not in allowed and "ja" in allowed:
+        segs = re.split(r"([。．.!?！？\n]+)", out)
+        rebuilt: List[str] = []
+        for seg in segs:
+            if re.fullmatch(r"[。．.!?！？\n]+", seg or ""):
+                rebuilt.append(seg)
+                continue
+            part = (seg or "").strip()
+            if not part:
+                rebuilt.append(seg)
+                continue
+            seg_han = len(re.findall(r"[\u4E00-\u9FFF]", part))
+            seg_kana = len(re.findall(r"[\u3040-\u30FF]", part))
+            if seg_han >= 3 and seg_kana == 0:
+                continue
+            rebuilt.append(seg)
+        out = "".join(rebuilt)
+    if "en" not in allowed:
+        out = re.sub(r"[A-Za-z]+", " ", out)
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
 
 
 def _quarantine(trace_id: Optional[str], raw_text: str, reason: str, risk_score: float) -> None:
@@ -428,42 +478,76 @@ def _refresh_conflict_groups(now: int) -> int:
     return len(groups)
 
 
-def _secondary_llm_audit(text: str, allowed_languages: List[str]) -> Dict[str, Any]:
+def _secondary_llm_audit(
+    text: str,
+    allowed_languages: List[str],
+    preferred_language: str = "",
+    want_repair: bool = False,
+) -> Dict[str, Any]:
     if not (_llm_audit_enabled and _llm_audit_url and _llm_audit_model):
         return {"enabled": False, "called": False}
     snippet = _sanitize_text(text, 480)
     allow_str = ",".join(allowed_languages) if allowed_languages else "(none)"
     system = (
         "You are a strict output security auditor. "
-        "Return JSON only: {\"block\":bool,\"reasons\":[string],\"risk\":number}. "
-        "Block if secret/API key/token leakage, instruction-override content, or disallowed language output exists."
+        "Return JSON only: {\"block\":bool,\"reasons\":[string],\"risk\":number,\"repairText\":string}. "
+        "If only language policy is violated and no secret leakage exists, provide repairText in allowed languages. "
+        "Prefer preferred_language when present."
     )
     user = (
         f"Allowed languages: {allow_str}\n"
+        f"Preferred language: {(preferred_language or '(none)')}\n"
         f"Output text:\n{snippet}\n"
         "Judge policy violation. Keep reasons short."
     )
     payload = {
         "model": _llm_audit_model,
         "temperature": 0,
-        "max_tokens": 80,
+        "max_tokens": 220 if want_repair else 100,
         "response_format": {"type": "json_object"},
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
     }
     headers = {"content-type": "application/json"}
     if _llm_audit_api_key:
         headers["authorization"] = f"Bearer {_llm_audit_api_key}"
-    req = Request(_llm_audit_url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
-    try:
+
+    def _call(p: Dict[str, Any]) -> Dict[str, Any]:
+        req = Request(_llm_audit_url, data=json.dumps(p).encode("utf-8"), headers=headers, method="POST")
         with urlopen(req, timeout=_llm_audit_timeout_sec) as r:
-            raw = json.loads(r.read().decode("utf-8"))
+            return json.loads(r.read().decode("utf-8"))
+
+    try:
+        raw = _call(payload)
+    except Exception:
+        payload2 = dict(payload)
+        payload2.pop("response_format", None)
+        try:
+            raw = _call(payload2)
+        except Exception as e:
+            return {
+                "enabled": True,
+                "called": True,
+                "ok": False,
+                "block": False,
+                "risk": 0.0,
+                "reasons": [f"llm_audit_error:{_sanitize_text(str(e), 80)}"],
+            }
+    try:
         content = raw.get("choices", [{}])[0].get("message", {}).get("content", "{}")
-        parsed = json.loads(content) if isinstance(content, str) else {}
+        if isinstance(content, str):
+            try:
+                parsed = json.loads(content)
+            except Exception:
+                m = re.search(r"\{.*\}", content, re.S)
+                parsed = json.loads(m.group(0)) if m else {}
+        else:
+            parsed = {}
         block = bool(parsed.get("block", False))
         reasons = parsed.get("reasons", [])
         if not isinstance(reasons, list):
             reasons = [str(reasons)]
         risk = float(parsed.get("risk", 0.8 if block else 0.0))
+        repair_text = _sanitize_text(str(parsed.get("repairText", "")), 1200)
         return {
             "enabled": True,
             "called": True,
@@ -471,6 +555,7 @@ def _secondary_llm_audit(text: str, allowed_languages: List[str]) -> Dict[str, A
             "block": block,
             "risk": max(0.0, min(1.0, risk)),
             "reasons": [_sanitize_text(str(x), 80) for x in reasons][:6],
+            "repairText": repair_text,
         }
     except Exception as e:
         return {
@@ -479,11 +564,21 @@ def _secondary_llm_audit(text: str, allowed_languages: List[str]) -> Dict[str, A
             "ok": False,
             "block": False,
             "risk": 0.0,
-            "reasons": [f"llm_audit_error:{_sanitize_text(str(e), 80)}"],
+            "reasons": [f"llm_audit_parse_error:{_sanitize_text(str(e), 80)}"],
         }
 
 
-def _audit_output_text(session_id: str, text: str, allowed_languages: List[str]) -> Dict[str, Any]:
+def _audit_output_text(session_id: str, text: str, allowed_languages: List[str], preferred_language: str = "") -> Dict[str, Any]:
+    if not _output_audit_enabled:
+        return {
+            "ok": True,
+            "passed": True,
+            "riskScore": 0.0,
+            "reasons": ["output_audit_disabled"],
+            "secondary": {"enabled": _llm_audit_enabled, "called": False},
+            "repairedApplied": False,
+            "repairedText": "",
+        }
     reasons: List[str] = []
     if _contains_secret_like(text):
         reasons.append("secret_pattern_match")
@@ -511,8 +606,10 @@ def _audit_output_text(session_id: str, text: str, allowed_languages: List[str])
             "obfuscated_secret_like_blob": 0.35,
             "contains_english_but_not_allowed": 0.2,
             "contains_japanese_but_not_allowed": 0.2,
+            "contains_korean_but_not_allowed": 0.2,
             "contains_cyrillic": 0.25,
             "contains_non_japanese_han_heavy_text": 0.2,
+            "contains_nonpreferred_han_segment": 0.2,
         }
         risk = min(1.0, sum(weights.get(r, 0.15) for r in reasons))
         cats = {
@@ -524,13 +621,90 @@ def _audit_output_text(session_id: str, text: str, allowed_languages: List[str])
         if sum(1 for v in cats.values() if v) >= 2:
             risk = min(1.0, risk + 0.15)
     secondary: Dict[str, Any] = {"enabled": _llm_audit_enabled, "called": False}
-    secondary_trigger = risk >= _llm_audit_threshold or ("secret_intent_phrase" in reasons) or ("obfuscated_secret_like_blob" in reasons)
+    has_lang_violation = any(
+        r in {
+            "contains_english_but_not_allowed",
+            "contains_japanese_but_not_allowed",
+            "contains_korean_but_not_allowed",
+            "contains_cyrillic",
+            "contains_non_japanese_han_heavy_text",
+            "contains_nonpreferred_han_segment",
+        }
+        for r in reasons
+    )
+    secondary_trigger = (
+        risk >= _llm_audit_threshold
+        or ("secret_intent_phrase" in reasons)
+        or ("obfuscated_secret_like_blob" in reasons)
+        or (_audit_lang_always_secondary and has_lang_violation)
+    )
+    repaired_applied = False
+    repaired_text = ""
     if secondary_trigger:
-        secondary = _secondary_llm_audit(text, allowed_languages)
+        secondary = _secondary_llm_audit(
+            text,
+            allowed_languages,
+            preferred_language=preferred_language,
+            want_repair=bool(has_lang_violation and _audit_lang_repair_enabled),
+        )
         if secondary.get("called") and secondary.get("block"):
             reasons.extend([f"llm:{r}" for r in secondary.get("reasons", [])])
             risk = max(risk, float(secondary.get("risk", 0.9)))
-    blocked = bool(risk >= _audit_block_threshold or (secondary.get("called") and secondary.get("block")))
+        candidate = str(secondary.get("repairText", "")).strip()
+        if has_lang_violation and candidate:
+            post_lang = _language_violations(candidate, allowed_languages)
+            if not post_lang:
+                repaired_applied = True
+                repaired_text = candidate
+                reasons = [
+                    r
+                    for r in reasons
+                    if r
+                    not in {
+                        "contains_english_but_not_allowed",
+                        "contains_japanese_but_not_allowed",
+                        "contains_korean_but_not_allowed",
+                        "contains_cyrillic",
+                        "contains_non_japanese_han_heavy_text",
+                        "contains_nonpreferred_han_segment",
+                    }
+                ]
+                has_secret = any(r in {"secret_pattern_match", "private_key_marker", "secret_assignment_like"} for r in reasons)
+                has_policy = any(r in {"mentions_prompt_override_terms", "exfiltration_phrase"} for r in reasons)
+                has_obf = "obfuscated_secret_like_blob" in reasons
+                if not has_secret and not has_policy and not has_obf:
+                    risk = min(risk, 0.05)
+    if has_lang_violation and not repaired_applied and _audit_lang_repair_enabled:
+        candidate = _deterministic_language_repair(text, allowed_languages, preferred_language)
+        if candidate and candidate != text:
+            post_lang = _language_violations(candidate, allowed_languages)
+            if not post_lang:
+                repaired_applied = True
+                repaired_text = candidate
+                reasons = [
+                    r
+                    for r in reasons
+                    if r
+                    not in {
+                        "contains_english_but_not_allowed",
+                        "contains_japanese_but_not_allowed",
+                        "contains_korean_but_not_allowed",
+                        "contains_cyrillic",
+                        "contains_non_japanese_han_heavy_text",
+                        "contains_nonpreferred_han_segment",
+                    }
+                ]
+                has_secret = any(r in {"secret_pattern_match", "private_key_marker", "secret_assignment_like"} for r in reasons)
+                has_policy = any(r in {"mentions_prompt_override_terms", "exfiltration_phrase"} for r in reasons)
+                has_obf = "obfuscated_secret_like_blob" in reasons
+                if not has_secret and not has_policy and not has_obf:
+                    risk = min(risk, 0.05)
+    unresolved_lang_violation = bool(has_lang_violation and not repaired_applied)
+    if unresolved_lang_violation and "unresolved_language_violation" not in reasons:
+        reasons.append("unresolved_language_violation")
+    blocked = bool(
+        unresolved_lang_violation or risk >= _audit_block_threshold or (secondary.get("called") and secondary.get("block"))
+    )
     passed = 0 if blocked else 1
     now = _now()
     with _conn() as c:
@@ -554,7 +728,15 @@ def _audit_output_text(session_id: str, text: str, allowed_languages: List[str])
         c.commit()
     if reasons:
         _quarantine(None, text, "output_policy_violation", risk)
-    return {"ok": True, "passed": bool(passed), "riskScore": float(risk), "reasons": reasons, "secondary": secondary}
+    return {
+        "ok": True,
+        "passed": bool(passed),
+        "riskScore": float(risk),
+        "reasons": reasons,
+        "secondary": secondary,
+        "repairedApplied": repaired_applied,
+        "repairedText": repaired_text,
+    }
 
 
 def _idle_loop():
@@ -662,6 +844,7 @@ class OutputAuditReq(BaseModel):
     sessionId: str
     text: str
     allowedLanguages: List[str] = Field(default_factory=list)
+    preferredLanguage: str = ""
 
 
 @app.on_event("startup")
@@ -756,7 +939,7 @@ def preference_event(req: PreferenceEventReq) -> Dict[str, Any]:
 @app.post("/audit/output")
 def audit_output(req: OutputAuditReq) -> Dict[str, Any]:
     _touch_activity()
-    return _audit_output_text(req.sessionId, req.text, req.allowedLanguages or [])
+    return _audit_output_text(req.sessionId, req.text, req.allowedLanguages or [], req.preferredLanguage or "")
 
 
 @app.get("/audit/stats")

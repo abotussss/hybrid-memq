@@ -42,4 +42,6 @@ export interface SidecarSearchResult {
 export interface RuntimeState {
   lastCandidatesBySession: Map<string, SidecarSearchResult[]>;
   lastAllowedLanguagesBySession?: Map<string, string[]>;
+  lastPreferredLanguageBySession?: Map<string, string>;
+  lastAuditBypassBySession?: Map<string, boolean>;
 }

@@ -11,7 +11,12 @@ export default function register(api: any): void {
   const sidecar = new SidecarClient(getCfg(api, "memq.sidecarUrl", "http://127.0.0.1:7781"));
   const surface = new SurfaceCache(getCfg(api, "memq.surface.max", 120));
   const metrics = new RuntimeMetrics();
-  const rt: RuntimeState = { lastCandidatesBySession: new Map(), lastAllowedLanguagesBySession: new Map() };
+  const rt: RuntimeState = {
+    lastCandidatesBySession: new Map(),
+    lastAllowedLanguagesBySession: new Map(),
+    lastPreferredLanguageBySession: new Map(),
+    lastAuditBypassBySession: new Map()
+  };
 
   const before = createBeforePromptBuild(api, sidecar, surface, rt, metrics);
   const onEnd = createAgentEnd(api, sidecar, surface, rt);

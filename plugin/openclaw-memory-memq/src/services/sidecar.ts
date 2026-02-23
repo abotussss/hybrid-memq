@@ -122,11 +122,14 @@ export class SidecarClient {
     sessionId: string;
     text: string;
     allowedLanguages: string[];
+    preferredLanguage?: string;
   }): Promise<{
     ok: boolean;
     passed: boolean;
     riskScore: number;
     reasons: string[];
+    repairedApplied?: boolean;
+    repairedText?: string;
     secondary?: { enabled?: boolean; called?: boolean; ok?: boolean; block?: boolean; risk?: number; reasons?: string[] };
   }> {
     const r = await fetch(`${this.baseUrl}/audit/output`, {
@@ -135,7 +138,8 @@ export class SidecarClient {
       body: JSON.stringify({
         sessionId: input.sessionId,
         text: input.text,
-        allowedLanguages: input.allowedLanguages
+        allowedLanguages: input.allowedLanguages,
+        preferredLanguage: input.preferredLanguage ?? ""
       })
     });
     if (!r.ok) throw new Error("audit output failed");
@@ -144,6 +148,8 @@ export class SidecarClient {
       passed: boolean;
       riskScore: number;
       reasons: string[];
+      repairedApplied?: boolean;
+      repairedText?: string;
       secondary?: { enabled?: boolean; called?: boolean; ok?: boolean; block?: boolean; risk?: number; reasons?: string[] };
     };
   }

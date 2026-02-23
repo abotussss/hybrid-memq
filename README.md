@@ -86,6 +86,8 @@ curl -sS http://127.0.0.1:7781/health
 | `quickstart` | `install + start-sidecar + enable + status` |
 | `audit-on <url> <model> [risk_threshold] [block_threshold]` | Enable secondary LLM audit for high-risk outputs |
 | `audit-off` | Disable secondary LLM audit (MEMQ itself stays enabled) |
+| `audit-primary-on` | Enable primary output audit (rule-based) |
+| `audit-primary-off` | Disable primary output audit (MEMCTX/MEMRULES injection stays enabled) |
 | `audit-status` | Show current audit env values |
 
 ## How It Works
@@ -121,6 +123,10 @@ Both are budgeted to avoid prompt growth outliers.
 - Deterministic rule sources:
   - static hard rules (`memq.rules.hard`)
   - critical profile rules (language/tone/policy)
+- Language policy defaults:
+  - `en` is always allowed as baseline setting language
+  - additional habitual languages are inferred from recent user input patterns
+  - explicit user request like \"reply in Chinese/Korean/Russian\" can bypass output-language audit for that turn
 - Structured compact format is used to prevent long prompt inflation.
 - Quarantined/suspicious facts are never promoted into rules.
 
@@ -128,7 +134,10 @@ Both are budgeted to avoid prompt growth outliers.
 1. Sidecar runs primary policy audit and computes `riskScore`.
 2. If `riskScore` is below threshold, primary decision is used.
 3. If `riskScore` is high and secondary audit is enabled, sidecar calls the configured LLM auditor.
-4. Final decision applies block/redact policy before returning output.
+4. Language-policy violations can force secondary audit even when not high-risk.
+5. For language-only violations, sidecar can request repaired text in allowed/preferred language.
+6. Final decision applies block/redact policy before returning output.
+7. If LLM repair is unavailable, deterministic repair strips disallowed-language segments.
 
 Typical high-risk signals:
 - secret/token patterns (`sk-`, JWT-like blobs, private-key markers)
@@ -141,6 +150,10 @@ scripts/memq-openclaw.sh audit-status
 curl -sS http://127.0.0.1:7781/audit/stats
 ```
 
+Sidecar env flags:
+- `MEMQ_AUDIT_LANG_ALWAYS_SECONDARY=1`
+- `MEMQ_AUDIT_LANG_REPAIR_ENABLED=1`
+
 ## Configuration
 Main knobs (OpenClaw plugin config):
 - `memq.sidecarUrl` (default `http://127.0.0.1:7781`)
@@ -150,6 +163,7 @@ Main knobs (OpenClaw plugin config):
 - `memq.rules.budgetTokens` (default `80`)
 - `memq.rules.strict` (default `false`)
 - `memq.rules.allowedLanguages` (default empty)
+- `memq.rules.autoLanguageFromPrompt` (default `true`)
 - `memq.rules.hard` (default empty, `|`-separated)
 
 Reference: `memq.yaml`
@@ -245,6 +259,8 @@ curl -sS http://127.0.0.1:7781/health
 | `quickstart` | `install + start-sidecar + enable + status` を実行 |
 | `audit-on <url> <model> [risk_threshold] [block_threshold]` | 高リスク時の二次LLM監査を有効化 |
 | `audit-off` | 二次LLM監査のみ無効化（MEMQ本体は有効） |
+| `audit-primary-on` | 一次出力監査（ルールベース）を有効化 |
+| `audit-primary-off` | 一次出力監査のみ無効化（MEMCTX/MEMRULES注入は有効のまま） |
 | `audit-status` | 監査設定の現在値を表示 |
 
 ### 仕組み（実行時）
@@ -279,6 +295,10 @@ curl -sS http://127.0.0.1:7781/health
 - ルール生成元を限定:
   - 静的ハードルール（`memq.rules.hard`）
   - critical なプロファイルルール（言語/口調/方針）
+- 言語ポリシーの既定:
+  - `en` は設定言語として常時許可
+  - 追加許可言語は、最近のユーザー入力傾向から自動推定
+  - 「中国語で返して」のような明示要求ターンは、そのターンのみ言語監査をバイパス可能
 - ルールは短い構造化形式で注入し、長文化を防止
 - quarantine 対象や汚染疑い facts はルールへ昇格しない
 
@@ -286,7 +306,10 @@ curl -sS http://127.0.0.1:7781/health
 1. sidecar が一次監査で `riskScore` を算出  
 2. 閾値未満なら一次監査結果を採用  
 3. 高リスクかつ二次監査有効時のみ、監査用LLMを呼び出し  
-4. 最終判定として block/redact ポリシーを適用
+4. 言語ポリシー違反は高リスクでなくても二次監査を発火可能  
+5. 言語違反のみの場合は、許可/優先言語での修正文を要求可能  
+6. 最終判定として block/redact ポリシーを適用
+7. 二次監査LLMが使えない場合は、ルールベース修正で非許可言語セグメントを除去
 
 高リスク判定の主なシグナル:
 - シークレット/トークン（`sk-`、JWT類似、private keyマーカー）
@@ -299,6 +322,10 @@ scripts/memq-openclaw.sh audit-status
 curl -sS http://127.0.0.1:7781/audit/stats
 ```
 
+Sidecar環境変数:
+- `MEMQ_AUDIT_LANG_ALWAYS_SECONDARY=1`
+- `MEMQ_AUDIT_LANG_REPAIR_ENABLED=1`
+
 ### 設定項目（主要）
 - `memq.sidecarUrl`（既定: `http://127.0.0.1:7781`）
 - `memq.budgetTokens`（既定: `120`）
@@ -307,6 +334,7 @@ curl -sS http://127.0.0.1:7781/audit/stats
 - `memq.rules.budgetTokens`（既定: `80`）
 - `memq.rules.strict`（既定: `false`）
 - `memq.rules.allowedLanguages`（既定: 空）
+- `memq.rules.autoLanguageFromPrompt`（既定: `true`）
 - `memq.rules.hard`（既定: 空、`|`区切り）
 
 参照: `memq.yaml` / `examples/openclaw.json`

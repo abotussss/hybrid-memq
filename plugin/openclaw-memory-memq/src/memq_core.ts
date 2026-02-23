@@ -42,6 +42,7 @@ export function compileMemRules(input: {
   hardRules: string[];
   preferenceRules?: string[];
   allowedLanguages?: string[];
+  preferredLanguage?: string;
   strict?: boolean;
 }): string {
   const out: string[] = [];
@@ -64,6 +65,13 @@ export function compileMemRules(input: {
   }
   if (input.allowedLanguages?.length) {
     push(`  - must=output_language_in:[${input.allowedLanguages.join(",")}]`);
+  }
+  if (input.preferredLanguage) {
+    push(`  - prefer=output_language_primary:${input.preferredLanguage}`);
+    if (input.preferredLanguage === "ja") {
+      push("  - prefer=style_natural_japanese_native");
+      push("  - avoid=translated_chinese_style_japanese");
+    }
   }
   for (const r of input.preferenceRules ?? []) {
     if (!push(`  - prefer=${r}`)) break;

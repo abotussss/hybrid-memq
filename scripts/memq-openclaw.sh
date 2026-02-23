@@ -10,6 +10,7 @@ OPENCLAW_CONFIG="$HOME/.openclaw/openclaw.json"
 OPENCLAW_CONFIG_BAK="$STATE_DIR/openclaw.json.backup"
 PID_FILE="$STATE_DIR/minisidecar.pid"
 SIDECAR_LOG="/tmp/memq-minisidecar.log"
+SIDECAR_ENV="$STATE_DIR/sidecar.env"
 
 mkdir -p "$STATE_DIR"
 
@@ -144,7 +145,12 @@ cmd_start_sidecar() {
       return
     fi
   fi
-  nohup python3 "$ROOT_DIR/sidecar/minisidecar.py" >"$SIDECAR_LOG" 2>&1 &
+  if [[ -f "$SIDECAR_ENV" ]]; then
+    # shellcheck disable=SC1090
+    nohup /bin/bash -lc "set -a; source '$SIDECAR_ENV'; set +a; python3 '$ROOT_DIR/sidecar/minisidecar.py'" >"$SIDECAR_LOG" 2>&1 &
+  else
+    nohup python3 "$ROOT_DIR/sidecar/minisidecar.py" >"$SIDECAR_LOG" 2>&1 &
+  fi
   local pid=$!
   echo "$pid" > "$PID_FILE"
   sleep 1
@@ -153,6 +159,97 @@ cmd_start_sidecar() {
     exit 1
   fi
   echo "sidecar started (pid=$pid)"
+}
+
+cmd_audit_on() {
+  local url="${2:-}"
+  local model="${3:-}"
+  local threshold="${4:-0.20}"
+  local block_threshold="${5:-0.85}"
+  if [[ -z "$url" || -z "$model" ]]; then
+    echo "usage: scripts/memq-openclaw.sh audit-on <llm_audit_url> <llm_audit_model> [llm_risk_threshold] [block_threshold]" >&2
+    exit 1
+  fi
+  {
+    echo "MEMQ_OUTPUT_AUDIT_ENABLED=1"
+    echo "MEMQ_LLM_AUDIT_ENABLED=1"
+    echo "MEMQ_LLM_AUDIT_URL=$url"
+    echo "MEMQ_LLM_AUDIT_MODEL=$model"
+    echo "MEMQ_LLM_AUDIT_THRESHOLD=$threshold"
+    echo "MEMQ_AUDIT_BLOCK_THRESHOLD=$block_threshold"
+    echo "MEMQ_AUDIT_LANG_ALWAYS_SECONDARY=1"
+    echo "MEMQ_AUDIT_LANG_REPAIR_ENABLED=1"
+  } > "$SIDECAR_ENV"
+  cmd_stop_sidecar
+  cmd_start_sidecar
+  echo "dual audit enabled"
+  cmd_audit_status
+}
+
+cmd_audit_off() {
+  {
+    echo "MEMQ_OUTPUT_AUDIT_ENABLED=1"
+    echo "MEMQ_LLM_AUDIT_ENABLED=0"
+    echo "MEMQ_LLM_AUDIT_URL="
+    echo "MEMQ_LLM_AUDIT_MODEL="
+    echo "MEMQ_LLM_AUDIT_THRESHOLD=0.20"
+    echo "MEMQ_AUDIT_BLOCK_THRESHOLD=0.85"
+    echo "MEMQ_AUDIT_LANG_ALWAYS_SECONDARY=1"
+    echo "MEMQ_AUDIT_LANG_REPAIR_ENABLED=1"
+  } > "$SIDECAR_ENV"
+  cmd_stop_sidecar
+  cmd_start_sidecar
+  echo "dual audit disabled"
+  cmd_audit_status
+}
+
+cmd_audit_primary_on() {
+  mkdir -p "$STATE_DIR"
+  touch "$SIDECAR_ENV"
+  python3 - "$SIDECAR_ENV" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+env = {}
+for line in p.read_text(encoding="utf-8").splitlines():
+    if "=" in line:
+        k, v = line.split("=", 1)
+        env[k] = v
+env["MEMQ_OUTPUT_AUDIT_ENABLED"] = "1"
+p.write_text("".join(f"{k}={v}\n" for k, v in env.items()), encoding="utf-8")
+PY
+  cmd_stop_sidecar
+  cmd_start_sidecar
+  echo "primary output audit enabled"
+  cmd_audit_status
+}
+
+cmd_audit_primary_off() {
+  mkdir -p "$STATE_DIR"
+  touch "$SIDECAR_ENV"
+  python3 - "$SIDECAR_ENV" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+env = {}
+for line in p.read_text(encoding="utf-8").splitlines():
+    if "=" in line:
+        k, v = line.split("=", 1)
+        env[k] = v
+env["MEMQ_OUTPUT_AUDIT_ENABLED"] = "0"
+p.write_text("".join(f"{k}={v}\n" for k, v in env.items()), encoding="utf-8")
+PY
+  cmd_stop_sidecar
+  cmd_start_sidecar
+  echo "primary output audit disabled"
+  cmd_audit_status
+}
+
+cmd_audit_status() {
+  if [[ -f "$SIDECAR_ENV" ]]; then
+    echo "sidecar_env_file: $SIDECAR_ENV"
+    cat "$SIDECAR_ENV"
+  else
+    echo "sidecar_env_file: <none>"
+  fi
 }
 
 cmd_stop_sidecar() {
@@ -194,6 +291,16 @@ cmd_quickstart() {
   cmd_status
 }
 
+cmd_on() {
+  cmd_quickstart
+}
+
+cmd_off() {
+  cmd_disable
+  cmd_stop_sidecar
+  echo "memq disabled (slot restored, sidecar stopped)"
+}
+
 usage() {
   cat <<EOF
 usage: scripts/memq-openclaw.sh <command>
@@ -202,9 +309,16 @@ commands:
   install          install plugin (linked)
   enable           switch OpenClaw memory slot to memq (snapshot old config)
   disable          restore previous OpenClaw plugins config from snapshot
+  on               shortcut: quickstart
+  off              shortcut: disable + stop-sidecar
   start-sidecar    start local minisidecar
   stop-sidecar     stop local minisidecar
   status           show plugin/slot/sidecar status
+  audit-on         enable dual audit and restart sidecar
+  audit-off        disable dual audit and restart sidecar
+  audit-primary-on enable primary output audit and restart sidecar
+  audit-primary-off disable primary output audit and restart sidecar
+  audit-status     show current sidecar audit env settings
   quickstart       install + start-sidecar + enable + status
 EOF
 }
@@ -213,9 +327,16 @@ case "${1:-}" in
   install) cmd_install ;;
   enable) cmd_enable ;;
   disable) cmd_disable ;;
+  on) cmd_on ;;
+  off) cmd_off ;;
   start-sidecar) cmd_start_sidecar ;;
   stop-sidecar) cmd_stop_sidecar ;;
   status) cmd_status ;;
+  audit-on) cmd_audit_on "$@" ;;
+  audit-off) cmd_audit_off ;;
+  audit-primary-on) cmd_audit_primary_on ;;
+  audit-primary-off) cmd_audit_primary_off ;;
+  audit-status) cmd_audit_status ;;
   quickstart) cmd_quickstart ;;
   *) usage; exit 1 ;;
 esac

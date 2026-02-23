@@ -13,6 +13,7 @@
       "memq.rules.budgetTokens": { "type": "number", "default": 80 },
       "memq.rules.strict": { "type": "boolean", "default": false },
       "memq.rules.allowedLanguages": { "type": "string", "default": "" },
+      "memq.rules.autoLanguageFromPrompt": { "type": "boolean", "default": true },
       "memq.rules.hard": { "type": "string", "default": "" },
       "memq.topK": { "type": "number", "default": 5 },
       "memq.surface.max": { "type": "number", "default": 120 }

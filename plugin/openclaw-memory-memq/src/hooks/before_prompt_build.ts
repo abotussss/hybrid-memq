@@ -11,6 +11,56 @@ import { SidecarClient } from "../services/sidecar.js";
 import { RuntimeMetrics, SurfaceCache } from "../services/state.js";
 import { getCfg, logInfo } from "../services/config.js";
 
+function detectPromptPrimaryLanguage(text: string): string | null {
+  const s = String(text || "");
+  if (/[ぁ-ゖァ-ヺ]/.test(s)) return "ja";
+  if (/[A-Za-z]/.test(s)) return "en";
+  if (/[\u0400-\u04FF]/.test(s)) return "ru";
+  if (/[\uAC00-\uD7AF]/.test(s)) return "ko";
+  if (/[\u4E00-\u9FFF]/.test(s)) return "zh";
+  return null;
+}
+
+function detectExplicitRequestedLanguage(text: string): string | null {
+  const s = String(text || "");
+  if (/(日本語|japanese).*(で|in|only|のみ|で返|で答)/i.test(s) || /(で|in).*(日本語|japanese)/i.test(s)) return "ja";
+  if (/(英語|english).*(で|in|only|のみ|で返|で答)/i.test(s) || /(で|in).*(英語|english)/i.test(s)) return "en";
+  if (/(中国語|chinese|中文).*(で|in|only|のみ|で返|で答)/i.test(s) || /(で|in).*(中国語|chinese|中文)/i.test(s)) return "zh";
+  if (/(韓国語|korean|한국어).*(で|in|only|のみ|で返|で答)/i.test(s) || /(で|in).*(韓国語|korean|한국어)/i.test(s)) return "ko";
+  if (/(ロシア語|russian).*(で|in|only|のみ|で返|で答)/i.test(s) || /(で|in).*(ロシア語|russian)/i.test(s)) return "ru";
+  return null;
+}
+
+function inferHabitualLanguages(prompt: string, messages: any[]): string[] {
+  const counts: Record<string, number> = { ja: 0, en: 0, zh: 0, ko: 0, ru: 0 };
+  const collect = (s: string): void => {
+    if (!s) return;
+    counts.ja += (s.match(/[ぁ-ゖァ-ヺ]/g) || []).length;
+    counts.en += (s.match(/[A-Za-z]/g) || []).length;
+    counts.zh += (s.match(/[\u4E00-\u9FFF]/g) || []).length;
+    counts.ko += (s.match(/[\uAC00-\uD7AF]/g) || []).length;
+    counts.ru += (s.match(/[\u0400-\u04FF]/g) || []).length;
+  };
+  collect(prompt);
+  for (const m of messages.slice(-20)) {
+    if (!m || typeof m !== "object") continue;
+    if ((m as any).role !== "user") continue;
+    const c = (m as any).content;
+    if (typeof c === "string") collect(c);
+    else if (Array.isArray(c)) {
+      for (const b of c) {
+        if (b && typeof b === "object" && b.type === "text" && typeof b.text === "string") collect(String(b.text));
+      }
+    }
+  }
+  const langs: string[] = ["en"]; // English is always allowed as setting language.
+  const threshold = 6;
+  for (const k of ["ja", "zh", "ko", "ru"] as const) {
+    if (counts[k] >= threshold) langs.push(k);
+  }
+  return [...new Set(langs)];
+}
+
 function extractPreferenceEvents(text: string, nowSec: number) {
   const s = (text || "").toLowerCase();
   const out: Array<{
@@ -131,6 +181,8 @@ export function createBeforePromptBuild(
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
+    let preferredLang = "";
+    let auditBypass = false;
     try {
       const profile = await sidecar.profile();
       const critical = new Set(["tone", "avoid_suggestions", "language", "format", "verbosity"]);
@@ -142,8 +194,7 @@ export function createBeforePromptBuild(
       if (facts.length) {
         preferenceRuleHints = facts.map((f) => `${f.k}=${f.v}`);
         const langFact = facts.find((f) => f.k === "language" && (f.conf ?? 0) >= 0.6);
-        if (langFact?.v === "ja") allowedLang = ["ja"];
-        if (langFact?.v === "en") allowedLang = ["en"];
+        if (!preferredLang && (langFact?.v === "ja" || langFact?.v === "en")) preferredLang = langFact.v;
         profilePrefTrace = {
           id: "pref_profile",
           type: "preference",
@@ -162,15 +213,40 @@ export function createBeforePromptBuild(
     } catch {
       // Best effort.
     }
+    const autoLang = getCfg<boolean>(api, "memq.rules.autoLanguageFromPrompt", true);
+    const explicitLang = detectExplicitRequestedLanguage(prompt);
+    const promptLang = detectPromptPrimaryLanguage(prompt);
+    const habitual = inferHabitualLanguages(prompt, messages);
+    allowedLang = [...new Set([...allowedLang, ...habitual, "en"])];
+    if (explicitLang) {
+      // Explicit language request is user-intended output; bypass audit for this turn.
+      auditBypass = true;
+      if (!allowedLang.length) {
+        allowedLang = [explicitLang];
+      } else if (!allowedLang.includes(explicitLang)) {
+        allowedLang = [...allowedLang, explicitLang];
+      }
+      preferredLang = explicitLang;
+    } else {
+      if (!preferredLang && promptLang && allowedLang.includes(promptLang)) preferredLang = promptLang;
+      if (autoLang && promptLang && allowedLang.includes(promptLang)) {
+        preferredLang = promptLang;
+      }
+      if (!preferredLang && allowedLang.length) preferredLang = allowedLang[0];
+    }
 
     // 1-turn delayed output audit: check the latest assistant text from conversation history.
     try {
+      const prevBypass = rt.lastAuditBypassBySession?.get(sessionId) ?? false;
       const prevAssistant = extractLastAssistantText(messages);
-      if (prevAssistant) {
+      if (prevAssistant && !prevBypass) {
+        const prevAllowed = rt.lastAllowedLanguagesBySession?.get(sessionId) ?? allowedLang;
+        const prevPreferred = rt.lastPreferredLanguageBySession?.get(sessionId) ?? preferredLang;
         await sidecar.auditOutput({
           sessionId,
           text: prevAssistant,
-          allowedLanguages: allowedLang
+          allowedLanguages: prevAllowed,
+          preferredLanguage: prevPreferred || undefined
         });
       }
     } catch {
@@ -230,15 +306,18 @@ export function createBeforePromptBuild(
     const memrules = enableRuleChannel
       ? compileMemRules({
           budgetTokens: ruleBudget,
-          hardRules: [...hardRules, ...extraRules],
-          preferenceRules: preferenceRuleHints,
-          allowedLanguages: allowedLang,
-          strict: strictRules
-        })
+        hardRules: [...hardRules, ...extraRules],
+        preferenceRules: preferenceRuleHints,
+        allowedLanguages: allowedLang,
+        preferredLanguage: preferredLang || undefined,
+        strict: strictRules
+      })
       : "";
 
     rt.lastCandidatesBySession.set(sessionId, [...surfaceItems, ...deepRaw]);
     rt.lastAllowedLanguagesBySession?.set(sessionId, allowedLang);
+    if (preferredLang) rt.lastPreferredLanguageBySession?.set(sessionId, preferredLang);
+    rt.lastAuditBypassBySession?.set(sessionId, auditBypass);
 
     metrics.add({
       mode: "api_text",

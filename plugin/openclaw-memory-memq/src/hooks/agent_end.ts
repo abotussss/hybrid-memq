@@ -44,6 +44,37 @@ function collectAssistantTexts(event: any, hookCtx: any): string[] {
   return out;
 }
 
+function tryPatchAssistantText(event: any, hookCtx: any, original: string, repaired: string): boolean {
+  const bag = [event, hookCtx, event?.result, hookCtx?.result, event?.output, hookCtx?.output];
+  let patched = false;
+  const patchContent = (obj: any): void => {
+    const msgs = Array.isArray(obj?.messages) ? obj.messages : [];
+    for (let i = msgs.length - 1; i >= 0; i -= 1) {
+      const m = msgs[i];
+      if (!m || typeof m !== "object" || m.role !== "assistant") continue;
+      if (typeof m.content === "string" && m.content.trim() === original.trim()) {
+        m.content = repaired;
+        patched = true;
+        return;
+      }
+      if (Array.isArray(m.content)) {
+        for (const b of m.content) {
+          if (b && typeof b === "object" && b.type === "text" && typeof b.text === "string" && b.text.trim() === original.trim()) {
+            b.text = repaired;
+            patched = true;
+            return;
+          }
+        }
+      }
+    }
+  };
+  for (const obj of bag) {
+    if (!obj || patched) continue;
+    patchContent(obj);
+  }
+  return patched;
+}
+
 export function createAgentEnd(api: any, sidecar: SidecarClient, surface: SurfaceCache, rt: RuntimeState) {
   return async (event: any, hookCtx: any): Promise<void> => {
     const sessionId = hookCtx?.sessionKey ?? hookCtx?.sessionId ?? "default";
@@ -57,22 +88,30 @@ export function createAgentEnd(api: any, sidecar: SidecarClient, surface: Surfac
       }
     }
     const allowed = rt.lastAllowedLanguagesBySession?.get(sessionId) ?? [];
+    const preferred = rt.lastPreferredLanguageBySession?.get(sessionId);
+    const auditBypass = rt.lastAuditBypassBySession?.get(sessionId) ?? false;
     const assistantTexts = collectAssistantTexts(event, hookCtx);
     let audited = 0;
     let violations = 0;
+    let repaired = 0;
     for (const text of assistantTexts.slice(-2)) {
+      if (auditBypass) continue;
       try {
         const res = await sidecar.auditOutput({
           sessionId,
           text,
-          allowedLanguages: allowed
+          allowedLanguages: allowed,
+          preferredLanguage: preferred
         });
         audited += 1;
         if (!res.passed) violations += 1;
+        if (res.repairedApplied && res.repairedText) {
+          if (tryPatchAssistantText(event, hookCtx, text, res.repairedText)) repaired += 1;
+        }
       } catch {
         // Best effort.
       }
     }
-    logInfo(api, `[memq] agent_end refs=${refs.length} audited=${audited} violations=${violations}`);
+    logInfo(api, `[memq] agent_end refs=${refs.length} audited=${audited} violations=${violations} repaired=${repaired}`);
   };
 }
