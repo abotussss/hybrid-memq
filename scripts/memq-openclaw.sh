@@ -351,6 +351,18 @@ PY
 }
 
 cmd_start_sidecar() {
+  wait_for_health() {
+    local retries="${1:-20}"
+    local i
+    for ((i=0; i<retries; i++)); do
+      if curl -fsS http://127.0.0.1:7781/health >/dev/null 2>&1; then
+        return 0
+      fi
+      sleep 1
+    done
+    return 1
+  }
+
   if curl -fsS http://127.0.0.1:7781/health >/dev/null 2>&1; then
     echo "sidecar already running (detected by health endpoint)"
     if [[ ! -f "$PID_FILE" ]]; then
@@ -372,18 +384,37 @@ cmd_start_sidecar() {
   fi
   if [[ -f "$SIDECAR_ENV" ]]; then
     # shellcheck disable=SC1090
-    nohup /bin/bash -lc "set -a; source '$SIDECAR_ENV'; set +a; python3 '$ROOT_DIR/sidecar/minisidecar.py'" >"$SIDECAR_LOG" 2>&1 &
+    nohup /bin/bash -lc "set -a; source '$SIDECAR_ENV'; set +a; python3 '$ROOT_DIR/sidecar/supervisor.py'" >"$SIDECAR_LOG" 2>&1 &
   else
-    nohup python3 "$ROOT_DIR/sidecar/minisidecar.py" >"$SIDECAR_LOG" 2>&1 &
+    nohup python3 "$ROOT_DIR/sidecar/supervisor.py" >"$SIDECAR_LOG" 2>&1 &
   fi
   local pid=$!
   echo "$pid" > "$PID_FILE"
   sleep 1
   if ! kill -0 "$pid" 2>/dev/null; then
-    echo "failed to start sidecar. log: $SIDECAR_LOG" >&2
+    echo "failed to start sidecar supervisor. log: $SIDECAR_LOG" >&2
     exit 1
   fi
-  echo "sidecar started (pid=$pid)"
+  if ! wait_for_health 25; then
+    echo "failed to pass sidecar health check. log: $SIDECAR_LOG" >&2
+    tail -n 80 "$SIDECAR_LOG" >&2 || true
+    exit 1
+  fi
+  echo "sidecar started (supervisor pid=$pid)"
+}
+
+kill_sidecar_listeners() {
+  local pids pid
+  pids="$(lsof -nP -iTCP:7781 -sTCP:LISTEN -t 2>/dev/null || true)"
+  if [[ -z "${pids:-}" ]]; then
+    return
+  fi
+  for pid in $pids; do
+    if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+    fi
+  done
 }
 
 cmd_audit_on() {
@@ -405,8 +436,7 @@ cmd_audit_on() {
     echo "MEMQ_AUDIT_LANG_ALWAYS_SECONDARY=1"
     echo "MEMQ_AUDIT_LANG_REPAIR_ENABLED=1"
   } > "$SIDECAR_ENV"
-  cmd_stop_sidecar
-  cmd_start_sidecar
+  cmd_restart_sidecar
   echo "dual audit enabled"
   cmd_audit_status
 }
@@ -422,8 +452,7 @@ cmd_audit_off() {
     echo "MEMQ_AUDIT_LANG_ALWAYS_SECONDARY=1"
     echo "MEMQ_AUDIT_LANG_REPAIR_ENABLED=1"
   } > "$SIDECAR_ENV"
-  cmd_stop_sidecar
-  cmd_start_sidecar
+  cmd_restart_sidecar
   echo "dual audit disabled"
   cmd_audit_status
 }
@@ -442,8 +471,7 @@ for line in p.read_text(encoding="utf-8").splitlines():
 env["MEMQ_OUTPUT_AUDIT_ENABLED"] = "1"
 p.write_text("".join(f"{k}={v}\n" for k, v in env.items()), encoding="utf-8")
 PY
-  cmd_stop_sidecar
-  cmd_start_sidecar
+  cmd_restart_sidecar
   echo "primary output audit enabled"
   cmd_audit_status
 }
@@ -462,8 +490,7 @@ for line in p.read_text(encoding="utf-8").splitlines():
 env["MEMQ_OUTPUT_AUDIT_ENABLED"] = "0"
 p.write_text("".join(f"{k}={v}\n" for k, v in env.items()), encoding="utf-8")
 PY
-  cmd_stop_sidecar
-  cmd_start_sidecar
+  cmd_restart_sidecar
   echo "primary output audit disabled"
   cmd_audit_status
 }
@@ -478,18 +505,32 @@ cmd_audit_status() {
 }
 
 cmd_stop_sidecar() {
+  local mode="${1:-}"
   if [[ ! -f "$PID_FILE" ]]; then
-    echo "sidecar pid file not found"
-    return
+    if [[ "$mode" != "--all" ]]; then
+      echo "sidecar pid file not found"
+      return
+    fi
   fi
-  local pid
-  pid="$(cat "$PID_FILE" || true)"
-  if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
-    kill "$pid" || true
-    sleep 1
+  if [[ -f "$PID_FILE" ]]; then
+    local pid
+    pid="$(cat "$PID_FILE" || true)"
+    if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" || true
+      sleep 1
+    fi
+    rm -f "$PID_FILE"
   fi
-  rm -f "$PID_FILE"
+  rm -f "$STATE_DIR/minisidecar.child.pid"
+  if [[ "$mode" == "--all" ]]; then
+    kill_sidecar_listeners
+  fi
   echo "sidecar stopped"
+}
+
+cmd_restart_sidecar() {
+  cmd_stop_sidecar --all
+  cmd_start_sidecar
 }
 
 cmd_status() {
@@ -512,6 +553,17 @@ cmd_status() {
     fi
   else
     echo "sidecar_pid: <none>"
+  fi
+  if [[ -f "$STATE_DIR/minisidecar.child.pid" ]]; then
+    local cpid
+    cpid="$(cat "$STATE_DIR/minisidecar.child.pid" || true)"
+    if [[ -n "${cpid:-}" ]] && kill -0 "$cpid" 2>/dev/null; then
+      echo "sidecar_child_pid: $cpid (running)"
+    else
+      echo "sidecar_child_pid: $cpid (stale)"
+    fi
+  else
+    echo "sidecar_child_pid: <none>"
   fi
 }
 
@@ -600,6 +652,7 @@ commands:
   off              shortcut: disable + stop-sidecar
   start-sidecar    start local minisidecar
   stop-sidecar     stop local minisidecar
+  restart-sidecar  restart sidecar and kill stale listeners on 7781
   status           show plugin/slot/sidecar status
   audit-on         enable dual audit and restart sidecar
   audit-off        disable dual audit and restart sidecar
@@ -623,6 +676,7 @@ case "${1:-}" in
   off) cmd_off ;;
   start-sidecar) cmd_start_sidecar ;;
   stop-sidecar) cmd_stop_sidecar ;;
+  restart-sidecar) cmd_restart_sidecar ;;
   status) cmd_status ;;
   audit-on) cmd_audit_on "$@" ;;
   audit-off) cmd_audit_off ;;

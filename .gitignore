@@ -17,6 +17,7 @@ docs/mode-b-requirements.md
 # local benchmark/eval artifacts (not for production distribution)
 bench/scripts/*.py
 bench/scripts/*.sh
+bench/scripts/*.mjs
 bench/results/
 bench/report*.md
 bench/plots/

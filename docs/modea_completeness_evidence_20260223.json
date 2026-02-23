@@ -1,0 +1,52 @@
+{
+  "modea_missing_points_verify": {
+    "ok": true,
+    "auto_sleep_consolidation": {
+      "before_lastConsolidateAt": 0,
+      "after_lastConsolidateAt": 1771856884,
+      "ok": true
+    },
+    "profile_learning": {
+      "ok": true,
+      "tone": "keigo",
+      "avoid_suggestions": "1",
+      "retention.default": "deep",
+      "ttl.default_days": "7"
+    },
+    "quarantine": {
+      "ok": true,
+      "quarantine_has_trace": true,
+      "search_excluded": true
+    },
+    "consolidation": {
+      "ok": true,
+      "decayed": 16,
+      "merged": 6,
+      "conflict_groups": 2,
+      "capsules": 3,
+      "ephemeral_removed": true
+    }
+  },
+  "mem_channels_verify": {
+    "ok": true,
+    "order_ok": true,
+    "source_has_budget_gates": true,
+    "rules_tokens": 72,
+    "rules_budget": 80,
+    "memctx_tokens": 78,
+    "memctx_budget": 120
+  },
+  "switch_restore_verify": {
+    "ok": true,
+    "full_restore": true
+  },
+  "hook_wiring_verify": {
+    "ok": true,
+    "index_registers_before_compaction": true,
+    "before_compaction_calls_rebuild": true,
+    "index_registers_gateway_start_service": true,
+    "gateway_start_health_check": true,
+    "gateway_start_ingest_markdown": true,
+    "gateway_start_starts_background_consolidation": true
+  }
+}

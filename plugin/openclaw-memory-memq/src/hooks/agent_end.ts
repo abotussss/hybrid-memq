@@ -16,7 +16,16 @@ function collectAssistantTexts(event: any, hookCtx: any): string[] {
     seen.add(t);
     out.push(t);
   };
-  const bag = [event, hookCtx, event?.result, hookCtx?.result, event?.output, hookCtx?.output];
+  const bag = [
+    event,
+    hookCtx,
+    event?.result,
+    hookCtx?.result,
+    event?.output,
+    hookCtx?.output,
+    event?.response,
+    hookCtx?.response
+  ];
   for (const obj of bag) {
     const msgs = Array.isArray((obj as any)?.messages) ? (obj as any).messages : [];
     for (const m of msgs) {
@@ -40,12 +49,36 @@ function collectAssistantTexts(event: any, hookCtx: any): string[] {
     for (const p of payloads) {
       if (typeof p?.text === "string") accept(p.text);
     }
+    if (typeof (obj as any)?.text === "string") accept(String((obj as any).text));
   }
   return out;
 }
 
+function pickAuditTarget(event: any, hookCtx: any): string {
+  const containers = [event, hookCtx, event?.result, hookCtx?.result, event?.output, hookCtx?.output, event?.response, hookCtx?.response];
+  for (const obj of containers) {
+    if (!obj || typeof obj !== "object") continue;
+    const payloads = Array.isArray((obj as any).payloads) ? (obj as any).payloads : [];
+    for (let i = payloads.length - 1; i >= 0; i -= 1) {
+      const t = typeof payloads[i]?.text === "string" ? String(payloads[i].text).trim() : "";
+      if (t) return t;
+    }
+  }
+  const texts = collectAssistantTexts(event, hookCtx);
+  return texts.length ? texts[texts.length - 1] : "";
+}
+
 function tryPatchAssistantText(event: any, hookCtx: any, original: string, repaired: string): boolean {
-  const bag = [event, hookCtx, event?.result, hookCtx?.result, event?.output, hookCtx?.output];
+  const bag = [
+    event,
+    hookCtx,
+    event?.result,
+    hookCtx?.result,
+    event?.output,
+    hookCtx?.output,
+    event?.response,
+    hookCtx?.response
+  ];
   let patched = false;
   const patchContent = (obj: any): void => {
     const msgs = Array.isArray(obj?.messages) ? obj.messages : [];
@@ -83,9 +116,67 @@ function tryPatchAssistantText(event: any, hookCtx: any, original: string, repai
   return patched;
 }
 
+function forcePatchLastAssistant(event: any, hookCtx: any, replacement: string): boolean {
+  const bag = [
+    event,
+    hookCtx,
+    event?.result,
+    hookCtx?.result,
+    event?.output,
+    hookCtx?.output,
+    event?.response,
+    hookCtx?.response
+  ];
+  let patched = false;
+  for (const obj of bag) {
+    if (!obj || typeof obj !== "object") continue;
+    const msgs = Array.isArray((obj as any).messages) ? (obj as any).messages : [];
+    for (let i = msgs.length - 1; i >= 0; i -= 1) {
+      const m = msgs[i];
+      if (!m || typeof m !== "object" || m.role !== "assistant") continue;
+      if (typeof m.content === "string") {
+        m.content = replacement;
+        patched = true;
+        break;
+      }
+      if (Array.isArray(m.content)) {
+        let set = false;
+        for (const b of m.content) {
+          if (b && typeof b === "object" && b.type === "text") {
+            b.text = replacement;
+            set = true;
+          }
+        }
+        if (set) patched = true;
+        break;
+      }
+    }
+    const payloads = Array.isArray((obj as any).payloads) ? (obj as any).payloads : [];
+    if (payloads.length) {
+      const p = payloads[payloads.length - 1];
+      if (p && typeof p === "object" && typeof p.text === "string") {
+        p.text = replacement;
+        patched = true;
+      }
+    }
+    if (typeof (obj as any).text === "string") {
+      (obj as any).text = replacement;
+      patched = true;
+    }
+  }
+  return patched;
+}
+
+function policyBlockText(preferred?: string): string {
+  if ((preferred || "").toLowerCase() === "en") {
+    return "Output was blocked by MEMRULES/MEMSTYLE policy. Please rephrase the request.";
+  }
+  return "出力は MEMRULES/MEMSTYLE ポリシーにより抑止されました。要求を言い換えてください。";
+}
+
 export function createAgentEnd(api: any, sidecar: SidecarClient, surface: SurfaceCache, rt: RuntimeState) {
   return async (event: any, hookCtx: any): Promise<void> => {
-    const sessionId = hookCtx?.sessionKey ?? hookCtx?.sessionId ?? "default";
+    const sessionId = hookCtx?.sessionId ?? hookCtx?.sessionKey ?? "default";
     const refs = (event?.referencedMemoryIds ?? event?.memoryIds ?? []) as string[];
     if (refs.length) {
       const candidates = rt.lastCandidatesBySession.get(sessionId) ?? [];
@@ -103,12 +194,12 @@ export function createAgentEnd(api: any, sidecar: SidecarClient, surface: Surfac
     let audited = 0;
     let violations = 0;
     let repaired = 0;
-    for (const text of assistantTexts.slice(-2)) {
-      if (auditBypass) continue;
+    const target = pickAuditTarget(event, hookCtx);
+    if (target && !auditBypass) {
       try {
         const res = await sidecar.auditOutput({
           sessionId,
-          text,
+          text: target,
           allowedLanguages: allowed,
           preferredLanguage: preferred,
           styleProfile: style
@@ -116,7 +207,13 @@ export function createAgentEnd(api: any, sidecar: SidecarClient, surface: Surfac
         audited += 1;
         if (!res.passed) violations += 1;
         if (res.repairedApplied && res.repairedText) {
-          if (tryPatchAssistantText(event, hookCtx, text, res.repairedText)) repaired += 1;
+          if (tryPatchAssistantText(event, hookCtx, target, res.repairedText) || forcePatchLastAssistant(event, hookCtx, res.repairedText)) {
+            repaired += 1;
+          }
+        } else if (!res.passed) {
+          if (forcePatchLastAssistant(event, hookCtx, policyBlockText(preferred))) {
+            repaired += 1;
+          }
         }
       } catch {
         // Best effort.

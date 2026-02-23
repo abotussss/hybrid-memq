@@ -91,6 +91,36 @@ EXTRA_SCRIPT_PATTERNS = {
     "th": re.compile(r"[\u0E00-\u0E7F]"),
     "el": re.compile(r"[\u0370-\u03FF]"),
 }
+EN_TOKEN_RE = re.compile(r"(?<![A-Za-z])[A-Za-z]{3,}(?![A-Za-z])")
+
+# Simplified Chinese characters likely to appear in mixed-language drift.
+SIMPLIFIED_HAN_CHARS = set("这们为华术风龙汉语话爱网云务后开关见边还进")
+ZH_MARKER_HAN_CHARS = set("这们为华术风龙汉语话爱网云务后开关见边还进您劳效")
+SIMPLIFIED_TO_TRAD = str.maketrans(
+    {
+        "这": "這",
+        "们": "們",
+        "为": "為",
+        "华": "華",
+        "术": "術",
+        "风": "風",
+        "龙": "龍",
+        "汉": "漢",
+        "语": "語",
+        "话": "話",
+        "爱": "愛",
+        "网": "網",
+        "云": "雲",
+        "务": "務",
+        "后": "後",
+        "开": "開",
+        "关": "關",
+        "见": "見",
+        "边": "邊",
+        "还": "還",
+        "进": "進",
+    }
+)
 
 
 def conn():
@@ -664,10 +694,29 @@ def detect_language_violation(text: str, allowed: List[str]) -> List[str]:
                 if han >= 3 and kana == 0:
                     reasons.append("contains_nonpreferred_han_segment")
                     break
+        if any(ch in SIMPLIFIED_HAN_CHARS for ch in t):
+            reasons.append("contains_simplified_han_not_allowed")
+        if any(ch in ZH_MARKER_HAN_CHARS for ch in t):
+            reasons.append("contains_chinese_marker_han_not_allowed")
     for code, pat in EXTRA_SCRIPT_PATTERNS.items():
         if code not in allowed_set and pat.search(t):
             reasons.append(f"contains_{code}_script_not_allowed")
     return reasons
+
+
+def detect_preferred_language_drift(text: str, preferred_language: str) -> List[str]:
+    t = str(text or "")
+    p = str(preferred_language or "").strip().lower()
+    out: List[str] = []
+    if p == "ja":
+        en_words = EN_TOKEN_RE.findall(t)
+        if len(en_words) >= 2:
+            out.append("contains_nonpreferred_english_segment")
+    elif p == "en":
+        ja_chars = len(re.findall(r"[\u3040-\u30FF\u4E00-\u9FFF]", t))
+        if ja_chars >= 4:
+            out.append("contains_nonpreferred_japanese_segment")
+    return out
 
 
 def detect_secret_violation(text: str) -> List[str]:
@@ -721,7 +770,9 @@ def detect_style_violation(text: str, style_profile: Dict) -> List[str]:
             reasons.append("style_tone_keigo_violation")
     # Natural Japanese style consistency.
     if "translated_chinese_style_japanese" in avoid:
-        if re.search(r"(でしょうかね|しますです|ことができますです|なのですか\?)", t):
+        if re.search(r"(でしょうかね|しますです|ことができますです|なのですか\?|中華系(?:\s*style)?|中华系(?:\s*style)?)", t, re.I):
+            reasons.append("style_translated_japanese_violation")
+        if re.search(r"避免", t):
             reasons.append("style_translated_japanese_violation")
     if "anime_style" in avoid or "anime" in speaking:
         if re.search(r"(なのだ|だぞ|にゃ|であります|だっちゃ)", t):
@@ -748,6 +799,8 @@ def deterministic_style_repair(text: str, style_profile: Dict) -> str:
         out = re.sub(r"(なのだ|だぞ|にゃ|であります|だっちゃ)", "です", out)
     if "translated_chinese_style_japanese" in avoid:
         out = re.sub(r"(しますです|ことができますです)", "します", out)
+        out = re.sub(r"(中華系(?:\s*style)?|中华系(?:\s*style)?)", "機械翻訳調", out, flags=re.I)
+        out = re.sub(r"避免", "回避", out)
     out = re.sub(r"[!！]{3,}", "！", out)
     out = re.sub(r"[ \t]{2,}", " ", out)
     return out.strip()
@@ -764,6 +817,7 @@ def deterministic_language_repair(text: str, allowed_languages: List[str], prefe
     if "ko" not in allowed_set:
         out = re.sub(r"[\uAC00-\uD7AF]+", " ", out)
     if "zh" not in allowed_set and "ja" in allowed_set:
+        out = out.translate(SIMPLIFIED_TO_TRAD)
         segs = re.split(r"([。．.!?！？\n]+)", out)
         rebuilt: List[str] = []
         for seg in segs:
@@ -782,6 +836,15 @@ def deterministic_language_repair(text: str, allowed_languages: List[str], prefe
         out = "".join(rebuilt)
     if "en" not in allowed_set:
         out = re.sub(r"[A-Za-z]+", " ", out)
+    pref = str(preferred_language or "").strip().lower()
+    if pref == "ja":
+        out = EN_TOKEN_RE.sub(" ", out)
+        def _drop_zh_marker_runs(m: re.Match[str]) -> str:
+            seg = m.group(0)
+            return " " if any(ch in ZH_MARKER_HAN_CHARS for ch in seg) else seg
+        out = re.sub(r"[\u4E00-\u9FFF]{2,}", _drop_zh_marker_runs, out)
+    elif pref == "en":
+        out = re.sub(r"[\u3040-\u30FF\u4E00-\u9FFF]+", " ", out)
     for code, pat in EXTRA_SCRIPT_PATTERNS.items():
         if code not in allowed_set:
             out = pat.sub(" ", out)
@@ -906,7 +969,8 @@ def audit_output_text(
     inj_r = detect_injection_compliance(text)
     obf_r = detect_obfuscation_risk(text)
     style_r = detect_style_violation(text, style_profile or {})
-    reasons = lang_r + secret_r + inj_r + obf_r + style_r
+    pref_r = detect_preferred_language_drift(text, preferred_language)
+    reasons = lang_r + pref_r + secret_r + inj_r + obf_r + style_r
     risk = 0.0
     if reasons:
         weights = {
@@ -923,6 +987,10 @@ def audit_output_text(
             "contains_cyrillic": 0.25,
             "contains_non_japanese_han_heavy_text": 0.2,
             "contains_nonpreferred_han_segment": 0.2,
+            "contains_simplified_han_not_allowed": 0.2,
+            "contains_chinese_marker_han_not_allowed": 0.25,
+            "contains_nonpreferred_english_segment": 0.1,
+            "contains_nonpreferred_japanese_segment": 0.1,
             "contains_ar_script_not_allowed": 0.2,
             "contains_he_script_not_allowed": 0.2,
             "contains_hi_script_not_allowed": 0.2,
@@ -943,7 +1011,7 @@ def audit_output_text(
         if sum(1 for v in cats.values() if v) >= 2:
             risk = min(1.0, risk + 0.15)
     secondary = {"enabled": LLM_AUDIT_ENABLED, "called": False}
-    has_lang_violation = len(lang_r) > 0
+    has_lang_violation = (len(lang_r) + len(pref_r)) > 0
     secondary_trigger = (
         risk >= LLM_AUDIT_THRESHOLD
         or ("secret_intent_phrase" in reasons)
@@ -969,23 +1037,25 @@ def audit_output_text(
             if not post_lang:
                 repaired_applied = True
                 repaired_text = candidate
-                reasons = [r for r in reasons if r not in lang_r]
+                reasons = [r for r in reasons if r not in (lang_r + pref_r)]
                 if not secret_r and not inj_r and not obf_r:
                     risk = min(risk, 0.05)
-    if has_lang_violation and not repaired_applied and AUDIT_LANG_REPAIR_ENABLED:
-        candidate = deterministic_language_repair(text, allowed_languages, preferred_language)
-        if candidate and candidate != text:
+    if has_lang_violation and AUDIT_LANG_REPAIR_ENABLED:
+        base_text = repaired_text or text
+        candidate = deterministic_language_repair(base_text, allowed_languages, preferred_language)
+        if candidate and candidate != base_text:
             post_lang = detect_language_violation(candidate, allowed_languages)
             if not post_lang:
                 repaired_applied = True
                 repaired_text = candidate
-                reasons = [r for r in reasons if r not in lang_r]
+                reasons = [r for r in reasons if r not in (lang_r + pref_r)]
                 if not secret_r and not inj_r and not obf_r:
                     risk = min(risk, 0.05)
     has_style_violation = len(style_r) > 0
-    if has_style_violation and not repaired_applied:
-        candidate = deterministic_style_repair(repaired_text or text, style_profile or {})
-        if candidate and candidate != (repaired_text or text):
+    if has_style_violation:
+        base_text = repaired_text or text
+        candidate = deterministic_style_repair(base_text, style_profile or {})
+        if candidate and candidate != base_text:
             post_style = detect_style_violation(candidate, style_profile or {})
             post_lang = detect_language_violation(candidate, allowed_languages)
             if not post_style and not post_lang:
@@ -994,11 +1064,12 @@ def audit_output_text(
                 reasons = [r for r in reasons if r not in style_r]
                 if not secret_r and not inj_r and not obf_r:
                     risk = min(risk, 0.08)
+    final_text = repaired_text or text
     style_strict = bool((style_profile or {}).get("strict"))
-    unresolved_style_violation = bool(style_strict and has_style_violation and not repaired_applied)
+    unresolved_style_violation = bool(style_strict and len(detect_style_violation(final_text, style_profile or {})) > 0)
     if unresolved_style_violation and "unresolved_style_violation" not in reasons:
         reasons.append("unresolved_style_violation")
-    unresolved_lang_violation = bool(has_lang_violation and not repaired_applied)
+    unresolved_lang_violation = bool(len(detect_language_violation(final_text, allowed_languages)) > 0)
     if unresolved_lang_violation and "unresolved_language_violation" not in reasons:
         reasons.append("unresolved_language_violation")
     has_secret_violation = bool(secret_r)
@@ -1088,7 +1159,6 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(b)
 
     def do_GET(self):
-        _update_activity()
         pr = urlparse(self.path)
         p = pr.path
         qs = parse_qs(pr.query)
@@ -1329,9 +1399,22 @@ class H(BaseHTTPRequestHandler):
 def main():
     init_db()
     threading.Thread(target=idle_loop, daemon=True).start()
-    s = HTTPServer(("127.0.0.1", 7781), H)
-    print("minisidecar listening on 127.0.0.1:7781")
-    s.serve_forever()
+    class ReusableHTTPServer(HTTPServer):
+        allow_reuse_address = True
+
+    server = None
+    last_err: Exception | None = None
+    for _ in range(8):
+        try:
+            server = ReusableHTTPServer(("127.0.0.1", 7781), H)
+            break
+        except OSError as e:
+            last_err = e
+            time.sleep(0.6)
+    if server is None:
+        raise RuntimeError(f"failed to bind 127.0.0.1:7781: {last_err}")
+    print("minisidecar listening on 127.0.0.1:7781", flush=True)
+    server.serve_forever()
 
 
 if __name__ == "__main__":

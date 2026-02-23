@@ -44,11 +44,13 @@ function detectExplicitRequestedLanguage(text: string): string | null {
 
 function inferHabitualLanguages(prompt: string, messages: any[]): string[] {
   const counts: Record<string, number> = { ja: 0, en: 0, zh: 0, ko: 0, ru: 0, ar: 0, he: 0, hi: 0, th: 0, el: 0 };
+  const zhSignal = /[这们为国华术体风龙汉语话爱网云务后开关见边还进]/g;
   const collect = (s: string): void => {
     if (!s) return;
     counts.ja += (s.match(/[ぁ-ゖァ-ヺ]/g) || []).length;
     counts.en += (s.match(/[A-Za-z]/g) || []).length;
-    counts.zh += (s.match(/[\u4E00-\u9FFF]/g) || []).length;
+    // Do not treat generic Han as zh signal: Japanese text naturally contains Han.
+    counts.zh += (s.match(zhSignal) || []).length;
     counts.ko += (s.match(/[\uAC00-\uD7AF]/g) || []).length;
     counts.ru += (s.match(/[\u0400-\u04FF]/g) || []).length;
     counts.ar += (s.match(/[\u0600-\u06FF]/g) || []).length;
@@ -159,7 +161,7 @@ export function createBeforePromptBuild(
 ) {
   return async (event: any, hookCtx: any): Promise<any> => {
     const t0 = Date.now();
-    const sessionId = hookCtx?.sessionKey ?? hookCtx?.sessionId ?? "default";
+    const sessionId = hookCtx?.sessionId ?? hookCtx?.sessionKey ?? "default";
     const nowSec = Math.floor(Date.now() / 1000);
 
     const budget = getCfg<number>(api, "memq.budgetTokens", 120);
@@ -258,10 +260,12 @@ export function createBeforePromptBuild(
     const explicitLang = detectExplicitRequestedLanguage(prompt);
     const promptLang = detectPromptPrimaryLanguage(prompt);
     const habitual = inferHabitualLanguages(prompt, messages);
-    allowedLang = [...new Set([...allowedLang, ...habitual, "en"])];
+    // Keep auto language conservative to avoid cross-turn contamination.
+    const habitualSafe = habitual.filter((x) => x === "ja" || x === "en");
+    allowedLang = [...new Set([...allowedLang, ...habitualSafe, "en"])];
     if (explicitLang) {
-      // Explicit language request is user-intended output; bypass audit for this turn.
-      auditBypass = true;
+      // Explicit language request is user-intended output: allow it, but keep audit enabled.
+      auditBypass = false;
       if (!allowedLang.length) {
         allowedLang = [explicitLang];
       } else if (!allowedLang.includes(explicitLang)) {

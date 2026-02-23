@@ -215,6 +215,34 @@ EXTRA_SCRIPT_PATTERNS = {
     "th": re.compile(r"[\u0E00-\u0E7F]"),
     "el": re.compile(r"[\u0370-\u03FF]"),
 }
+EN_TOKEN_RE = re.compile(r"(?<![A-Za-z])[A-Za-z]{3,}(?![A-Za-z])")
+SIMPLIFIED_HAN_CHARS = set("这们为华术风龙汉语话爱网云务后开关见边还进")
+ZH_MARKER_HAN_CHARS = set("这们为华术风龙汉语话爱网云务后开关见边还进您劳效")
+SIMPLIFIED_TO_TRAD = str.maketrans(
+    {
+        "这": "這",
+        "们": "們",
+        "为": "為",
+        "华": "華",
+        "术": "術",
+        "风": "風",
+        "龙": "龍",
+        "汉": "漢",
+        "语": "語",
+        "话": "話",
+        "爱": "愛",
+        "网": "網",
+        "云": "雲",
+        "务": "務",
+        "后": "後",
+        "开": "開",
+        "关": "關",
+        "见": "見",
+        "边": "邊",
+        "还": "還",
+        "进": "進",
+    }
+)
 PREF_TAU = {
     "tone": 21 * 24 * 3600,
     "verbosity": 14 * 24 * 3600,
@@ -280,6 +308,10 @@ def _language_violations(text: str, allowed: List[str]) -> List[str]:
             if seg_han >= 3 and seg_kana == 0:
                 violations.append("contains_nonpreferred_han_segment")
                 break
+    if "zh" not in allowed_set and any(ch in SIMPLIFIED_HAN_CHARS for ch in s):
+        violations.append("contains_simplified_han_not_allowed")
+    if "zh" not in allowed_set and any(ch in ZH_MARKER_HAN_CHARS for ch in s):
+        violations.append("contains_chinese_marker_han_not_allowed")
     if "ru" not in allowed_set and DISALLOWED_LANG_CHARS["ru"].search(s):
         violations.append("contains_cyrillic")
     if "ko" not in allowed_set and re.search(r"[\uAC00-\uD7AF]", s):
@@ -292,6 +324,19 @@ def _language_violations(text: str, allowed: List[str]) -> List[str]:
     if "en" not in allowed_set and ALLOWED_LANG_CHARS["en"].search(s):
         violations.append("contains_english_but_not_allowed")
     return sorted(set(violations))
+
+
+def _preferred_language_drift(text: str, preferred_language: str) -> List[str]:
+    s = str(text or "")
+    p = str(preferred_language or "").strip().lower()
+    out: List[str] = []
+    if p == "ja":
+        if len(EN_TOKEN_RE.findall(s)) >= 2:
+            out.append("contains_nonpreferred_english_segment")
+    elif p == "en":
+        if len(re.findall(r"[\u3040-\u30FF\u4E00-\u9FFF]", s)) >= 4:
+            out.append("contains_nonpreferred_japanese_segment")
+    return out
 
 
 def _sanitize_text(v: str, max_len: int) -> str:
@@ -329,7 +374,9 @@ def _style_violations(text: str, style_profile: Dict[str, Any]) -> List[str]:
     out: List[str] = []
     if tone == "keigo" and re.search(r"(だよ|だぜ|じゃん|っす|www|w{2,}|マジ|やばい|うける)", s, re.I):
         out.append("style_tone_keigo_violation")
-    if "translated_chinese_style_japanese" in avoid and re.search(r"(しますです|ことができますです|でしょうかね)", s):
+    if "translated_chinese_style_japanese" in avoid and re.search(r"(しますです|ことができますです|でしょうかね|中華系(?:\s*style)?|中华系(?:\s*style)?)", s, re.I):
+        out.append("style_translated_japanese_violation")
+    if "translated_chinese_style_japanese" in avoid and re.search(r"避免", s):
         out.append("style_translated_japanese_violation")
     if "anime_style" in avoid or "anime" in speaking:
         if re.search(r"(なのだ|だぞ|にゃ|であります|だっちゃ)", s):
@@ -354,6 +401,8 @@ def _deterministic_style_repair(text: str, style_profile: Dict[str, Any]) -> str
         out = re.sub(r"(なのだ|だぞ|にゃ|であります|だっちゃ)", "です", out)
     if "translated_chinese_style_japanese" in avoid:
         out = re.sub(r"(しますです|ことができますです)", "します", out)
+        out = re.sub(r"(中華系(?:\s*style)?|中华系(?:\s*style)?)", "機械翻訳調", out, flags=re.I)
+        out = re.sub(r"避免", "回避", out)
     out = re.sub(r"[!！]{3,}", "！", out)
     out = re.sub(r"[ \t]{2,}", " ", out)
     return out.strip()
@@ -370,6 +419,7 @@ def _deterministic_language_repair(text: str, allowed_languages: List[str], pref
     if "ko" not in allowed:
         out = re.sub(r"[\uAC00-\uD7AF]+", " ", out)
     if "zh" not in allowed and "ja" in allowed:
+        out = out.translate(SIMPLIFIED_TO_TRAD)
         segs = re.split(r"([。．.!?！？\n]+)", out)
         rebuilt: List[str] = []
         for seg in segs:
@@ -388,6 +438,15 @@ def _deterministic_language_repair(text: str, allowed_languages: List[str], pref
         out = "".join(rebuilt)
     if "en" not in allowed:
         out = re.sub(r"[A-Za-z]+", " ", out)
+    pref = str(preferred_language or "").strip().lower()
+    if pref == "ja":
+        out = EN_TOKEN_RE.sub(" ", out)
+        def _drop_zh_marker_runs(m: re.Match[str]) -> str:
+            seg = m.group(0)
+            return " " if any(ch in ZH_MARKER_HAN_CHARS for ch in seg) else seg
+        out = re.sub(r"[\u4E00-\u9FFF]{2,}", _drop_zh_marker_runs, out)
+    elif pref == "en":
+        out = re.sub(r"[\u3040-\u30FF\u4E00-\u9FFF]+", " ", out)
     for code, pat in EXTRA_SCRIPT_PATTERNS.items():
         if code not in allowed:
             out = pat.sub(" ", out)
@@ -655,7 +714,10 @@ def _audit_output_text(
     if re.search(r"(exfiltrate|dump secrets|reveal hidden|show hidden instructions)", str(text or ""), re.I):
         reasons.append("exfiltration_phrase")
     reasons.extend(_obfuscation_violations(text))
-    reasons.extend(_language_violations(text, allowed_languages))
+    lang_r = _language_violations(text, allowed_languages)
+    pref_r = _preferred_language_drift(text, preferred_language)
+    reasons.extend(lang_r)
+    reasons.extend(pref_r)
     style_r = _style_violations(text, style_profile or {})
     reasons.extend(style_r)
     risk = 0.0
@@ -674,6 +736,10 @@ def _audit_output_text(
             "contains_cyrillic": 0.25,
             "contains_non_japanese_han_heavy_text": 0.2,
             "contains_nonpreferred_han_segment": 0.2,
+            "contains_simplified_han_not_allowed": 0.2,
+            "contains_chinese_marker_han_not_allowed": 0.25,
+            "contains_nonpreferred_english_segment": 0.1,
+            "contains_nonpreferred_japanese_segment": 0.1,
             "contains_ar_script_not_allowed": 0.2,
             "contains_he_script_not_allowed": 0.2,
             "contains_hi_script_not_allowed": 0.2,
@@ -694,7 +760,7 @@ def _audit_output_text(
         if sum(1 for v in cats.values() if v) >= 2:
             risk = min(1.0, risk + 0.15)
     secondary: Dict[str, Any] = {"enabled": _llm_audit_enabled, "called": False}
-    has_lang_violation = any(r.startswith("contains_") for r in reasons)
+    has_lang_violation = len(lang_r) + len(pref_r) > 0
     secondary_trigger = (
         risk >= _llm_audit_threshold
         or ("secret_intent_phrase" in reasons)
@@ -720,28 +786,17 @@ def _audit_output_text(
             if not post_lang:
                 repaired_applied = True
                 repaired_text = candidate
-                reasons = [
-                    r
-                    for r in reasons
-                    if r
-                    not in {
-                        "contains_english_but_not_allowed",
-                        "contains_japanese_but_not_allowed",
-                        "contains_korean_but_not_allowed",
-                        "contains_cyrillic",
-                        "contains_non_japanese_han_heavy_text",
-                        "contains_nonpreferred_han_segment",
-                    }
-                ]
+                reasons = [r for r in reasons if r not in (lang_r + pref_r)]
                 has_secret = any(r in {"secret_pattern_match", "private_key_marker", "secret_assignment_like"} for r in reasons)
                 has_policy = any(r in {"mentions_prompt_override_terms", "exfiltration_phrase"} for r in reasons)
                 has_obf = "obfuscated_secret_like_blob" in reasons
                 if not has_secret and not has_policy and not has_obf:
                     risk = min(risk, 0.05)
     has_style_violation = len(style_r) > 0
-    if has_style_violation and not repaired_applied:
-        candidate = _deterministic_style_repair(repaired_text or text, style_profile or {})
-        if candidate and candidate != (repaired_text or text):
+    if has_style_violation:
+        base_text = repaired_text or text
+        candidate = _deterministic_style_repair(base_text, style_profile or {})
+        if candidate and candidate != base_text:
             post_style = _style_violations(candidate, style_profile or {})
             post_lang = _language_violations(candidate, allowed_languages)
             if not post_style and not post_lang:
@@ -754,35 +809,26 @@ def _audit_output_text(
                 if not has_secret and not has_policy and not has_obf:
                     risk = min(risk, 0.08)
     style_strict = bool((style_profile or {}).get("strict"))
-    unresolved_style_violation = bool(style_strict and has_style_violation and not repaired_applied)
+    final_text = repaired_text or text
+    unresolved_style_violation = bool(style_strict and len(_style_violations(final_text, style_profile or {})) > 0)
     if unresolved_style_violation and "unresolved_style_violation" not in reasons:
         reasons.append("unresolved_style_violation")
-    if has_lang_violation and not repaired_applied and _audit_lang_repair_enabled:
-        candidate = _deterministic_language_repair(text, allowed_languages, preferred_language)
-        if candidate and candidate != text:
+    if has_lang_violation and _audit_lang_repair_enabled:
+        base_text = repaired_text or text
+        candidate = _deterministic_language_repair(base_text, allowed_languages, preferred_language)
+        if candidate and candidate != base_text:
             post_lang = _language_violations(candidate, allowed_languages)
             if not post_lang:
                 repaired_applied = True
                 repaired_text = candidate
-                reasons = [
-                    r
-                    for r in reasons
-                    if r
-                    not in {
-                        "contains_english_but_not_allowed",
-                        "contains_japanese_but_not_allowed",
-                        "contains_korean_but_not_allowed",
-                        "contains_cyrillic",
-                        "contains_non_japanese_han_heavy_text",
-                        "contains_nonpreferred_han_segment",
-                    }
-                ]
+                reasons = [r for r in reasons if r not in (lang_r + pref_r)]
                 has_secret = any(r in {"secret_pattern_match", "private_key_marker", "secret_assignment_like"} for r in reasons)
                 has_policy = any(r in {"mentions_prompt_override_terms", "exfiltration_phrase"} for r in reasons)
                 has_obf = "obfuscated_secret_like_blob" in reasons
                 if not has_secret and not has_policy and not has_obf:
                     risk = min(risk, 0.05)
-    unresolved_lang_violation = bool(has_lang_violation and not repaired_applied)
+    final_text = repaired_text or text
+    unresolved_lang_violation = bool(len(_language_violations(final_text, allowed_languages)) > 0)
     if unresolved_lang_violation and "unresolved_language_violation" not in reasons:
         reasons.append("unresolved_language_violation")
     has_secret_violation = any(r in {"secret_pattern_match", "private_key_marker", "secret_assignment_like"} for r in reasons)
