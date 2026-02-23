@@ -901,8 +901,14 @@ def audit_output_text(session_id: str, text: str, allowed_languages: List[str], 
     unresolved_lang_violation = bool(has_lang_violation and not repaired_applied)
     if unresolved_lang_violation and "unresolved_language_violation" not in reasons:
         reasons.append("unresolved_language_violation")
+    has_secret_violation = bool(secret_r)
+    if has_secret_violation and "secret_violation_mandatory_block" not in reasons:
+        reasons.append("secret_violation_mandatory_block")
     blocked = bool(
-        unresolved_lang_violation or risk >= AUDIT_BLOCK_THRESHOLD or (secondary.get("called") and secondary.get("block"))
+        has_secret_violation
+        or unresolved_lang_violation
+        or risk >= AUDIT_BLOCK_THRESHOLD
+        or (secondary.get("called") and secondary.get("block"))
     )
     passed = 0 if blocked else 1
     rec = {
