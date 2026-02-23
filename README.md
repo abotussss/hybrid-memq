@@ -61,7 +61,7 @@ uvicorn memq_sidecar.app:app --host 127.0.0.1 --port 7781
 
 ### 4) Enable hybrid-memq in OpenClaw
 ```bash
-scripts/memq-openclaw.sh quickstart
+scripts/memq-openclaw.sh setup
 ```
 
 ### 5) Verify runtime
@@ -76,6 +76,8 @@ curl -sS http://127.0.0.1:7781/health
 | Command | Purpose |
 |---|---|
 | `install` | Install/link plugin into OpenClaw |
+| `setup` | Interactive first-run wizard (recommended) |
+| `configure` | Interactive command menu for ongoing operations |
 | `enable` | Enable `openclaw-memory-memq` memory slot (backup existing config) |
 | `disable` | Restore previous OpenClaw config from backup |
 | `on` | Shortcut for `quickstart` |
@@ -83,7 +85,7 @@ curl -sS http://127.0.0.1:7781/health
 | `start-sidecar` | Start local sidecar |
 | `stop-sidecar` | Stop local sidecar |
 | `status` | Show plugin/slot/sidecar status |
-| `quickstart` | `install + start-sidecar + enable + status` |
+| `quickstart` | `install + start-sidecar + enable + status` (non-interactive) |
 | `audit-on <url> <model> [risk_threshold] [block_threshold]` | Enable secondary LLM audit for high-risk outputs |
 | `audit-off` | Disable secondary LLM audit (MEMQ itself stays enabled) |
 | `audit-primary-on` | Enable primary output audit (rule-based) |
@@ -92,6 +94,11 @@ curl -sS http://127.0.0.1:7781/health
 | `memstyle-on` | Enable MEMSTYLE v1 injection |
 | `memstyle-off` | Disable MEMSTYLE v1 injection |
 | `memstyle-status` | Show MEMSTYLE v1 enable state |
+
+### CLI UX
+- `setup`: first-run wizard (ASCII banner + guided prompts)
+- `configure`: interactive operation menu for day-to-day switching
+- `quickstart`: non-interactive path for scripts/CI
 
 ## How It Works
 ### Runtime (per turn)
@@ -113,11 +120,22 @@ The sidecar monitors activity and runs consolidation when idle:
 
 No API LLM call is required for this idle consolidation loop.
 
-## MEMCTX and MEMRULES
-- **MEMCTX**: compact recall context (memory facts), fixed token budget.
-- **MEMRULES**: strict rule channel (separate budget) for non-negotiable constraints.
+## MEMCTX, MEMRULES, MEMSTYLE
+- **MEMCTX**: compact memory recall channel (`k=v` facts), fixed budget.
+- **MEMRULES**: strict policy channel for rules that should be applied every turn.
+- **MEMSTYLE**: compact style/persona channel for stable voice and response feel.
 
-Both are budgeted to avoid prompt growth outliers.
+All three channels are budgeted separately to prevent prompt growth outliers.
+
+### Why MEMRULES matters
+MEMORY-style retrieval alone is relevance-based, so critical rules can be omitted on low-relevance turns.  
+MEMRULES exists to keep hard constraints consistently present with a dedicated budget.
+
+What this gives you:
+- stronger enforcement of owner/user-defined policies (language policy, safety constraints, output boundaries)
+- less prompt-injection persistence (only whitelisted structured rules are carried)
+- lower risk of "forgotten rules" in long sessions
+- predictable token ceiling for policy instructions
 
 ### MEMRULES Enforcement
 - Budget isolation:
@@ -132,6 +150,18 @@ Both are budgeted to avoid prompt growth outliers.
   - explicit user request like \"reply in Chinese/Korean/Russian\" can bypass output-language audit for that turn
 - Structured compact format is used to prevent long prompt inflation.
 - Quarantined/suspicious facts are never promoted into rules.
+
+### Why MEMSTYLE matters
+Many models drift in tone/persona across long runs, and some multilingual models can produce awkward translated style artifacts.  
+MEMSTYLE provides a tiny, explicit style anchor to preserve consistency without long prompt prose.
+
+What this gives you:
+- stable tone/persona across sessions
+- less "style reset" after many turns
+- lower need for repeated user reminders ("speak politely", "be concise")
+- compact style control with strict upper token limit
+
+MEMSTYLE is optional and can be toggled per environment.
 
 ### Output Audit Flow
 1. Sidecar runs primary policy audit and computes `riskScore`.
@@ -188,6 +218,12 @@ Rollback is one command:
 scripts/memq-openclaw.sh disable
 ```
 
+Interactive operations:
+```bash
+scripts/memq-openclaw.sh setup
+scripts/memq-openclaw.sh configure
+```
+
 ## Security Model
 - Secrets are never stored in MEMCTX.
 - Suspicious memory facts are quarantined and excluded from recall output.
@@ -242,7 +278,7 @@ python3 minisidecar.py
 
 4) MEMQ を有効化
 ```bash
-scripts/memq-openclaw.sh quickstart
+scripts/memq-openclaw.sh setup
 ```
 
 5) 動作確認
@@ -257,6 +293,8 @@ curl -sS http://127.0.0.1:7781/health
 | コマンド | 説明 |
 |---|---|
 | `install` | OpenClaw にプラグインをリンク/インストール |
+| `setup` | 初回導入向けの対話ウィザード（推奨） |
+| `configure` | 運用中の対話メニュー（CLIで設定変更） |
 | `enable` | メモリスロットを `openclaw-memory-memq` に切替（既存設定を退避） |
 | `disable` | 退避した設定を復元して元方式へ戻す |
 | `on` | `quickstart` のショートカット |
@@ -264,7 +302,7 @@ curl -sS http://127.0.0.1:7781/health
 | `start-sidecar` | sidecar を起動 |
 | `stop-sidecar` | sidecar を停止 |
 | `status` | 現在の設定・接続状態を表示 |
-| `quickstart` | `install + start-sidecar + enable + status` を実行 |
+| `quickstart` | `install + start-sidecar + enable + status` を実行（非対話） |
 | `audit-on <url> <model> [risk_threshold] [block_threshold]` | 高リスク時の二次LLM監査を有効化 |
 | `audit-off` | 二次LLM監査のみ無効化（MEMQ本体は有効） |
 | `audit-primary-on` | 一次出力監査（ルールベース）を有効化 |
@@ -273,6 +311,11 @@ curl -sS http://127.0.0.1:7781/health
 | `memstyle-on` | MEMSTYLE v1 注入を有効化 |
 | `memstyle-off` | MEMSTYLE v1 注入を無効化 |
 | `memstyle-status` | MEMSTYLE v1 の有効状態を表示 |
+
+### CLI UX
+- `setup`: 初回導入向けウィザード（ASCIIバナー + 質問形式）
+- `configure`: 運用中の設定切替メニュー
+- `quickstart`: 自動化向けの非対話セットアップ
 
 ### 仕組み（実行時）
 1. 現在ターンのクエリ埋め込みを生成  
@@ -293,11 +336,22 @@ curl -sS http://127.0.0.1:7781/health
 
 この整理は API LLM を呼ばず、ローカル処理のみで行います。
 
-### MEMCTX / MEMRULES
-- **MEMCTX**: 想起情報（記憶）チャネル。固定トークン予算で注入。
-- **MEMRULES**: 厳格ルールチャネル。記憶とは別予算で管理。
+### MEMCTX / MEMRULES / MEMSTYLE
+- **MEMCTX**: 想起情報（記憶）チャネル。`k=v` 形式で固定予算注入。
+- **MEMRULES**: 毎ターン確実に効かせたい厳格ルールの専用チャネル。
+- **MEMSTYLE**: 口調・人格・話し方の一貫性を保つための専用チャネル。
 
-両方とも予算制約つきで、入力肥大化を防ぎます。
+3チャネルを別予算で管理し、入力肥大化を防ぎます。
+
+### なぜ MEMRULES が必要か
+記憶検索だけだと「関連度が低いターン」で重要ルールが落ちることがあります。  
+MEMRULES はそれを防ぐため、厳格ルールを常時・軽量に注入する仕組みです。
+
+得られる効果:
+- ユーザー定義ルール（言語方針・安全制約・出力境界）の安定適用
+- 永続的プロンプト汚染の抑制（ホワイトリスト化された構造化ルールのみ昇格）
+- 長大会話でも「ルール忘れ」を減らす
+- ルール用トークン上限を予測可能に維持
 
 ### MEMRULES の厳格化
 - 予算を分離して運用:
@@ -312,6 +366,18 @@ curl -sS http://127.0.0.1:7781/health
   - 「中国語で返して」のような明示要求ターンは、そのターンのみ言語監査をバイパス可能
 - ルールは短い構造化形式で注入し、長文化を防止
 - quarantine 対象や汚染疑い facts はルールへ昇格しない
+
+### なぜ MEMSTYLE が必要か
+長い会話では口調・人格が揺れやすく、特に多言語系モデルでは翻訳調の違和感が出ることがあります。  
+MEMSTYLE は短いスタイル固定情報を毎ターン注入し、文体ドリフトを抑えます。
+
+得られる効果:
+- 口調・人格・話し方の一貫性向上
+- ターンが進んでもスタイル崩壊しにくい
+- 「敬語で」「簡潔に」などの再指示回数を削減
+- 小さい予算で安定化（`memq.style.budgetTokens` で上限固定）
+
+MEMSTYLE は任意機能で、環境ごとにON/OFFできます。
 
 ### 出力監査フロー
 1. sidecar が一次監査で `riskScore` を算出  
@@ -336,6 +402,12 @@ curl -sS http://127.0.0.1:7781/audit/stats
 Sidecar環境変数:
 - `MEMQ_AUDIT_LANG_ALWAYS_SECONDARY=1`
 - `MEMQ_AUDIT_LANG_REPAIR_ENABLED=1`
+
+対話式セットアップ:
+```bash
+scripts/memq-openclaw.sh setup
+scripts/memq-openclaw.sh configure
+```
 
 ### 設定項目（主要）
 - `memq.sidecarUrl`（既定: `http://127.0.0.1:7781`）

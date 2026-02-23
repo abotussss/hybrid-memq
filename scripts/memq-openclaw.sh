@@ -24,6 +24,217 @@ need_cmd() {
 need_cmd openclaw
 need_cmd python3
 
+if [[ -t 1 ]]; then
+  C_RESET="$(printf '\033[0m')"
+  C_CYAN="$(printf '\033[36m')"
+  C_GREEN="$(printf '\033[32m')"
+  C_YELLOW="$(printf '\033[33m')"
+  C_DIM="$(printf '\033[2m')"
+else
+  C_RESET=""
+  C_CYAN=""
+  C_GREEN=""
+  C_YELLOW=""
+  C_DIM=""
+fi
+
+print_banner() {
+  cat <<EOF
+${C_CYAN} __  __ ______ __  __  ___
+|  \/  |  ____|  \/  |/ _ \\
+| \  / | |__  | \  / | | | |
+| |\/| |  __| | |\/| | | | |
+| |  | | |____| |  | | |_| |
+|_|  |_|______|_|  |_|\__\_\\${C_RESET}
+${C_GREEN}Hybrid MEMQ${C_RESET} :: Surface / Deep / Ephemeral
+${C_DIM}MEMCTX + MEMRULES + MEMSTYLE for OpenClaw${C_RESET}
+EOF
+}
+
+print_section() {
+  echo ""
+  echo "${C_YELLOW}== $1 ==${C_RESET}"
+}
+
+print_kv() {
+  printf "  %-22s %s\n" "$1" "$2"
+}
+
+prompt_yes_no() {
+  local prompt="$1"
+  local default_yes="${2:-1}"
+  local ans
+  if [[ "$default_yes" == "1" ]]; then
+    read -r -p "$prompt [Y/n]: " ans
+    [[ -z "$ans" || "$ans" =~ ^[Yy]$ ]]
+  else
+    read -r -p "$prompt [y/N]: " ans
+    [[ "$ans" =~ ^[Yy]$ ]]
+  fi
+}
+
+set_plugin_config_key() {
+  local key="$1"
+  local value_json="$2"
+  local cur next
+  cur="$(openclaw config get "plugins.entries.$PLUGIN_ID.config" 2>/dev/null || echo '{}')"
+  next="$(python3 - "$cur" "$key" "$value_json" <<'PY'
+import json,sys
+raw,key,val_raw=sys.argv[1],sys.argv[2],sys.argv[3]
+try: obj=json.loads(raw)
+except Exception: obj={}
+if not isinstance(obj,dict): obj={}
+try:
+    val=json.loads(val_raw)
+except Exception:
+    val=val_raw
+obj[key]=val
+print(json.dumps(obj,separators=(',',':')))
+PY
+)"
+  openclaw config set "plugins.entries.$PLUGIN_ID.config" "$next" >/dev/null
+}
+
+configure_secondary_audit() {
+  local url model threshold block_threshold
+  read -r -p "secondary audit url [https://api.openai.com/v1/chat/completions]: " url
+  url="${url:-https://api.openai.com/v1/chat/completions}"
+  read -r -p "secondary audit model [gpt-5.2]: " model
+  model="${model:-gpt-5.2}"
+  read -r -p "risk threshold [0.20]: " threshold
+  threshold="${threshold:-0.20}"
+  read -r -p "block threshold [0.85]: " block_threshold
+  block_threshold="${block_threshold:-0.85}"
+  cmd_audit_on "audit-on" "$url" "$model" "$threshold" "$block_threshold"
+}
+
+configure_memstyle_profile() {
+  local tone persona speaking verbosity avoid strict
+  read -r -p "style tone [keigo_friendly]: " tone
+  tone="${tone:-keigo_friendly}"
+  read -r -p "style persona [calm_pragmatic]: " persona
+  persona="${persona:-calm_pragmatic}"
+  read -r -p "style speakingStyle [clear_brief_actionable]: " speaking
+  speaking="${speaking:-clear_brief_actionable}"
+  read -r -p "style verbosity [low]: " verbosity
+  verbosity="${verbosity:-low}"
+  read -r -p "style avoid (| separated) [anime_style|translated_chinese_style_japanese]: " avoid
+  avoid="${avoid:-anime_style|translated_chinese_style_japanese}"
+  read -r -p "style strict? (y/N): " strict
+  set_plugin_config_key "memq.style.enabled" "true"
+  set_plugin_config_key "memq.style.tone" "$(python3 - <<PY
+import json
+print(json.dumps("$tone"))
+PY
+)"
+  set_plugin_config_key "memq.style.persona" "$(python3 - <<PY
+import json
+print(json.dumps("$persona"))
+PY
+)"
+  set_plugin_config_key "memq.style.speakingStyle" "$(python3 - <<PY
+import json
+print(json.dumps("$speaking"))
+PY
+)"
+  set_plugin_config_key "memq.style.verbosity" "$(python3 - <<PY
+import json
+print(json.dumps("$verbosity"))
+PY
+)"
+  set_plugin_config_key "memq.style.avoid" "$(python3 - <<PY
+import json
+print(json.dumps("$avoid"))
+PY
+)"
+  if [[ "$strict" =~ ^[Yy]$ ]]; then
+    set_plugin_config_key "memq.style.strict" "true"
+  else
+    set_plugin_config_key "memq.style.strict" "false"
+  fi
+  echo "memstyle profile updated"
+}
+
+cmd_configure() {
+  print_banner
+  echo "Interactive Configure"
+  while true; do
+    echo ""
+    echo "Select:"
+    echo "  1) Setup wizard (recommended)"
+    echo "  2) Quickstart (install + start + enable)"
+    echo "  3) Enable MEMQ"
+    echo "  4) Disable MEMQ"
+    echo "  5) Start sidecar"
+    echo "  6) Stop sidecar"
+    echo "  7) Primary audit ON"
+    echo "  8) Primary audit OFF"
+    echo "  9) Secondary audit configure (url/model)"
+    echo " 10) Secondary audit OFF"
+    echo " 11) MEMSTYLE ON"
+    echo " 12) MEMSTYLE OFF"
+    echo " 13) MEMSTYLE profile configure"
+    echo " 14) Status"
+    echo "  0) Exit"
+    read -r -p "> " choice
+    case "${choice:-}" in
+      1) cmd_setup ;;
+      2) cmd_quickstart ;;
+      3) cmd_enable ;;
+      4) cmd_disable ;;
+      5) cmd_start_sidecar ;;
+      6) cmd_stop_sidecar ;;
+      7) cmd_audit_primary_on ;;
+      8) cmd_audit_primary_off ;;
+      9) configure_secondary_audit ;;
+      10) cmd_audit_off ;;
+      11) cmd_style_on ;;
+      12) cmd_style_off ;;
+      13) configure_memstyle_profile ;;
+      14) cmd_status; cmd_audit_status; cmd_style_status ;;
+      0) break ;;
+      *) echo "invalid choice" ;;
+    esac
+  done
+}
+
+cmd_setup() {
+  print_banner
+  print_section "Setup Wizard"
+  echo "This wizard configures MEMQ for local OpenClaw in a few steps."
+  if prompt_yes_no "Install/link plugin into OpenClaw?" 1; then
+    cmd_install
+  fi
+  if prompt_yes_no "Start sidecar now?" 1; then
+    cmd_start_sidecar
+  fi
+  if prompt_yes_no "Switch memory slot to MEMQ now?" 1; then
+    cmd_enable
+  fi
+  print_section "MEMRULES / Audit"
+  if prompt_yes_no "Enable primary output audit (rule-based)?" 1; then
+    cmd_audit_primary_on
+  else
+    cmd_audit_primary_off
+  fi
+  if prompt_yes_no "Enable secondary high-risk LLM audit?" 0; then
+    configure_secondary_audit
+  fi
+  print_section "MEMSTYLE"
+  if prompt_yes_no "Enable MEMSTYLE v1?" 0; then
+    cmd_style_on
+    if prompt_yes_no "Configure style profile now?" 1; then
+      configure_memstyle_profile
+    fi
+  fi
+  print_section "Current Status"
+  cmd_status
+  cmd_audit_status
+  cmd_style_status
+  echo ""
+  echo "Done. You can rerun this anytime: scripts/memq-openclaw.sh setup"
+}
+
 json_merge_enable() {
   python3 - "$PLUGIN_ID" "$PLUGIN_PATH" <<'PY'
 import json,sys
@@ -90,8 +301,11 @@ PY
 }
 
 cmd_install() {
+  print_banner
   openclaw plugins install -l "$PLUGIN_PATH" >/dev/null
   echo "installed: $PLUGIN_ID"
+  print_kv "plugin_id" "$PLUGIN_ID"
+  print_kv "plugin_path" "$PLUGIN_PATH"
 }
 
 cmd_enable() {
@@ -285,6 +499,7 @@ cmd_status() {
 }
 
 cmd_quickstart() {
+  print_banner
   cmd_install
   cmd_start_sidecar
   cmd_enable
@@ -360,6 +575,7 @@ usage() {
 usage: scripts/memq-openclaw.sh <command>
 
 commands:
+  setup            interactive setup wizard (recommended first run)
   install          install plugin (linked)
   enable           switch OpenClaw memory slot to memq (snapshot old config)
   disable          restore previous OpenClaw plugins config from snapshot
@@ -376,11 +592,13 @@ commands:
   memstyle-on      enable MEMSTYLE v1 injection
   memstyle-off     disable MEMSTYLE v1 injection
   memstyle-status  show MEMSTYLE v1 enabled status
+  configure        interactive setup/config menu
   quickstart       install + start-sidecar + enable + status
 EOF
 }
 
 case "${1:-}" in
+  setup) cmd_setup ;;
   install) cmd_install ;;
   enable) cmd_enable ;;
   disable) cmd_disable ;;
@@ -397,6 +615,7 @@ case "${1:-}" in
   memstyle-on) cmd_style_on ;;
   memstyle-off) cmd_style_off ;;
   memstyle-status) cmd_style_status ;;
+  configure) cmd_configure ;;
   quickstart) cmd_quickstart ;;
   *) usage; exit 1 ;;
 esac
