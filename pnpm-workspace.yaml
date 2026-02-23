@@ -1,0 +1,4 @@
+packages:
+  - core
+  - plugin/openclaw-memory-memq
+  - bench

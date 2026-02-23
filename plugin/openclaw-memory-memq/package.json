@@ -1,0 +1,26 @@
+{
+  "name": "openclaw-memory-memq",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "memq": "dist/cli/memq.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "memq:status": "node dist/cli/memq.js status",
+    "memq:reindex": "node dist/cli/memq.js reindex",
+    "memq:consolidate": "node dist/cli/memq.js consolidate"
+  },
+  "openclaw": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.6.3"
+  }
+}

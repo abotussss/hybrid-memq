@@ -1,0 +1,14 @@
+{
+  "name": "memq-oss",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "core",
+    "plugin/openclaw-memory-memq",
+    "bench"
+  ],
+  "scripts": {
+    "build": "pnpm -r build",
+    "bench": "pnpm --filter @memq/bench bench"
+  }
+}

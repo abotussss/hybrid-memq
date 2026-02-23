@@ -1,0 +1,11 @@
+mode,turn,key,expected,answer,correct,input_tokens,output_tokens,duration_ms,provider,model,memory_payload_tokens_est,memctx_tokens_est,message_tokens_est,prompt_tokens,last_call_input_tokens,error
+baseline_full,1,key_00110,value_621935,value_621935,1,3813,23,3011.0,openai-codex,gpt-5.3-codex,4444,0,4462,99301,3813,
+hybrid_memctx,2,key_00110,value_621935,value_621935,1,542,19,3142.0,openai-codex,gpt-5.3-codex,117,117,132,99742,542,
+baseline_full,3,key_00155,value_266025,value_266025,1,3829,78,5585.0,openai-codex,gpt-5.3-codex,4444,0,4462,103413,3829,
+hybrid_memctx,4,key_00155,value_266025,value_266025,1,570,8,2981.0,openai-codex,gpt-5.3-codex,117,117,132,103866,570,
+baseline_full,5,key_00009,value_888860,value_888860,1,3869,8,3021.0,openai-codex,gpt-5.3-codex,4444,0,4462,107549,3869,
+hybrid_memctx,6,key_00009,value_888860,value_888860,1,610,8,2951.0,openai-codex,gpt-5.3-codex,117,117,132,108002,610,
+baseline_full,7,key_00078,value_166947,value_166947,1,3769,23,5271.0,openai-codex,gpt-5.3-codex,4444,0,4462,111673,3769,
+hybrid_memctx,8,key_00078,value_166947,value_166947,1,626,8,2914.0,openai-codex,gpt-5.3-codex,117,117,132,112114,626,
+baseline_full,9,key_00063,value_572165,value_572165,1,3785,23,3190.0,openai-codex,gpt-5.3-codex,4444,0,4462,115785,3785,
+hybrid_memctx,10,key_00063,value_572165,value_572165,1,642,8,3324.0,openai-codex,gpt-5.3-codex,117,117,132,116226,642,

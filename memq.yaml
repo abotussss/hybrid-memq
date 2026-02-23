@@ -1,0 +1,30 @@
+mode: api_text
+sidecar:
+  url: http://127.0.0.1:7781
+  db_path: .memq/sidecar.sqlite3
+embedding:
+  provider: local
+  dim: 256
+quantization:
+  kind: scalar_int8
+  pq:
+    enabled: false
+    m: 64
+    bits: 6
+budgets:
+  mem_tokens: 120
+surface:
+  max: 120
+  ttl_sec: 172800
+retrieval:
+  topM: 200
+  topK: 5
+  cue_depth: 2
+write_gate:
+  low: 0.45
+  high: 0.65
+fallback:
+  max_score_min: 0.32
+  entropy_max: 1.2
+consolidation:
+  interval_sec: 3600

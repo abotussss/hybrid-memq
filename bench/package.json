@@ -1,0 +1,9 @@
+{
+  "name": "@memq/bench",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "bench": "node src/run.js",
+    "api:smoke": "bash scripts/smoke_api_mode.sh"
+  }
+}

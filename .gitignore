@@ -1,0 +1,15 @@
+# OS/editor artifacts
+.DS_Store
+
+# local runtime state
+.memq/
+.pnpm-store/
+node_modules/
+plugin/openclaw-memory-memq/node_modules/
+sidecar/.venv/
+__pycache__/
+*.pyc
+
+# mode B is intentionally excluded from OSS release
+modeb/
+docs/mode-b-requirements.md

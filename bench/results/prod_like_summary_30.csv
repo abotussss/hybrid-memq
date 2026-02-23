@@ -1,0 +1,3 @@
+mode,n,accuracy,avg_input_tokens,p95_input_tokens,avg_duration_ms,p95_duration_ms
+baseline_full,30,0.9666666666666667,10329.433333333332,25727,4705.4,6998.0
+hybrid_memctx,30,1,6026.4,22125,4229.933333333333,6609.0

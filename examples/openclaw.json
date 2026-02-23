@@ -1,0 +1,33 @@
+{
+  "plugins": {
+    "load": {
+      "paths": [
+        "/Users/hiroyukimiyake/Documents/New project/plugin/openclaw-memory-memq"
+      ]
+    },
+    "slots": {
+      "memory": "openclaw-memory-memq"
+    }
+  },
+  "memq": {
+    "workspaceRoot": "/Users/hiroyukimiyake/Documents/New project",
+    "sidecarUrl": "http://127.0.0.1:7781",
+    "mode": "api_text",
+    "budgetTokens": 120,
+    "topK": 5,
+    "surface": {
+      "max": 120
+    },
+    "writeGate": {
+      "low": 0.45,
+      "high": 0.65
+    },
+    "fallback": {
+      "maxScoreMin": 0.32,
+      "entropyMax": 1.2
+    },
+    "consolidation": {
+      "intervalSec": 3600
+    }
+  }
+}

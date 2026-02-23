@@ -1,0 +1,28 @@
+{
+  "id": "openclaw-memory-memq",
+  "name": "Memory MEMQ",
+  "version": "0.1.0",
+  "kind": "memory",
+  "entry": "dist/index.js",
+  "description": "Surface/Deep + quantized memory plugin with MEMCTX v1 injection",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "memq.sidecarUrl": { "type": "string", "default": "http://127.0.0.1:7781" },
+      "memq.budgetTokens": { "type": "number", "default": 120 },
+      "memq.rules.budgetTokens": { "type": "number", "default": 80 },
+      "memq.rules.strict": { "type": "boolean", "default": false },
+      "memq.rules.allowedLanguages": { "type": "string", "default": "" },
+      "memq.rules.hard": { "type": "string", "default": "" },
+      "memq.topK": { "type": "number", "default": 5 },
+      "memq.surface.max": { "type": "number", "default": 120 }
+    }
+  },
+  "uiHints": {
+    "fields": {
+      "apiKey": {
+        "sensitive": true
+      }
+    }
+  }
+}
