@@ -151,3 +151,116 @@ scripts/memq-openclaw.sh disable
 
 ## License
 MIT (`LICENSE`)
+
+---
+
+## 日本語ガイド (Japanese)
+
+### 概要
+`hybrid-memq` は OpenClaw 向けのメモリプラグインです。  
+**Surface / Deep / Ephemeral（表層 / 深層 / 揮発）** モデルと、固定予算の **MEMCTX** 注入により、長期運用での記憶品質を上げつつ入力トークンを抑えることを目的にしています。
+
+### 主な機能
+- 表層・深層・揮発の3層メモリ
+- 固定トークン予算での MEMCTX (`k=v` 形式)
+- OpenClaw フック連携（`before_prompt_build` / `agent_end` / `before_compaction` / `gateway_start`）
+- ローカル sidecar（SQLite + 検索 + 睡眠整理 + 監査）
+- 嗜好/方針プロファイルのローカル学習（非LLM）
+- 汚染疑い情報の隔離（quarantine）
+- 高リスク時のみ二次監査（ルール監査 + 任意LLM監査）
+- OpenClaw 標準メモリとのシームレス切替
+
+### クイックスタート
+1) プラグインをビルド
+```bash
+cd ~/hybrid-memq/plugin/openclaw-memory-memq
+pnpm install
+pnpm build
+```
+
+2) OpenClaw にプラグインをインストール
+```bash
+openclaw plugins install -l ~/hybrid-memq/plugin/openclaw-memory-memq
+```
+
+3) sidecar を起動
+```bash
+cd ~/hybrid-memq/sidecar
+python3 minisidecar.py
+```
+
+4) MEMQ を有効化
+```bash
+scripts/memq-openclaw.sh quickstart
+```
+
+5) 動作確認
+```bash
+scripts/memq-openclaw.sh status
+curl -sS http://127.0.0.1:7781/health
+```
+
+### CLI コマンド
+`scripts/memq-openclaw.sh`
+
+| コマンド | 説明 |
+|---|---|
+| `install` | OpenClaw にプラグインをリンク/インストール |
+| `enable` | メモリスロットを `openclaw-memory-memq` に切替（既存設定を退避） |
+| `disable` | 退避した設定を復元して元方式へ戻す |
+| `on` | `quickstart` のショートカット |
+| `off` | MEMQ を無効化し sidecar も停止 |
+| `start-sidecar` | sidecar を起動 |
+| `stop-sidecar` | sidecar を停止 |
+| `status` | 現在の設定・接続状態を表示 |
+| `quickstart` | `install + start-sidecar + enable + status` を実行 |
+| `audit-on <url> <model> [risk_threshold] [block_threshold]` | 高リスク時の二次LLM監査を有効化 |
+| `audit-off` | 二次LLM監査のみ無効化（MEMQ本体は有効） |
+| `audit-status` | 監査設定の現在値を表示 |
+
+### 仕組み（実行時）
+1. 現在ターンのクエリ埋め込みを生成  
+2. 表層（Surface）を優先検索  
+3. 必要時のみ深層（Deep）検索  
+4. 候補を再ランクし、固定予算で MEMCTX を編成  
+5. OpenClaw のプロンプト文脈へ注入  
+6. 応答後にアクセス情報を更新して表層を再活性化
+
+### 睡眠整理（Idle/Sleep Consolidation）
+ユーザー操作が一定時間ないと sidecar が自動整理を実行します。
+- 強度減衰（decay）
+- 低価値記憶の剪定（prune）
+- 重複統合（dedup/merge）
+- 競合更新（conflict refresh）
+- 嗜好/方針プロファイル更新
+- 必要時の再インデックス
+
+この整理は API LLM を呼ばず、ローカル処理のみで行います。
+
+### MEMCTX / MEMRULES
+- **MEMCTX**: 想起情報（記憶）チャネル。固定トークン予算で注入。
+- **MEMRULES**: 厳格ルールチャネル。記憶とは別予算で管理。
+
+両方とも予算制約つきで、入力肥大化を防ぎます。
+
+### 設定項目（主要）
+- `memq.sidecarUrl`（既定: `http://127.0.0.1:7781`）
+- `memq.budgetTokens`（既定: `120`）
+- `memq.topK`（既定: `5`）
+- `memq.surface.max`（既定: `120`）
+- `memq.rules.budgetTokens`（既定: `80`）
+- `memq.rules.strict`（既定: `false`）
+- `memq.rules.allowedLanguages`（既定: 空）
+- `memq.rules.hard`（既定: 空、`|`区切り）
+
+参照: `memq.yaml` / `examples/openclaw.json`
+
+### セキュリティ
+- MEMCTX に秘密情報を保持しない
+- 汚染疑いの facts は quarantine して想起対象から除外
+- 必要に応じて高リスク出力のみ二次LLM監査を適用
+
+### 関連ドキュメント
+- `docs/openclaw-setup.md`
+- `docs/architecture.md`
+- `docs/security.md`
