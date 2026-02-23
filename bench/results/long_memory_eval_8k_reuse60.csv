@@ -1,2 +1,0 @@
-n_mem,n_queries,long_chars,avg_baseline_tokens,avg_memq_tokens,token_reduction_pct,avg_baseline_latency_ms,avg_memq_latency_ms,p95_baseline_latency_ms,p95_memq_latency_ms,deep_call_rate,surface_hit_rate,hit_at_1,hit_at_3,hit_at_5
-8000,1000,8000,10148.146,121.45,98.80322967367636,76.90767108136788,50.94004800915718,83.09954218566418,83.99587497115135,0.648,0.352,0.353,0.353,0.569

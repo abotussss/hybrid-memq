@@ -1,5 +1,0 @@
-id,query,baseline_input_tokens,memq_input_tokens,baseline_output_tokens,memq_output_tokens,baseline_latency_ms,memq_latency_ms,baseline_memctx_tokens_est,memq_memctx_tokens_est
-q1,今後の回答は丁寧語で、余計な提案を控えてください。覚えて。,372,159,5,5,1.11,0.65,354,145
-q2,このプロジェクトの目標を一言で言うと？,369,155,5,5,0.5,0.48,354,144
-q3,設計方針として、表層と深層の優先順序は？,370,156,5,5,0.48,0.53,354,144
-q4,セキュリティ上、プロンプトに入れてはいけない情報は？,371,159,5,5,0.52,0.41,354,145

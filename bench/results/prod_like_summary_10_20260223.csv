@@ -1,3 +1,0 @@
-mode,n,accuracy,avg_input_tokens,p95_input_tokens,avg_memory_payload_tokens_est,avg_memctx_tokens_est,avg_message_tokens_est,avg_prompt_tokens,avg_last_call_input_tokens,avg_duration_ms,p95_duration_ms
-baseline_full,10,1,3575,3626,4443.3,0,4461.7,137642.2,3575,3720.1,5029.0
-hybrid_memctx,10,1,348,400,117.7,117.7,132.7,137845.6,348,4518.7,7456.0
