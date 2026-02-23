@@ -89,6 +89,9 @@ curl -sS http://127.0.0.1:7781/health
 | `audit-primary-on` | Enable primary output audit (rule-based) |
 | `audit-primary-off` | Disable primary output audit (MEMCTX/MEMRULES injection stays enabled) |
 | `audit-status` | Show current audit env values |
+| `memstyle-on` | Enable MEMSTYLE v1 injection |
+| `memstyle-off` | Disable MEMSTYLE v1 injection |
+| `memstyle-status` | Show MEMSTYLE v1 enable state |
 
 ## How It Works
 ### Runtime (per turn)
@@ -165,6 +168,11 @@ Main knobs (OpenClaw plugin config):
 - `memq.rules.allowedLanguages` (default empty)
 - `memq.rules.autoLanguageFromPrompt` (default `true`)
 - `memq.rules.hard` (default empty, `|`-separated)
+- `memq.style.enabled` (default `false`)
+- `memq.style.budgetTokens` (default `24`)
+- `memq.style.strict` (default `false`)
+- `memq.style.tone` / `memq.style.persona` / `memq.style.speakingStyle` / `memq.style.verbosity`
+- `memq.style.avoid` (`|`-separated)
 
 Reference: `memq.yaml`
 
@@ -262,6 +270,9 @@ curl -sS http://127.0.0.1:7781/health
 | `audit-primary-on` | 一次出力監査（ルールベース）を有効化 |
 | `audit-primary-off` | 一次出力監査のみ無効化（MEMCTX/MEMRULES注入は有効のまま） |
 | `audit-status` | 監査設定の現在値を表示 |
+| `memstyle-on` | MEMSTYLE v1 注入を有効化 |
+| `memstyle-off` | MEMSTYLE v1 注入を無効化 |
+| `memstyle-status` | MEMSTYLE v1 の有効状態を表示 |
 
 ### 仕組み（実行時）
 1. 現在ターンのクエリ埋め込みを生成  
@@ -336,6 +347,11 @@ Sidecar環境変数:
 - `memq.rules.allowedLanguages`（既定: 空）
 - `memq.rules.autoLanguageFromPrompt`（既定: `true`）
 - `memq.rules.hard`（既定: 空、`|`区切り）
+- `memq.style.enabled`（既定: `false`）
+- `memq.style.budgetTokens`（既定: `24`）
+- `memq.style.strict`（既定: `false`）
+- `memq.style.tone` / `memq.style.persona` / `memq.style.speakingStyle` / `memq.style.verbosity`
+- `memq.style.avoid`（`|`区切り）
 
 参照: `memq.yaml` / `examples/openclaw.json`
 

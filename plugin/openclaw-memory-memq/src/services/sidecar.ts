@@ -123,6 +123,14 @@ export class SidecarClient {
     text: string;
     allowedLanguages: string[];
     preferredLanguage?: string;
+    styleProfile?: {
+      tone?: string;
+      persona?: string;
+      speakingStyle?: string;
+      verbosity?: string;
+      avoid?: string[];
+      strict?: boolean;
+    };
   }): Promise<{
     ok: boolean;
     passed: boolean;
@@ -139,7 +147,8 @@ export class SidecarClient {
         sessionId: input.sessionId,
         text: input.text,
         allowedLanguages: input.allowedLanguages,
-        preferredLanguage: input.preferredLanguage ?? ""
+        preferredLanguage: input.preferredLanguage ?? "",
+        styleProfile: input.styleProfile ?? {}
       })
     });
     if (!r.ok) throw new Error("audit output failed");

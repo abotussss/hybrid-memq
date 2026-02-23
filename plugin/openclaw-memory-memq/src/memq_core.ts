@@ -81,6 +81,41 @@ export function compileMemRules(input: {
   return out.join("\n");
 }
 
+export function compileMemStyle(input: {
+  budgetTokens: number;
+  enabled: boolean;
+  tone?: string;
+  persona?: string;
+  speakingStyle?: string;
+  verbosity?: string;
+  preferredLanguage?: string;
+  avoid?: string[];
+}): string {
+  if (!input.enabled) return "";
+  const out: string[] = [];
+  let used = 0;
+  const push = (line: string): boolean => {
+    const t = estimateTokens(line);
+    if (used + t > input.budgetTokens) return false;
+    out.push(line);
+    used += t;
+    return true;
+  };
+  if (!push("[MEMSTYLE v1]")) return "";
+  if (!push(`budget_tokens=${input.budgetTokens}`)) return out.join("\n");
+  if (input.preferredLanguage) push(`lang.primary=${input.preferredLanguage}`);
+  if (input.tone) push(`tone=${input.tone}`);
+  if (input.persona) push(`persona=${input.persona}`);
+  if (input.speakingStyle) push(`style=${input.speakingStyle}`);
+  if (input.verbosity) push(`verbosity=${input.verbosity}`);
+  if (input.avoid?.length) {
+    push(`avoid=[${input.avoid.join(",")}]`);
+  }
+  push("notes:");
+  push("  - keep_style_consistent_across_turns");
+  return out.join("\n");
+}
+
 export function estimateTokens(s: string): number {
   return Math.ceil(s.length / 4);
 }

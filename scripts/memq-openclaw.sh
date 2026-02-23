@@ -301,6 +301,60 @@ cmd_off() {
   echo "memq disabled (slot restored, sidecar stopped)"
 }
 
+cmd_style_on() {
+  local cur
+  cur="$(openclaw config get "plugins.entries.$PLUGIN_ID.config" 2>/dev/null || echo '{}')"
+  local next
+  next="$(python3 - <<'PY' "$cur"
+import json,sys
+raw=sys.argv[1]
+try: obj=json.loads(raw)
+except Exception: obj={}
+if not isinstance(obj,dict): obj={}
+obj["memq.style.enabled"]=True
+print(json.dumps(obj,separators=(',',':')))
+PY
+)"
+  openclaw config set "plugins.entries.$PLUGIN_ID.config" "$next" >/dev/null
+  echo "memstyle enabled"
+}
+
+cmd_style_off() {
+  local cur
+  cur="$(openclaw config get "plugins.entries.$PLUGIN_ID.config" 2>/dev/null || echo '{}')"
+  local next
+  next="$(python3 - <<'PY' "$cur"
+import json,sys
+raw=sys.argv[1]
+try: obj=json.loads(raw)
+except Exception: obj={}
+if not isinstance(obj,dict): obj={}
+obj["memq.style.enabled"]=False
+print(json.dumps(obj,separators=(',',':')))
+PY
+)"
+  openclaw config set "plugins.entries.$PLUGIN_ID.config" "$next" >/dev/null
+  echo "memstyle disabled"
+}
+
+cmd_style_status() {
+  local cur v
+  cur="$(openclaw config get "plugins.entries.$PLUGIN_ID.config" 2>/dev/null || echo '{}')"
+  v="$(python3 - <<'PY' "$cur"
+import json,sys
+raw=sys.argv[1]
+try: obj=json.loads(raw)
+except Exception: obj={}
+if not isinstance(obj,dict):
+    print("<unset>")
+else:
+    val=obj.get("memq.style.enabled","<unset>")
+    print(str(val).lower() if isinstance(val,bool) else str(val))
+PY
+)"
+  echo "memstyle.enabled: $v"
+}
+
 usage() {
   cat <<EOF
 usage: scripts/memq-openclaw.sh <command>
@@ -319,6 +373,9 @@ commands:
   audit-primary-on enable primary output audit and restart sidecar
   audit-primary-off disable primary output audit and restart sidecar
   audit-status     show current sidecar audit env settings
+  memstyle-on      enable MEMSTYLE v1 injection
+  memstyle-off     disable MEMSTYLE v1 injection
+  memstyle-status  show MEMSTYLE v1 enabled status
   quickstart       install + start-sidecar + enable + status
 EOF
 }
@@ -337,6 +394,9 @@ case "${1:-}" in
   audit-primary-on) cmd_audit_primary_on ;;
   audit-primary-off) cmd_audit_primary_off ;;
   audit-status) cmd_audit_status ;;
+  memstyle-on) cmd_style_on ;;
+  memstyle-off) cmd_style_off ;;
+  memstyle-status) cmd_style_status ;;
   quickstart) cmd_quickstart ;;
   *) usage; exit 1 ;;
 esac

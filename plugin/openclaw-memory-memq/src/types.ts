@@ -44,4 +44,15 @@ export interface RuntimeState {
   lastAllowedLanguagesBySession?: Map<string, string[]>;
   lastPreferredLanguageBySession?: Map<string, string>;
   lastAuditBypassBySession?: Map<string, boolean>;
+  lastStyleProfileBySession?: Map<
+    string,
+    {
+      tone?: string;
+      persona?: string;
+      speakingStyle?: string;
+      verbosity?: string;
+      avoid?: string[];
+      strict?: boolean;
+    }
+  >;
 }

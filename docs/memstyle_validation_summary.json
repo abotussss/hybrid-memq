@@ -1,0 +1,23 @@
+{
+  "summary": {
+    "total": 67,
+    "pass_acc": 1.0,
+    "repair_acc": 1.0,
+    "secondary_rate": 0.6268656716417911,
+    "avg_risk": 0.1492537313432836,
+    "false_block_clean": 0,
+    "mixed_repair_rate": 1.0,
+    "style_repair_rate": 1.0,
+    "secret_block_rate": 1.0,
+    "explicit_passthrough_rate": 1.0,
+    "memstyle_tokens_sample": 53
+  },
+  "n_by_cat": {
+    "clean": 20,
+    "explicit": 5,
+    "mixed": 24,
+    "secret": 8,
+    "style_drift": 10
+  },
+  "sample_fails": []
+}

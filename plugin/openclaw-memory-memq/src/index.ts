@@ -15,7 +15,8 @@ export default function register(api: any): void {
     lastCandidatesBySession: new Map(),
     lastAllowedLanguagesBySession: new Map(),
     lastPreferredLanguageBySession: new Map(),
-    lastAuditBypassBySession: new Map()
+    lastAuditBypassBySession: new Map(),
+    lastStyleProfileBySession: new Map()
   };
 
   const before = createBeforePromptBuild(api, sidecar, surface, rt, metrics);
@@ -25,6 +26,8 @@ export default function register(api: any): void {
 
   // Prefer modern lifecycle API (`api.on`) and keep compatibility.
   if (typeof api.on === "function") {
+    api.on("before_prompt_build", before);
+    // Compatibility for runtimes that expose only before_agent_start.
     api.on("before_agent_start", before);
     api.on("agent_end", onEnd);
     api.on("before_compaction", onCompaction);

@@ -67,6 +67,14 @@ function tryPatchAssistantText(event: any, hookCtx: any, original: string, repai
         }
       }
     }
+    const payloads = Array.isArray(obj?.payloads) ? obj.payloads : [];
+    for (const p of payloads) {
+      if (p && typeof p === "object" && typeof p.text === "string" && p.text.trim() === original.trim()) {
+        p.text = repaired;
+        patched = true;
+        return;
+      }
+    }
   };
   for (const obj of bag) {
     if (!obj || patched) continue;
@@ -90,6 +98,7 @@ export function createAgentEnd(api: any, sidecar: SidecarClient, surface: Surfac
     const allowed = rt.lastAllowedLanguagesBySession?.get(sessionId) ?? [];
     const preferred = rt.lastPreferredLanguageBySession?.get(sessionId);
     const auditBypass = rt.lastAuditBypassBySession?.get(sessionId) ?? false;
+    const style = rt.lastStyleProfileBySession?.get(sessionId);
     const assistantTexts = collectAssistantTexts(event, hookCtx);
     let audited = 0;
     let violations = 0;
@@ -101,7 +110,8 @@ export function createAgentEnd(api: any, sidecar: SidecarClient, surface: Surfac
           sessionId,
           text,
           allowedLanguages: allowed,
-          preferredLanguage: preferred
+          preferredLanguage: preferred,
+          styleProfile: style
         });
         audited += 1;
         if (!res.passed) violations += 1;

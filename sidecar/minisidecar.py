@@ -84,6 +84,13 @@ OBFUSCATION_PATTERNS = [
     re.compile(r"\b[A-Za-z0-9+/]{40,}={0,2}\b"),  # base64-like long token
     re.compile(r"\b[0-9a-fA-F]{40,}\b"),  # hex-like long token
 ]
+EXTRA_SCRIPT_PATTERNS = {
+    "ar": re.compile(r"[\u0600-\u06FF]"),
+    "he": re.compile(r"[\u0590-\u05FF]"),
+    "hi": re.compile(r"[\u0900-\u097F]"),
+    "th": re.compile(r"[\u0E00-\u0E7F]"),
+    "el": re.compile(r"[\u0370-\u03FF]"),
+}
 
 
 def conn():
@@ -657,6 +664,9 @@ def detect_language_violation(text: str, allowed: List[str]) -> List[str]:
                 if han >= 3 and kana == 0:
                     reasons.append("contains_nonpreferred_han_segment")
                     break
+    for code, pat in EXTRA_SCRIPT_PATTERNS.items():
+        if code not in allowed_set and pat.search(t):
+            reasons.append(f"contains_{code}_script_not_allowed")
     return reasons
 
 
@@ -696,6 +706,53 @@ def detect_obfuscation_risk(text: str) -> List[str]:
     return reasons
 
 
+def detect_style_violation(text: str, style_profile: Dict) -> List[str]:
+    reasons: List[str] = []
+    if not style_profile:
+        return reasons
+    t = str(text or "")
+    tone = str(style_profile.get("tone", "")).strip().lower()
+    persona = str(style_profile.get("persona", "")).strip().lower()
+    speaking = str(style_profile.get("speakingStyle", "")).strip().lower()
+    avoid = [str(x).strip().lower() for x in (style_profile.get("avoid") or []) if str(x).strip()]
+    # Keigo consistency.
+    if tone == "keigo":
+        if re.search(r"(だよ|だぜ|じゃん|っす|www|w{2,}|マジ|やばい|うける)", t, re.I):
+            reasons.append("style_tone_keigo_violation")
+    # Natural Japanese style consistency.
+    if "translated_chinese_style_japanese" in avoid:
+        if re.search(r"(でしょうかね|しますです|ことができますです|なのですか\?)", t):
+            reasons.append("style_translated_japanese_violation")
+    if "anime_style" in avoid or "anime" in speaking:
+        if re.search(r"(なのだ|だぞ|にゃ|であります|だっちゃ)", t):
+            reasons.append("style_anime_violation")
+    if "calm" in persona:
+        if re.search(r"[!！]{3,}", t):
+            reasons.append("style_persona_calm_violation")
+    return reasons
+
+
+def deterministic_style_repair(text: str, style_profile: Dict) -> str:
+    s = str(text or "")
+    if not style_profile:
+        return s
+    tone = str(style_profile.get("tone", "")).strip().lower()
+    avoid = [str(x).strip().lower() for x in (style_profile.get("avoid") or []) if str(x).strip()]
+    out = s
+    if tone == "keigo":
+        out = re.sub(r"だよ", "です", out)
+        out = re.sub(r"じゃん", "です", out)
+        out = re.sub(r"っす", "です", out)
+        out = re.sub(r"(マジ|やばい|うける)", "", out)
+    if "anime_style" in avoid:
+        out = re.sub(r"(なのだ|だぞ|にゃ|であります|だっちゃ)", "です", out)
+    if "translated_chinese_style_japanese" in avoid:
+        out = re.sub(r"(しますです|ことができますです)", "します", out)
+    out = re.sub(r"[!！]{3,}", "！", out)
+    out = re.sub(r"[ \t]{2,}", " ", out)
+    return out.strip()
+
+
 def deterministic_language_repair(text: str, allowed_languages: List[str], preferred_language: str = "") -> str:
     t = str(text or "")
     allowed_set = {str(x).strip().lower() for x in (allowed_languages or []) if str(x).strip()}
@@ -725,12 +782,21 @@ def deterministic_language_repair(text: str, allowed_languages: List[str], prefe
         out = "".join(rebuilt)
     if "en" not in allowed_set:
         out = re.sub(r"[A-Za-z]+", " ", out)
+    for code, pat in EXTRA_SCRIPT_PATTERNS.items():
+        if code not in allowed_set:
+            out = pat.sub(" ", out)
     out = re.sub(r"[ \t]{2,}", " ", out)
     out = re.sub(r"\n{3,}", "\n\n", out)
     return out.strip()
 
 
-def secondary_llm_audit(text: str, allowed_languages: List[str], preferred_language: str = "", want_repair: bool = False) -> Dict:
+def secondary_llm_audit(
+    text: str,
+    allowed_languages: List[str],
+    preferred_language: str = "",
+    style_profile: Dict | None = None,
+    want_repair: bool = False,
+) -> Dict:
     if not (LLM_AUDIT_ENABLED and LLM_AUDIT_URL and LLM_AUDIT_MODEL):
         return {"enabled": False, "called": False}
     snippet = sanitize_text(text, 480)
@@ -744,6 +810,7 @@ def secondary_llm_audit(text: str, allowed_languages: List[str], preferred_langu
     user = (
         f"Allowed languages: {allow_str}\n"
         f"Preferred language: {(preferred_language or '(none)')}\n"
+        f"Style profile: {json.dumps(style_profile or {}, ensure_ascii=True)}\n"
         f"Output text:\n{snippet}\n"
         "Judge policy violation. Keep reasons short."
     )
@@ -817,7 +884,13 @@ def secondary_llm_audit(text: str, allowed_languages: List[str], preferred_langu
         }
 
 
-def audit_output_text(session_id: str, text: str, allowed_languages: List[str], preferred_language: str = "") -> Dict:
+def audit_output_text(
+    session_id: str,
+    text: str,
+    allowed_languages: List[str],
+    preferred_language: str = "",
+    style_profile: Dict | None = None,
+) -> Dict:
     if not OUTPUT_AUDIT_ENABLED:
         return {
             "ok": True,
@@ -832,7 +905,8 @@ def audit_output_text(session_id: str, text: str, allowed_languages: List[str], 
     secret_r = detect_secret_violation(text)
     inj_r = detect_injection_compliance(text)
     obf_r = detect_obfuscation_risk(text)
-    reasons = lang_r + secret_r + inj_r + obf_r
+    style_r = detect_style_violation(text, style_profile or {})
+    reasons = lang_r + secret_r + inj_r + obf_r + style_r
     risk = 0.0
     if reasons:
         weights = {
@@ -849,6 +923,15 @@ def audit_output_text(session_id: str, text: str, allowed_languages: List[str], 
             "contains_cyrillic": 0.25,
             "contains_non_japanese_han_heavy_text": 0.2,
             "contains_nonpreferred_han_segment": 0.2,
+            "contains_ar_script_not_allowed": 0.2,
+            "contains_he_script_not_allowed": 0.2,
+            "contains_hi_script_not_allowed": 0.2,
+            "contains_th_script_not_allowed": 0.2,
+            "contains_el_script_not_allowed": 0.2,
+            "style_tone_keigo_violation": 0.15,
+            "style_translated_japanese_violation": 0.2,
+            "style_anime_violation": 0.15,
+            "style_persona_calm_violation": 0.1,
         }
         risk = min(1.0, sum(weights.get(r, 0.15) for r in reasons))
         cats = {
@@ -874,6 +957,7 @@ def audit_output_text(session_id: str, text: str, allowed_languages: List[str], 
             text,
             allowed_languages,
             preferred_language=preferred_language,
+            style_profile=style_profile or {},
             want_repair=bool(has_lang_violation and AUDIT_LANG_REPAIR_ENABLED),
         )
         if secondary.get("called") and secondary.get("block"):
@@ -898,6 +982,22 @@ def audit_output_text(session_id: str, text: str, allowed_languages: List[str], 
                 reasons = [r for r in reasons if r not in lang_r]
                 if not secret_r and not inj_r and not obf_r:
                     risk = min(risk, 0.05)
+    has_style_violation = len(style_r) > 0
+    if has_style_violation and not repaired_applied:
+        candidate = deterministic_style_repair(repaired_text or text, style_profile or {})
+        if candidate and candidate != (repaired_text or text):
+            post_style = detect_style_violation(candidate, style_profile or {})
+            post_lang = detect_language_violation(candidate, allowed_languages)
+            if not post_style and not post_lang:
+                repaired_applied = True
+                repaired_text = candidate
+                reasons = [r for r in reasons if r not in style_r]
+                if not secret_r and not inj_r and not obf_r:
+                    risk = min(risk, 0.08)
+    style_strict = bool((style_profile or {}).get("strict"))
+    unresolved_style_violation = bool(style_strict and has_style_violation and not repaired_applied)
+    if unresolved_style_violation and "unresolved_style_violation" not in reasons:
+        reasons.append("unresolved_style_violation")
     unresolved_lang_violation = bool(has_lang_violation and not repaired_applied)
     if unresolved_lang_violation and "unresolved_language_violation" not in reasons:
         reasons.append("unresolved_language_violation")
@@ -907,6 +1007,7 @@ def audit_output_text(session_id: str, text: str, allowed_languages: List[str], 
     blocked = bool(
         has_secret_violation
         or unresolved_lang_violation
+        or unresolved_style_violation
         or risk >= AUDIT_BLOCK_THRESHOLD
         or (secondary.get("called") and secondary.get("block"))
     )
@@ -1074,10 +1175,15 @@ class H(BaseHTTPRequestHandler):
             text = str(body.get("text", ""))
             allowed = body.get("allowedLanguages") or []
             preferred = str(body.get("preferredLanguage", "") or "").strip()
+            style_profile = body.get("styleProfile") or {}
+            if not isinstance(style_profile, dict):
+                style_profile = {}
             if not isinstance(allowed, list):
                 allowed = []
             allowed = [str(x).strip() for x in allowed if str(x).strip()]
-            return self._json(audit_output_text(sid, text, allowed, preferred_language=preferred))
+            return self._json(
+                audit_output_text(sid, text, allowed, preferred_language=preferred, style_profile=style_profile)
+            )
 
         if p == "/index/add":
             trace_id = str(body.get("id"))

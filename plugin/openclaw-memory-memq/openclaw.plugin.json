@@ -15,6 +15,14 @@
       "memq.rules.allowedLanguages": { "type": "string", "default": "" },
       "memq.rules.autoLanguageFromPrompt": { "type": "boolean", "default": true },
       "memq.rules.hard": { "type": "string", "default": "" },
+      "memq.style.enabled": { "type": "boolean", "default": false },
+      "memq.style.budgetTokens": { "type": "number", "default": 24 },
+      "memq.style.strict": { "type": "boolean", "default": false },
+      "memq.style.tone": { "type": "string", "default": "" },
+      "memq.style.persona": { "type": "string", "default": "" },
+      "memq.style.speakingStyle": { "type": "string", "default": "" },
+      "memq.style.verbosity": { "type": "string", "default": "" },
+      "memq.style.avoid": { "type": "string", "default": "" },
       "memq.topK": { "type": "number", "default": 5 },
       "memq.surface.max": { "type": "number", "default": 120 }
     }

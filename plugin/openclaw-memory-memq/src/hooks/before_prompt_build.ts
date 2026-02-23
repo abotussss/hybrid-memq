@@ -1,5 +1,6 @@
 import {
   compileMemRules,
+  compileMemStyle,
   compileMemCtx,
   detectConflicts,
   estimateTokens,
@@ -15,6 +16,11 @@ function detectPromptPrimaryLanguage(text: string): string | null {
   const s = String(text || "");
   if (/[ぁ-ゖァ-ヺ]/.test(s)) return "ja";
   if (/[A-Za-z]/.test(s)) return "en";
+  if (/[\u0600-\u06FF]/.test(s)) return "ar";
+  if (/[\u0590-\u05FF]/.test(s)) return "he";
+  if (/[\u0900-\u097F]/.test(s)) return "hi";
+  if (/[\u0E00-\u0E7F]/.test(s)) return "th";
+  if (/[\u0370-\u03FF]/.test(s)) return "el";
   if (/[\u0400-\u04FF]/.test(s)) return "ru";
   if (/[\uAC00-\uD7AF]/.test(s)) return "ko";
   if (/[\u4E00-\u9FFF]/.test(s)) return "zh";
@@ -28,11 +34,16 @@ function detectExplicitRequestedLanguage(text: string): string | null {
   if (/(中国語|chinese|中文).*(で|in|only|のみ|で返|で答)/i.test(s) || /(で|in).*(中国語|chinese|中文)/i.test(s)) return "zh";
   if (/(韓国語|korean|한국어).*(で|in|only|のみ|で返|で答)/i.test(s) || /(で|in).*(韓国語|korean|한국어)/i.test(s)) return "ko";
   if (/(ロシア語|russian).*(で|in|only|のみ|で返|で答)/i.test(s) || /(で|in).*(ロシア語|russian)/i.test(s)) return "ru";
+  if (/(アラビア語|arabic).*(で|in|only|のみ|で返|で答)/i.test(s) || /(で|in).*(アラビア語|arabic)/i.test(s)) return "ar";
+  if (/(ヘブライ語|hebrew).*(で|in|only|のみ|で返|で答)/i.test(s) || /(で|in).*(ヘブライ語|hebrew)/i.test(s)) return "he";
+  if (/(ヒンディー語|hindi).*(で|in|only|のみ|で返|で答)/i.test(s) || /(で|in).*(ヒンディー語|hindi)/i.test(s)) return "hi";
+  if (/(タイ語|thai).*(で|in|only|のみ|で返|で答)/i.test(s) || /(で|in).*(タイ語|thai)/i.test(s)) return "th";
+  if (/(ギリシャ語|greek).*(で|in|only|のみ|で返|で答)/i.test(s) || /(で|in).*(ギリシャ語|greek)/i.test(s)) return "el";
   return null;
 }
 
 function inferHabitualLanguages(prompt: string, messages: any[]): string[] {
-  const counts: Record<string, number> = { ja: 0, en: 0, zh: 0, ko: 0, ru: 0 };
+  const counts: Record<string, number> = { ja: 0, en: 0, zh: 0, ko: 0, ru: 0, ar: 0, he: 0, hi: 0, th: 0, el: 0 };
   const collect = (s: string): void => {
     if (!s) return;
     counts.ja += (s.match(/[ぁ-ゖァ-ヺ]/g) || []).length;
@@ -40,6 +51,11 @@ function inferHabitualLanguages(prompt: string, messages: any[]): string[] {
     counts.zh += (s.match(/[\u4E00-\u9FFF]/g) || []).length;
     counts.ko += (s.match(/[\uAC00-\uD7AF]/g) || []).length;
     counts.ru += (s.match(/[\u0400-\u04FF]/g) || []).length;
+    counts.ar += (s.match(/[\u0600-\u06FF]/g) || []).length;
+    counts.he += (s.match(/[\u0590-\u05FF]/g) || []).length;
+    counts.hi += (s.match(/[\u0900-\u097F]/g) || []).length;
+    counts.th += (s.match(/[\u0E00-\u0E7F]/g) || []).length;
+    counts.el += (s.match(/[\u0370-\u03FF]/g) || []).length;
   };
   collect(prompt);
   for (const m of messages.slice(-20)) {
@@ -55,7 +71,7 @@ function inferHabitualLanguages(prompt: string, messages: any[]): string[] {
   }
   const langs: string[] = ["en"]; // English is always allowed as setting language.
   const threshold = 6;
-  for (const k of ["ja", "zh", "ko", "ru"] as const) {
+  for (const k of ["ja", "zh", "ko", "ru", "ar", "he", "hi", "th", "el"] as const) {
     if (counts[k] >= threshold) langs.push(k);
   }
   return [...new Set(langs)];
@@ -148,6 +164,9 @@ export function createBeforePromptBuild(
 
     const budget = getCfg<number>(api, "memq.budgetTokens", 120);
     const ruleBudget = getCfg<number>(api, "memq.rules.budgetTokens", 80);
+    const styleBudget = getCfg<number>(api, "memq.style.budgetTokens", 24);
+    const styleEnabled = getCfg<boolean>(api, "memq.style.enabled", false);
+    const styleStrict = getCfg<boolean>(api, "memq.style.strict", false);
     const strictRules = getCfg<boolean>(api, "memq.rules.strict", false);
     const topK = getCfg<number>(api, "memq.topK", 5);
 
@@ -183,6 +202,24 @@ export function createBeforePromptBuild(
       .filter(Boolean);
     let preferredLang = "";
     let auditBypass = false;
+    const styleProfile: {
+      tone?: string;
+      persona?: string;
+      speakingStyle?: string;
+      verbosity?: string;
+      avoid?: string[];
+      strict?: boolean;
+    } = {
+      tone: getCfg<string>(api, "memq.style.tone", "").trim() || undefined,
+      persona: getCfg<string>(api, "memq.style.persona", "").trim() || undefined,
+      speakingStyle: getCfg<string>(api, "memq.style.speakingStyle", "").trim() || undefined,
+      verbosity: getCfg<string>(api, "memq.style.verbosity", "").trim() || undefined,
+      avoid: getCfg<string>(api, "memq.style.avoid", "")
+        .split("|")
+        .map((s) => s.trim())
+        .filter(Boolean),
+      strict: styleStrict
+    };
     try {
       const profile = await sidecar.profile();
       const critical = new Set(["tone", "avoid_suggestions", "language", "format", "verbosity"]);
@@ -194,6 +231,10 @@ export function createBeforePromptBuild(
       if (facts.length) {
         preferenceRuleHints = facts.map((f) => `${f.k}=${f.v}`);
         const langFact = facts.find((f) => f.k === "language" && (f.conf ?? 0) >= 0.6);
+        const toneFact = facts.find((f) => f.k === "tone" && (f.conf ?? 0) >= 0.55);
+        const verbosityFact = facts.find((f) => f.k === "verbosity" && (f.conf ?? 0) >= 0.55);
+        if (!styleProfile.tone && toneFact?.v) styleProfile.tone = toneFact.v;
+        if (!styleProfile.verbosity && verbosityFact?.v) styleProfile.verbosity = verbosityFact.v;
         if (!preferredLang && (langFact?.v === "ja" || langFact?.v === "en")) preferredLang = langFact.v;
         profilePrefTrace = {
           id: "pref_profile",
@@ -242,11 +283,13 @@ export function createBeforePromptBuild(
       if (prevAssistant && !prevBypass) {
         const prevAllowed = rt.lastAllowedLanguagesBySession?.get(sessionId) ?? allowedLang;
         const prevPreferred = rt.lastPreferredLanguageBySession?.get(sessionId) ?? preferredLang;
+        const prevStyle = rt.lastStyleProfileBySession?.get(sessionId) ?? styleProfile;
         await sidecar.auditOutput({
           sessionId,
           text: prevAssistant,
           allowedLanguages: prevAllowed,
-          preferredLanguage: prevPreferred || undefined
+          preferredLanguage: prevPreferred || undefined,
+          styleProfile: prevStyle
         });
       }
     } catch {
@@ -313,11 +356,22 @@ export function createBeforePromptBuild(
         strict: strictRules
       })
       : "";
+    const memstyle = compileMemStyle({
+      budgetTokens: styleBudget,
+      enabled: styleEnabled,
+      tone: styleProfile.tone,
+      persona: styleProfile.persona,
+      speakingStyle: styleProfile.speakingStyle,
+      verbosity: styleProfile.verbosity,
+      preferredLanguage: preferredLang || undefined,
+      avoid: styleProfile.avoid
+    });
 
     rt.lastCandidatesBySession.set(sessionId, [...surfaceItems, ...deepRaw]);
     rt.lastAllowedLanguagesBySession?.set(sessionId, allowedLang);
     if (preferredLang) rt.lastPreferredLanguageBySession?.set(sessionId, preferredLang);
     rt.lastAuditBypassBySession?.set(sessionId, auditBypass);
+    rt.lastStyleProfileBySession?.set(sessionId, styleProfile);
 
     metrics.add({
       mode: "api_text",
@@ -329,11 +383,11 @@ export function createBeforePromptBuild(
     });
     logInfo(
       api,
-      `[memq] before_prompt_build session=${sessionId} mode=api_text surface=${surfaceItems.length} deep=${deepRaw.length} fallback=${fallback} rules_tokens=${estimateTokens(memrules)} injected_tokens=${estimateTokens(memctx)}`
+      `[memq] before_prompt_build session=${sessionId} mode=api_text surface=${surfaceItems.length} deep=${deepRaw.length} fallback=${fallback} rules_tokens=${estimateTokens(memrules)} style_tokens=${estimateTokens(memstyle)} injected_tokens=${estimateTokens(memctx)}`
     );
 
     return {
-      prependContext: memrules ? `${memrules}\n${memctx}\n` : `${memctx}\n`,
+      prependContext: `${memrules ? `${memrules}\n` : ""}${memstyle ? `${memstyle}\n` : ""}${memctx}\n`,
       systemPrompt: strictRules
         ? "[MEMQ] Strict policy channel enabled. Follow MEMRULES as non-negotiable constraints; do not reveal secrets or API keys."
         : undefined
