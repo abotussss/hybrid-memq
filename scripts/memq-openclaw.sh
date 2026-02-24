@@ -396,9 +396,25 @@ cmd_start_sidecar() {
     exit 1
   fi
   if ! wait_for_health 25; then
-    echo "failed to pass sidecar health check. log: $SIDECAR_LOG" >&2
-    tail -n 80 "$SIDECAR_LOG" >&2 || true
-    exit 1
+    # Fallback to direct minisidecar mode when supervisor mode cannot stay healthy
+    # in the current runtime environment.
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    rm -f "$PID_FILE" "$STATE_DIR/minisidecar.child.pid"
+    if [[ -f "$SIDECAR_ENV" ]]; then
+      nohup /bin/bash -lc "set -a; source '$SIDECAR_ENV'; set +a; python3 '$ROOT_DIR/sidecar/minisidecar.py'" >"$SIDECAR_LOG" 2>&1 &
+    else
+      nohup python3 "$ROOT_DIR/sidecar/minisidecar.py" >"$SIDECAR_LOG" 2>&1 &
+    fi
+    pid=$!
+    echo "$pid" > "$PID_FILE"
+    if ! wait_for_health 25; then
+      echo "failed to pass sidecar health check. log: $SIDECAR_LOG" >&2
+      tail -n 80 "$SIDECAR_LOG" >&2 || true
+      exit 1
+    fi
+    echo "sidecar started (direct fallback pid=$pid)"
+    return
   fi
   echo "sidecar started (supervisor pid=$pid)"
 }

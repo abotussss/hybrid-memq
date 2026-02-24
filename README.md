@@ -168,9 +168,10 @@ MEMQ does not include any fixed character preset; persona/style is always user-d
 
 ### MEMRULES vs MEMSTYLE (conflict handling)
 - Channel order is fixed: `MEMRULES -> MEMSTYLE -> MEMCTX`.
-- Hard constraints belong to MEMRULES; style hints belong to MEMSTYLE.
+- Hard constraints belong to MEMRULES; style/persona/tone belong to MEMSTYLE only.
 - The plugin normalizes overlapping style keys (`tone`, `verbosity`) so MEMRULES and MEMSTYLE do not drift to different values in the same turn.
 - If you need strict behavior, set `memq.rules.strict=true` and keep MEMSTYLE focused on expression, not safety/policy.
+- MEMQ precedence mode can keep runtime behavior aligned to MEMQ channels even when workspace files (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `MEMORY.md`) contain conflicting hints.
 
 ### Output Audit Flow
 1. Sidecar runs primary policy audit and computes `riskScore`.
@@ -212,6 +213,7 @@ Main knobs (OpenClaw plugin config):
 - `memq.style.strict` (default `false`)
 - `memq.style.tone` / `memq.style.persona` / `memq.style.speakingStyle` / `memq.style.verbosity`
 - `memq.style.avoid` (`|`-separated)
+- `memq.precedence.enabled` (default `true`)
 
 Reference: `memq.yaml`
 
@@ -393,9 +395,10 @@ MEMQ は特定キャラの固定プリセットを同梱せず、スタイルは
 
 ### MEMRULES と MEMSTYLE の競合回避
 - 注入順は固定です: `MEMRULES -> MEMSTYLE -> MEMCTX`
-- 厳格制約は MEMRULES、口調・人格は MEMSTYLE に分離します
+- 厳格制約は MEMRULES、口調・人格・キャラ設定は MEMSTYLE のみに分離します
 - プラグイン側で重複しやすいスタイルキー（`tone`, `verbosity`）を正規化し、同一ターン内で値がぶつからないようにしています
 - 厳格運用時は `memq.rules.strict=true` を有効にし、MEMSTYLE は表現面の指定に限定してください
+- `memq.precedence.enabled=true` で、`AGENTS.md`/`SOUL.md`/`IDENTITY.md`/`MEMORY.md` と競合時に MEMQ チャネルを優先する実行方針を補強できます
 
 ### 出力監査フロー
 1. sidecar が一次監査で `riskScore` を算出  
@@ -442,6 +445,7 @@ scripts/memq-openclaw.sh configure
 - `memq.style.strict`（既定: `false`）
 - `memq.style.tone` / `memq.style.persona` / `memq.style.speakingStyle` / `memq.style.verbosity`
 - `memq.style.avoid`（`|`区切り）
+- `memq.precedence.enabled`（既定: `true`）
 
 参照: `memq.yaml` / `examples/openclaw.json`
 

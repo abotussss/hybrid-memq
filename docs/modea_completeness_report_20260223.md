@@ -4,6 +4,7 @@ Date: 2026-02-23
 Scope: close the previously unverified points (Ephemeral, idle sleep consolidation, profile learning, quarantine, channel policy structure, switching behavior) and stabilize sidecar runtime.
 
 Canonical evidence snapshot (tracked): `/Users/hiroyukimiyake/Documents/New project/docs/modea_completeness_evidence_20260223.json`
+Additional runtime learning snapshot (tracked): `/Users/hiroyukimiyake/Documents/New project/docs/memq_runtime_learning_validation_20260224.json`
 
 ## 1. Stability Fixes Applied
 
@@ -106,3 +107,14 @@ Key outcomes:
 ## 5. Practical Conclusion
 
 Mode A now has direct evidence for the previously missing core runtime claims (sleep consolidation, Ephemeral, quarantine, local profile learning) and includes sidecar hardening changes to reduce crash/restart fragility.
+
+## 6. Style/Rule Separation Validation (2026-02-24)
+
+Additional checks verified that:
+- style/tone/persona are not emitted via MEMRULES;
+- style/persona are managed via MEMSTYLE and learned from conversation;
+- MEMQ precedence line exists to reduce runtime conflicts with workspace files (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `MEMORY.md`).
+
+See:
+- `/Users/hiroyukimiyake/Documents/New project/docs/memq_runtime_learning_validation_20260224.json`
+- `/Users/hiroyukimiyake/Documents/New project/docs/memq_runtime_learning_validation_20260224.md`

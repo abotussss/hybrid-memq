@@ -1,0 +1,25 @@
+{
+  "source_checks": {
+    "memrules_no_style_japanese_native": true,
+    "memrules_no_style_avoid_line": true,
+    "hook_filters_style_keys_from_rules": true,
+    "hook_has_precedence_prompt": true
+  },
+  "runtime_tokens": {
+    "rules_tokens": 74,
+    "style_tokens": 22,
+    "memctx_tokens": 115
+  },
+  "runtime_hook_log_present": true,
+  "profile_snapshot": {
+    "avoid_suggestions": "1",
+    "language": "ja",
+    "persona": "calm_pragmatic",
+    "speaking_style": "clear_brief_actionable",
+    "suggestion_policy": "avoid_extra",
+    "tone": "keigo"
+  },
+  "learned_memstyle_keys_ok": true,
+  "learned_memrules_keys_ok": true,
+  "ok": true
+}

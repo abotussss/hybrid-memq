@@ -41,6 +41,9 @@ LAST_CONSOLIDATE_AT = 0
 
 PREF_TAU = {
     "tone": 21 * 24 * 3600,
+    "persona": 30 * 24 * 3600,
+    "speaking_style": 21 * 24 * 3600,
+    "style_avoid": 21 * 24 * 3600,
     "verbosity": 14 * 24 * 3600,
     "suggestion_policy": 30 * 24 * 3600,
     "language": 30 * 24 * 3600,
@@ -366,6 +369,14 @@ def extract_preference_events(text: str, source: str, evidence_uri: str | None =
         add("language", "ja", 0.9, 1)
     if re.search(r"(英語|english)", s, re.I):
         add("language", "en", 0.9, 1)
+    if re.search(r"(落ち着いた|冷静|calm)", s, re.I):
+        add("persona", "calm_pragmatic", 0.8, 1)
+    if re.search(r"(実務|実用|pragmatic)", s, re.I):
+        add("persona", "calm_pragmatic", 0.7, 0)
+    if re.search(r"(簡潔|brief|要点|短く)", s, re.I):
+        add("speaking_style", "clear_brief_actionable", 0.8, 1)
+    if re.search(r"(翻訳調を避け|translated.*avoid|中国語.*翻訳調.*避け)", s, re.I):
+        add("style_avoid", "translated_chinese_style_japanese", 0.9, 1)
     return out
 
 

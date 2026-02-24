@@ -110,6 +110,12 @@ function extractPreferenceEvents(text: string, nowSec: number) {
   if (/(詳しく|detailed)/.test(s)) out.push(mk("verbosity", "high", 0.7, 0));
   if (/(日本語|japanese)/.test(s)) out.push(mk("language", "ja", 0.9, 1));
   if (/(英語|english)/.test(s)) out.push(mk("language", "en", 0.9, 1));
+  if (/(落ち着いた|calm|冷静)/.test(s)) out.push(mk("persona", "calm_pragmatic", 0.8, 1));
+  if (/(実務|pragmatic|実用)/.test(s)) out.push(mk("persona", "calm_pragmatic", 0.7, 0));
+  if (/(簡潔|brief|短く|要点)/.test(s)) out.push(mk("speaking_style", "clear_brief_actionable", 0.8, 1));
+  if (/(翻訳調を避け|translated.*avoid|中国語.*翻訳調.*避け)/.test(s)) {
+    out.push(mk("style_avoid", "translated_chinese_style_japanese", 0.9, 1));
+  }
   if (/(覚えて|remember)/.test(s)) out.push(mk("retention.default", "deep", 1.0, 1));
   if (/(覚えなくて|don't remember|do not remember)/.test(s)) out.push(mk("retention.default", "surface_only", 1.0, 1));
   return out;
@@ -224,19 +230,27 @@ export function createBeforePromptBuild(
     };
     try {
       const profile = await sidecar.profile();
-      const critical = new Set(["tone", "avoid_suggestions", "language", "format", "verbosity"]);
+      const critical = new Set(["tone", "avoid_suggestions", "language", "format", "verbosity", "persona", "speaking_style", "style_avoid"]);
       const facts = profile.preferences
         .filter((p) => critical.has(p.key))
         .sort((a, b) => b.confidence - a.confidence)
         .slice(0, 5)
         .map((p) => ({ k: p.key, v: p.value, conf: p.confidence }));
       if (facts.length) {
-        preferenceRuleHints = facts.map((f) => `${f.k}=${f.v}`);
+        preferenceRuleHints = facts
+          .filter((f) => !["tone", "verbosity", "persona", "speaking_style", "style_avoid"].includes(f.k))
+          .map((f) => `${f.k}=${f.v}`);
         const langFact = facts.find((f) => f.k === "language" && (f.conf ?? 0) >= 0.6);
         const toneFact = facts.find((f) => f.k === "tone" && (f.conf ?? 0) >= 0.55);
         const verbosityFact = facts.find((f) => f.k === "verbosity" && (f.conf ?? 0) >= 0.55);
+        const personaFact = facts.find((f) => f.k === "persona" && (f.conf ?? 0) >= 0.55);
+        const speakingStyleFact = facts.find((f) => f.k === "speaking_style" && (f.conf ?? 0) >= 0.55);
+        const styleAvoidFact = facts.find((f) => f.k === "style_avoid" && (f.conf ?? 0) >= 0.55);
         if (!styleProfile.tone && toneFact?.v) styleProfile.tone = toneFact.v;
         if (!styleProfile.verbosity && verbosityFact?.v) styleProfile.verbosity = verbosityFact.v;
+        if (!styleProfile.persona && personaFact?.v) styleProfile.persona = personaFact.v;
+        if (!styleProfile.speakingStyle && speakingStyleFact?.v) styleProfile.speakingStyle = speakingStyleFact.v;
+        if ((!styleProfile.avoid || !styleProfile.avoid.length) && styleAvoidFact?.v) styleProfile.avoid = [styleAvoidFact.v];
         if (!preferredLang && (langFact?.v === "ja" || langFact?.v === "en")) preferredLang = langFact.v;
         profilePrefTrace = {
           id: "pref_profile",
@@ -350,12 +364,7 @@ export function createBeforePromptBuild(
       .filter(Boolean);
     const enableRuleChannel =
       strictRules || extraRules.length > 0 || allowedLang.length > 0 || preferenceRuleHints.length > 0;
-    const normalizedPrefHints = (() => {
-      const keep = preferenceRuleHints.filter((r) => !/^tone=|^verbosity=/.test(r));
-      if (styleProfile.tone) keep.push(`tone=${styleProfile.tone}`);
-      if (styleProfile.verbosity) keep.push(`verbosity=${styleProfile.verbosity}`);
-      return [...new Set(keep)];
-    })();
+    const normalizedPrefHints = [...new Set(preferenceRuleHints)];
     const memrules = enableRuleChannel
       ? compileMemRules({
           budgetTokens: ruleBudget,
@@ -398,9 +407,20 @@ export function createBeforePromptBuild(
 
     return {
       prependContext: `${memrules ? `${memrules}\n` : ""}${memstyle ? `${memstyle}\n` : ""}${memctx}\n`,
-      systemPrompt: strictRules
-        ? "[MEMQ] Strict policy channel enabled. Follow MEMRULES as non-negotiable constraints; do not reveal secrets or API keys."
-        : undefined
+      systemPrompt: (() => {
+        const precedence = getCfg<boolean>(api, "memq.precedence.enabled", true);
+        const parts: string[] = [];
+        if (strictRules) {
+          parts.push("[MEMQ] Strict policy channel enabled. Follow MEMRULES as non-negotiable constraints; do not reveal secrets or API keys.");
+        }
+        if (precedence) {
+          parts.push(
+            "[MEMQ] Priority: when AGENTS.md/SOUL.md/IDENTITY.md/MEMORY.md conflicts with MEMRULES/MEMSTYLE/MEMCTX, prioritize MEMQ channels for runtime style/rules/memory behavior."
+          );
+        }
+        if (!parts.length) return undefined;
+        return parts.join("\n");
+      })()
     };
   };
 }
