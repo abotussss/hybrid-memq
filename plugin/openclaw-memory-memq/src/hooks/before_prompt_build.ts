@@ -303,6 +303,16 @@ function closeToolCallGroups(messages: any[], keep: Set<number>): void {
   }
 }
 
+function sanitizeToolIntegrity(messages: any[]): { kept: any[]; removed: number } {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return { kept: [], removed: 0 };
+  }
+  const keep = new Set<number>(messages.map((_, i) => i));
+  closeToolCallGroups(messages, keep);
+  const kept = messages.filter((_, i) => keep.has(i));
+  return { kept, removed: Math.max(0, messages.length - kept.length) };
+}
+
 function selectMessageIndicesToKeep(messages: any[], maxKeep: number, strategy: string): number[] {
   if (messages.length <= maxKeep) {
     return messages.map((_, i) => i);
@@ -545,6 +555,18 @@ export function createBeforePromptBuild(
 
     const prompt = String(event?.prompt ?? "");
     const messages = Array.isArray(event?.messages) ? event.messages : [];
+    let integrityPrunedCount = 0;
+
+    // Always sanitize tool call/result integrity before any further history shaping.
+    // This self-heals already-broken sessions where tool results are orphaned.
+    {
+      const healed = sanitizeToolIntegrity(messages);
+      integrityPrunedCount = healed.removed;
+      if (integrityPrunedCount > 0) {
+        messages.splice(0, messages.length, ...healed.kept);
+        logInfo(api, `[memq] tool-integrity-heal session=${sessionId} removed=${integrityPrunedCount}`);
+      }
+    }
 
     const reconstructHistory = getCfg<boolean>(api, "memq.history.reconstruct.enabled", true);
     const hardCapHistory = getCfg<boolean>(api, "memq.history.hardCap.enabled", true);
@@ -894,7 +916,7 @@ export function createBeforePromptBuild(
     });
     logInfo(
       api,
-      `[memq] before_prompt_build session=${sessionId} mode=api_text surface=${surfaceItems.length} deep=${deepRaw.length} fallback=${fallback} pruned=${historyPrunedCount} kept=${historyKeepCount} keep_strategy=${keepStrategy} archive=${historyArchivedPath ? "1" : "0"} rules_tokens=${estimateTokens(memrules)} style_tokens=${estimateTokens(memstyle)} injected_tokens=${estimateTokens(memctx)}`
+      `[memq] before_prompt_build session=${sessionId} mode=api_text surface=${surfaceItems.length} deep=${deepRaw.length} fallback=${fallback} pruned=${historyPrunedCount} kept=${historyKeepCount} integrity_removed=${integrityPrunedCount} keep_strategy=${keepStrategy} archive=${historyArchivedPath ? "1" : "0"} rules_tokens=${estimateTokens(memrules)} style_tokens=${estimateTokens(memstyle)} injected_tokens=${estimateTokens(memctx)}`
     );
 
     return {
