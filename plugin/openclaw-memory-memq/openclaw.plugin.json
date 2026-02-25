@@ -27,6 +27,7 @@
       "memq.history.reconstruct.enabled": { "type": "boolean", "default": true },
       "memq.history.hardCap.enabled": { "type": "boolean", "default": true },
       "memq.history.keepRecentMessages": { "type": "number", "default": 6 },
+      "memq.history.keepRecentToolWindow": { "type": "number", "default": 8 },
       "memq.history.keepStrategy": { "type": "string", "default": "importance_recency" },
       "memq.history.summarizeMinMessages": { "type": "number", "default": 8 },
       "memq.history.archivePruned.enabled": { "type": "boolean", "default": true },

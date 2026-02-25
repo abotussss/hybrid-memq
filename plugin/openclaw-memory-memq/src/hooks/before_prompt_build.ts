@@ -262,6 +262,22 @@ function extractToolOutputKeys(m: any): string[] {
   return [...keys];
 }
 
+function messageHasToolTraffic(m: any): boolean {
+  const role = String((m as any)?.role ?? "").toLowerCase();
+  if (role === "tool" || role === "toolresult" || role === "function_call_output") return true;
+  if (extractToolEmitterKeys(m).length > 0) return true;
+  if (extractToolOutputKeys(m).length > 0) return true;
+  return false;
+}
+
+function stripStaleToolTraffic(messages: any[], keepRecentWindow: number): { kept: any[]; removed: number } {
+  if (!Array.isArray(messages) || messages.length === 0) return { kept: [], removed: 0 };
+  const n = messages.length;
+  const start = Math.max(0, n - Math.max(2, keepRecentWindow));
+  const kept = messages.filter((m, i) => (i >= start ? true : !messageHasToolTraffic(m)));
+  return { kept, removed: Math.max(0, n - kept.length) };
+}
+
 function closeToolCallGroups(messages: any[], keep: Set<number>): void {
   type Group = { emitters: Set<number>; outputs: Set<number> };
   const groups = new Map<string, Group>();
@@ -556,6 +572,7 @@ export function createBeforePromptBuild(
     const prompt = String(event?.prompt ?? "");
     const messages = Array.isArray(event?.messages) ? event.messages : [];
     let integrityPrunedCount = 0;
+    let staleToolPrunedCount = 0;
 
     // Always sanitize tool call/result integrity before any further history shaping.
     // This self-heals already-broken sessions where tool results are orphaned.
@@ -565,6 +582,15 @@ export function createBeforePromptBuild(
       if (integrityPrunedCount > 0) {
         messages.splice(0, messages.length, ...healed.kept);
         logInfo(api, `[memq] tool-integrity-heal session=${sessionId} removed=${integrityPrunedCount}`);
+      }
+    }
+
+    {
+      const trimmed = stripStaleToolTraffic(messages, Math.max(2, getCfg<number>(api, "memq.history.keepRecentToolWindow", 8)));
+      staleToolPrunedCount = trimmed.removed;
+      if (staleToolPrunedCount > 0) {
+        messages.splice(0, messages.length, ...trimmed.kept);
+        logInfo(api, `[memq] stale-tool-prune session=${sessionId} removed=${staleToolPrunedCount}`);
       }
     }
 
@@ -916,7 +942,7 @@ export function createBeforePromptBuild(
     });
     logInfo(
       api,
-      `[memq] before_prompt_build session=${sessionId} mode=api_text surface=${surfaceItems.length} deep=${deepRaw.length} fallback=${fallback} pruned=${historyPrunedCount} kept=${historyKeepCount} integrity_removed=${integrityPrunedCount} keep_strategy=${keepStrategy} archive=${historyArchivedPath ? "1" : "0"} rules_tokens=${estimateTokens(memrules)} style_tokens=${estimateTokens(memstyle)} injected_tokens=${estimateTokens(memctx)}`
+      `[memq] before_prompt_build session=${sessionId} mode=api_text surface=${surfaceItems.length} deep=${deepRaw.length} fallback=${fallback} pruned=${historyPrunedCount} kept=${historyKeepCount} integrity_removed=${integrityPrunedCount} stale_tool_removed=${staleToolPrunedCount} keep_strategy=${keepStrategy} archive=${historyArchivedPath ? "1" : "0"} rules_tokens=${estimateTokens(memrules)} style_tokens=${estimateTokens(memstyle)} injected_tokens=${estimateTokens(memctx)}`
     );
 
     return {
