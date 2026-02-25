@@ -28,3 +28,16 @@ fallback:
   entropy_max: 1.2
 consolidation:
   interval_sec: 3600
+history:
+  reconstruct_enabled: true
+  hard_cap_enabled: true
+  keep_recent_messages: 6
+  keep_strategy: importance_recency
+  summarize_min_messages: 8
+  archive_pruned_enabled: true
+  archive_pruned_redact_secrets_enabled: true
+  archive_pruned_max_file_bytes: 5242880
+  archive_pruned_max_files: 20
+  archive_pruned_retention_days: 14
+compat:
+  enable_legacy_before_agent_start: false

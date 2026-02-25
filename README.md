@@ -9,6 +9,8 @@ A production-focused memory plugin for OpenClaw with a **Surface / Deep / Epheme
 - Fixed-budget MEMCTX compilation (`k=v` fact DSL)
 - OpenClaw hook integration (`before_prompt_build`, `agent_end`, `before_compaction`, `gateway_start`)
 - Local sidecar (SQLite + embedding/retrieval + consolidation + audit)
+- Conversation reconstruction mode (summarize old turns into MEMQ, keep only minimal recent turns in prompt-time history)
+- Sidecar failure fallback (degrade to surface-only MEMCTX instead of failing the turn)
 - Preference/profile learning (non-LLM, local rules + decay aggregation)
 - Memory quarantine for suspicious/polluting facts
 - Optional high-risk dual output audit (rule-based + secondary LLM audit)
@@ -103,12 +105,26 @@ curl -sS http://127.0.0.1:7781/health
 
 ## How It Works
 ### Runtime (per turn)
-1. Build query embedding from current user turn.
-2. Retrieve from Surface first.
-3. Retrieve from Deep only when needed.
-4. Re-rank candidates and compile MEMCTX facts under strict token budget.
-5. Inject MEMCTX into OpenClaw prompt context.
-6. Update access stats and refresh Surface after response.
+1. Reconstruct conversation context:
+   - keep only minimal recent OpenClaw messages in active prompt-time history
+   - summarize older turns into MEMQ Surface/Deep traces
+   - enforce hard cap on active message window (no unbounded raw log injection)
+   - archive pruned raw history as local JSONL (insurance path)
+2. Build query embedding from current user turn + minimal recent context.
+3. Retrieve from Surface first.
+4. Retrieve from Deep only when needed, using both query cue and surface-derived cue.
+5. Re-rank candidates and compile MEMCTX facts under strict token budget.
+6. Inject MEMCTX into OpenClaw prompt context.
+7. Update access stats and refresh Surface after response.
+
+### Conversation Reconstruction Mode
+- MEMQ treats long raw session logs as insurance data, not primary LLM input.
+- During `before_prompt_build`, old turns are summarized into:
+  - `surface_only` trace(s): recent request/task bridge
+  - `deep` trace(s): durable preference/reference facts
+- Pruned raw history is appended to:
+  - `~/.openclaw/workspace/.memq/conversation_archive/<session>.jsonl`
+- This allows long conversations without growing the prompt history window unbounded.
 
 ### Sleep Consolidation (idle)
 The sidecar monitors activity and runs consolidation when idle:
@@ -202,7 +218,9 @@ Main knobs (OpenClaw plugin config):
 - `memq.sidecarUrl` (default `http://127.0.0.1:7781`)
 - `memq.budgetTokens` (default `120`)
 - `memq.topK` (default `5`)
+- `memq.retrieval.topM` (default `12`)
 - `memq.surface.max` (default `120`)
+- `memq.surface.ttlSec` (default `172800`)
 - `memq.rules.budgetTokens` (default `80`)
 - `memq.rules.strict` (default `false`)
 - `memq.rules.allowedLanguages` (default empty)
@@ -214,6 +232,17 @@ Main knobs (OpenClaw plugin config):
 - `memq.style.tone` / `memq.style.persona` / `memq.style.speakingStyle` / `memq.style.verbosity`
 - `memq.style.avoid` (`|`-separated)
 - `memq.precedence.enabled` (default `true`)
+- `memq.history.reconstruct.enabled` (default `true`)
+- `memq.history.hardCap.enabled` (default `true`)
+- `memq.history.keepRecentMessages` (default `6`)
+- `memq.history.keepStrategy` (default `importance_recency`, options: `importance_recency` / `last_n`)
+- `memq.history.summarizeMinMessages` (default `8`)
+- `memq.history.archivePruned.enabled` (default `true`)
+- `memq.history.archivePruned.redactSecrets.enabled` (default `true`)
+- `memq.history.archivePruned.maxFileBytes` (default `5242880`)
+- `memq.history.archivePruned.maxFiles` (default `20`)
+- `memq.history.archivePruned.retentionDays` (default `14`)
+- `memq.compat.enableLegacyBeforeAgentStart` (default `false`, enable only on legacy runtimes)
 
 Reference: `memq.yaml`
 
@@ -246,6 +275,7 @@ scripts/memq-openclaw.sh configure
 - Setup: `docs/openclaw-setup.md`
 - Architecture: `docs/architecture.md`
 - Security: `docs/security.md`
+- Validation (A-D gaps): `docs/memq_gap_validation_20260225.md`
 
 ## License
 MIT (`LICENSE`)
@@ -263,10 +293,12 @@ MIT (`LICENSE`)
 - 固定トークン予算での MEMCTX (`k=v` 形式)
 - OpenClaw フック連携（`before_prompt_build` / `agent_end` / `before_compaction` / `gateway_start`）
 - ローカル sidecar（SQLite + 検索 + 睡眠整理 + 監査）
+- 会話再構成モード（古いターンを MEMQ に要約保存し、プロンプト時の履歴は最小化）
 - 嗜好/方針プロファイルのローカル学習（非LLM）
 - 汚染疑い情報の隔離（quarantine）
 - 高リスク時のみ二次監査（ルール監査 + 任意LLM監査）
 - OpenClaw 標準メモリとのシームレス切替
+- sidecar 障害時のフェイルセーフ（ターン失敗ではなく surface-only MEMCTX へ自動退避）
 
 ### クイックスタート
 1) プラグインをビルド
@@ -330,12 +362,27 @@ curl -sS http://127.0.0.1:7781/health
 - `quickstart`: 自動化向けの非対話セットアップ
 
 ### 仕組み（実行時）
-1. 現在ターンのクエリ埋め込みを生成  
-2. 表層（Surface）を優先検索  
-3. 必要時のみ深層（Deep）検索  
-4. 候補を再ランクし、固定予算で MEMCTX を編成  
-5. OpenClaw のプロンプト文脈へ注入  
-6. 応答後にアクセス情報を更新して表層を再活性化
+1. 会話履歴を再構成  
+   - OpenClaw の active 履歴は「直近最小件数」だけ維持  
+   - 古いターンは MEMQ の surface/deep に要約保存  
+   - active 履歴には hard cap を適用し、生ログの無制限注入を防止  
+   - 刈り込んだ生ログは JSONL へローカル退避（保険）  
+2. 現在ターン + 最小履歴でクエリ埋め込みを生成  
+3. 表層（Surface）を優先検索  
+4. 必要時のみ深層（Deep）検索  
+   - クエリ手がかり + 表層手がかり の二段で想起  
+5. 候補を再ランクし、固定予算で MEMCTX を編成  
+6. OpenClaw のプロンプト文脈へ注入  
+7. 応答後にアクセス情報を更新して表層を再活性化
+
+### 会話再構成モード
+- 長いセッション生ログは「保険データ」であり、主要な LLM 入力にはしません。
+- `before_prompt_build` で古いターンを要約して:
+  - `surface_only` トレース: 直近依頼/タスクの橋渡し
+  - `deep` トレース: 嗜好/参照履歴などの持続情報
+- 刈り込んだ生ログは次へ保存:
+  - `~/.openclaw/workspace/.memq/conversation_archive/<session>.jsonl`
+- これにより、長大会話でも履歴ウィンドウ肥大を抑えながら文脈継続を維持します。
 
 ### 睡眠整理（Idle/Sleep Consolidation）
 ユーザー操作が一定時間ないと sidecar が自動整理を実行します。
@@ -434,7 +481,9 @@ scripts/memq-openclaw.sh configure
 - `memq.sidecarUrl`（既定: `http://127.0.0.1:7781`）
 - `memq.budgetTokens`（既定: `120`）
 - `memq.topK`（既定: `5`）
+- `memq.retrieval.topM`（既定: `12`）
 - `memq.surface.max`（既定: `120`）
+- `memq.surface.ttlSec`（既定: `172800`）
 - `memq.rules.budgetTokens`（既定: `80`）
 - `memq.rules.strict`（既定: `false`）
 - `memq.rules.allowedLanguages`（既定: 空）
@@ -446,6 +495,17 @@ scripts/memq-openclaw.sh configure
 - `memq.style.tone` / `memq.style.persona` / `memq.style.speakingStyle` / `memq.style.verbosity`
 - `memq.style.avoid`（`|`区切り）
 - `memq.precedence.enabled`（既定: `true`）
+- `memq.history.reconstruct.enabled`（既定: `true`）
+- `memq.history.hardCap.enabled`（既定: `true`）
+- `memq.history.keepRecentMessages`（既定: `6`）
+- `memq.history.keepStrategy`（既定: `importance_recency`、`importance_recency` / `last_n`）
+- `memq.history.summarizeMinMessages`（既定: `8`）
+- `memq.history.archivePruned.enabled`（既定: `true`）
+- `memq.history.archivePruned.redactSecrets.enabled`（既定: `true`）
+- `memq.history.archivePruned.maxFileBytes`（既定: `5242880`）
+- `memq.history.archivePruned.maxFiles`（既定: `20`）
+- `memq.history.archivePruned.retentionDays`（既定: `14`）
+- `memq.compat.enableLegacyBeforeAgentStart`（既定: `false`、旧ランタイム互換が必要な場合のみ有効化）
 
 参照: `memq.yaml` / `examples/openclaw.json`
 
@@ -460,3 +520,4 @@ scripts/memq-openclaw.sh configure
 - `docs/openclaw-setup.md`
 - `docs/architecture.md`
 - `docs/security.md`
+- `docs/memq_gap_validation_20260225.md`（A-D 検証レポート）

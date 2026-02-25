@@ -8,14 +8,32 @@ interface SurfaceEntry {
 
 export class SurfaceCache {
   private readonly max: number;
+  private readonly ttlMs: number;
   private readonly bySession = new Map<string, Map<string, SurfaceEntry>>();
 
-  constructor(max: number) {
+  constructor(max: number, ttlSec: number) {
     this.max = max;
+    this.ttlMs = Math.max(1, ttlSec) * 1000;
+  }
+
+  private pruneExpired(sessionId: string): Map<string, SurfaceEntry> | undefined {
+    const m = this.bySession.get(sessionId);
+    if (!m) return undefined;
+    const now = Date.now();
+    for (const [id, entry] of m.entries()) {
+      if (now - entry.at > this.ttlMs) {
+        m.delete(id);
+      }
+    }
+    if (!m.size) {
+      this.bySession.delete(sessionId);
+      return undefined;
+    }
+    return m;
   }
 
   getTop(sessionId: string, limit: number): SidecarSearchResult[] {
-    const m = this.bySession.get(sessionId);
+    const m = this.pruneExpired(sessionId);
     if (!m) return [];
     return [...m.values()]
       .sort((a, b) => b.at - a.at)
@@ -25,7 +43,7 @@ export class SurfaceCache {
 
   touch(sessionId: string, items: SidecarSearchResult[]): void {
     const now = Date.now();
-    const m = this.bySession.get(sessionId) ?? new Map<string, SurfaceEntry>();
+    const m = this.pruneExpired(sessionId) ?? new Map<string, SurfaceEntry>();
     for (const item of items) {
       m.set(item.id, { id: item.id, at: now, data: item });
     }

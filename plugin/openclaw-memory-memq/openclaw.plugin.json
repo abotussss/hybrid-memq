@@ -24,8 +24,21 @@
       "memq.style.verbosity": { "type": "string", "default": "" },
       "memq.style.avoid": { "type": "string", "default": "" },
       "memq.precedence.enabled": { "type": "boolean", "default": true },
+      "memq.history.reconstruct.enabled": { "type": "boolean", "default": true },
+      "memq.history.hardCap.enabled": { "type": "boolean", "default": true },
+      "memq.history.keepRecentMessages": { "type": "number", "default": 6 },
+      "memq.history.keepStrategy": { "type": "string", "default": "importance_recency" },
+      "memq.history.summarizeMinMessages": { "type": "number", "default": 8 },
+      "memq.history.archivePruned.enabled": { "type": "boolean", "default": true },
+      "memq.history.archivePruned.redactSecrets.enabled": { "type": "boolean", "default": true },
+      "memq.history.archivePruned.maxFileBytes": { "type": "number", "default": 5242880 },
+      "memq.history.archivePruned.maxFiles": { "type": "number", "default": 20 },
+      "memq.history.archivePruned.retentionDays": { "type": "number", "default": 14 },
+      "memq.compat.enableLegacyBeforeAgentStart": { "type": "boolean", "default": false },
+      "memq.retrieval.topM": { "type": "number", "default": 12 },
       "memq.topK": { "type": "number", "default": 5 },
-      "memq.surface.max": { "type": "number", "default": 120 }
+      "memq.surface.max": { "type": "number", "default": 120 },
+      "memq.surface.ttlSec": { "type": "number", "default": 172800 }
     }
   },
   "uiHints": {

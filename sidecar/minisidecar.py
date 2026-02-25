@@ -12,7 +12,7 @@ import time
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
@@ -1154,6 +1154,264 @@ def idle_loop():
             print(f"[idle-consolidate] error: {e}", flush=True)
 
 
+def normalize_retention_scope(v: str) -> str:
+    s = str(v or "").strip().lower()
+    return "surface_only" if s == "surface_only" else "deep"
+
+
+def normalize_privacy_scope(v: str) -> str:
+    s = str(v or "").strip().lower()
+    return s if s in {"private", "shareable"} else "private"
+
+
+def add_trace(payload: Dict[str, Any]) -> Dict[str, Any]:
+    trace_id = str(payload.get("id", "")).strip()
+    if not trace_id:
+        return {"ok": False, "error": "id required"}
+    vector = payload.get("vector") or []
+    if not isinstance(vector, list) or len(vector) != DIM:
+        return {"ok": False, "error": f"vector dim must be {DIM}"}
+    raw_text = str(payload.get("rawText", ""))
+    if contains_injection_like(raw_text):
+        quarantine(trace_id, raw_text, "prompt_injection_like", 0.95)
+        return {"ok": False, "quarantined": True, "reason": "prompt_injection_like"}
+
+    facts_in = payload.get("facts", [])
+    sanitized = []
+    for f in facts_in:
+        key = str(f.get("k", ""))
+        val = str(f.get("v", ""))
+        sv = sanitize_fact(key, val, raw_text)
+        if sv is None:
+            quarantine(trace_id, f"{key}={val}", "invalid_or_injection_fact", 0.8)
+            continue
+        sanitized.append({"k": sv[0], "v": sv[1], "conf": float(f.get("conf", 0.6))})
+
+    events = extract_preference_events(raw_text, "user_msg", payload.get("evidenceUri"))
+    policy_events = extract_policy_events(raw_text, "memory_policy", payload.get("evidenceUri"))
+    insert_pref_events(events + policy_events)
+    refresh_profiles(now_sec())
+
+    pol = profile_snapshot()["memoryPolicies"]
+    polmap = {x["key"]: x["value"] for x in pol}
+    retention_default = str(polmap.get("retention.default", "deep"))
+    ttl_default = int(polmap.get("ttl.default_days", "365"))
+    privacy_default = str(polmap.get("privacy.default", "private"))
+
+    retention = normalize_retention_scope(payload.get("retentionScope", retention_default))
+    ttl_days_raw: Any = payload.get("ttlDays", ttl_default)
+    try:
+        ttl_days = max(0, int(ttl_days_raw))
+    except Exception:
+        ttl_days = ttl_default
+    privacy = normalize_privacy_scope(payload.get("privacyScope", privacy_default))
+
+    with LOCK:
+        with conn() as c:
+            c.execute(
+                """
+                INSERT INTO memory_trace
+                (id, ts_sec, type, importance, confidence, strength, volatility_class,
+                 facts_json, tags_json, raw_text, emb_json, access_count, last_access_at_sec,
+                 updated_at_sec, retention_scope, ttl_days, privacy_scope)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  ts_sec=excluded.ts_sec,
+                  type=excluded.type,
+                  importance=excluded.importance,
+                  confidence=excluded.confidence,
+                  strength=excluded.strength,
+                  volatility_class=excluded.volatility_class,
+                  facts_json=excluded.facts_json,
+                  tags_json=excluded.tags_json,
+                  raw_text=excluded.raw_text,
+                  emb_json=excluded.emb_json,
+                  updated_at_sec=excluded.updated_at_sec,
+                  retention_scope=excluded.retention_scope,
+                  ttl_days=excluded.ttl_days,
+                  privacy_scope=excluded.privacy_scope
+                """,
+                (
+                    trace_id,
+                    int(payload.get("tsSec", now_sec())),
+                    payload.get("type", "note"),
+                    float(payload.get("importance", 0.5)),
+                    float(payload.get("confidence", 0.7)),
+                    float(payload.get("strength", 0.5)),
+                    payload.get("volatilityClass", "medium"),
+                    json.dumps(sanitized, ensure_ascii=True),
+                    json.dumps(payload.get("tags", []), ensure_ascii=True),
+                    raw_text,
+                    json.dumps(vector),
+                    now_sec(),
+                    now_sec(),
+                    retention,
+                    ttl_days,
+                    privacy,
+                ),
+            )
+            c.commit()
+    return {
+        "ok": True,
+        "id": trace_id,
+        "tsSec": int(payload.get("tsSec", now_sec())),
+        "type": payload.get("type", "note"),
+        "importance": float(payload.get("importance", 0.5)),
+        "confidence": float(payload.get("confidence", 0.7)),
+        "strength": float(payload.get("strength", 0.5)),
+        "volatilityClass": payload.get("volatilityClass", "medium"),
+        "acceptedFacts": len(sanitized),
+        "quarantinedFacts": len(facts_in) - len(sanitized),
+        "retentionScope": retention,
+        "ttlDays": ttl_days,
+        "privacyScope": privacy,
+        "facts": sanitized,
+        "tags": payload.get("tags", []),
+        "rawText": raw_text,
+    }
+
+
+def sanitize_summary_text(v: str) -> str:
+    t = sanitize_text(v, 260)
+    t = re.sub(r"(ignore\s+previous|system\s+prompt|developer\s+message|api\s*key|you\s+are\s+chatgpt)", "[filtered]", t, flags=re.I)
+    return t
+
+
+def message_items(raw_items: Any) -> List[Dict[str, str]]:
+    if not isinstance(raw_items, list):
+        return []
+    out: List[Dict[str, str]] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        role = sanitize_text(str(item.get("role", "user")), 16).lower()
+        if role not in {"user", "assistant", "system", "tool"}:
+            role = "user"
+        text = sanitize_text(str(item.get("text", "")), 1200)
+        if not text:
+            continue
+        out.append({"role": role, "text": text})
+    return out
+
+
+def dedupe_facts(facts: List[Dict[str, Any]], max_items: int) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for f in facts:
+        k = str(f.get("k", "")).strip()
+        v = str(f.get("v", "")).strip()
+        if not k or not v:
+            continue
+        sig = f"{k}={v}"
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append({"k": k, "v": v, "conf": float(f.get("conf", 0.6))})
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def extract_active_task(user_texts: List[str]) -> str:
+    task_pat = re.compile(
+        r"(implement|fix|add|create|build|write|test|verify|refactor|design|analyze|調査|実装|修正|追加|作成|構築|検証|設計|改善)",
+        re.I,
+    )
+    for t in reversed(user_texts):
+        if task_pat.search(t):
+            return sanitize_summary_text(t)
+    return ""
+
+
+def summarize_conversation(session_id: str, raw_items: Any, now: Optional[int] = None) -> Dict[str, Any]:
+    items = message_items(raw_items)
+    if not items:
+        return {"ok": True, "summarized": 0, "surface": None, "deep": None, "bridgeNote": ""}
+
+    ts = int(now or now_sec())
+    user_texts = [x["text"] for x in items if x["role"] == "user"]
+    assistant_texts = [x["text"] for x in items if x["role"] == "assistant"]
+    latest_user = sanitize_summary_text(user_texts[-1]) if user_texts else ""
+    latest_assistant = sanitize_summary_text(assistant_texts[-1]) if assistant_texts else ""
+    active_task = extract_active_task(user_texts)
+    joined_user = "\n".join(user_texts[-8:])
+    joined_all = "\n".join([f'{x["role"]}: {x["text"]}' for x in items[-24:]])
+    digest_src = f"{session_id}\n{joined_all}"
+    digest = hashlib.sha1(digest_src.encode("utf-8")).hexdigest()[:16]
+
+    pref_events = extract_preference_events(joined_user, "conversation_summary")
+    policy_events = extract_policy_events(joined_user, "conversation_summary")
+    pref_facts = [
+        {"k": str(e.get("key", "")), "v": str(e.get("value", "")), "conf": 0.82 if int(e.get("explicit", 0)) else 0.66}
+        for e in pref_events + policy_events
+    ]
+
+    surface_facts: List[Dict[str, Any]] = []
+    if latest_user:
+        surface_facts.append({"k": "recent_user_request", "v": latest_user, "conf": 0.75})
+    if active_task:
+        surface_facts.append({"k": "active_task", "v": active_task, "conf": 0.78})
+    if latest_assistant:
+        surface_facts.append({"k": "last_agent_summary", "v": latest_assistant, "conf": 0.6})
+    surface_facts = dedupe_facts(surface_facts, 4)
+
+    deep_facts: List[Dict[str, Any]] = []
+    deep_facts.extend(pref_facts)
+    if latest_user:
+        deep_facts.append({"k": "latest_topic", "v": latest_user, "conf": 0.62})
+    if latest_assistant:
+        deep_facts.append({"k": "latest_resolution", "v": latest_assistant, "conf": 0.58})
+    deep_facts = dedupe_facts(deep_facts, 8)
+
+    surface_text = sanitize_text(f"session={session_id} recent={latest_user} task={active_task}", 900)
+    deep_text = sanitize_text(f"session={session_id} summary={joined_all}", 1600)
+    surface_id = f"convsurf:{session_id}:{digest}"
+    deep_id = f"convdeep:{session_id}:{digest}"
+
+    surface_payload = {
+        "id": surface_id,
+        "vector": embed_text(surface_text),
+        "tsSec": ts,
+        "type": "plan" if active_task else "note",
+        "importance": 0.62 if active_task else 0.5,
+        "confidence": 0.72,
+        "strength": 0.72,
+        "volatilityClass": "high",
+        "facts": surface_facts,
+        "tags": ["conversation", "surface", "summary", f"session:{session_id}"],
+        "rawText": f"[conversation_surface] {surface_text}",
+        "retentionScope": "surface_only",
+        "ttlDays": 3,
+        "privacyScope": "private",
+    }
+    deep_payload = {
+        "id": deep_id,
+        "vector": embed_text(deep_text),
+        "tsSec": ts,
+        "type": "preference" if any(f["k"] in {"tone", "language", "format", "verbosity", "persona", "speaking_style"} for f in deep_facts) else "note",
+        "importance": 0.66 if pref_facts else 0.54,
+        "confidence": 0.7,
+        "strength": 0.64,
+        "volatilityClass": "medium",
+        "facts": deep_facts,
+        "tags": ["conversation", "deep", "summary", f"session:{session_id}"],
+        "rawText": f"[conversation_deep] {sanitize_text(joined_user, 1200)}",
+        "retentionScope": "deep",
+        "ttlDays": 365,
+        "privacyScope": "private",
+    }
+
+    surface_result = add_trace(surface_payload)
+    deep_result = add_trace(deep_payload)
+    return {
+        "ok": bool(surface_result.get("ok") or deep_result.get("ok")),
+        "summarized": len(items),
+        "surface": surface_result if surface_result.get("ok") else None,
+        "deep": deep_result if deep_result.get("ok") else None,
+        "bridgeNote": "prior_context_compacted_into_memq_surface_deep",
+    }
+
+
 class H(BaseHTTPRequestHandler):
     def _read_json(self) -> Dict:
         n = int(self.headers.get("Content-Length", "0"))
@@ -1267,81 +1525,18 @@ class H(BaseHTTPRequestHandler):
             )
 
         if p == "/index/add":
-            trace_id = str(body.get("id"))
-            raw_text = str(body.get("rawText", ""))
-            if contains_injection_like(raw_text):
-                quarantine(trace_id, raw_text, "prompt_injection_like", 0.95)
-                return self._json({"ok": False, "quarantined": True, "reason": "prompt_injection_like"})
+            return self._json(add_trace(body))
 
-            facts_in = body.get("facts", [])
-            sanitized = []
-            for f in facts_in:
-                key = str(f.get("k", ""))
-                val = str(f.get("v", ""))
-                sv = sanitize_fact(key, val, raw_text)
-                if sv is None:
-                    quarantine(trace_id, f"{key}={val}", "invalid_or_injection_fact", 0.8)
-                    continue
-                sanitized.append({"k": sv[0], "v": sv[1], "conf": float(f.get("conf", 0.6))})
-
-            events = extract_preference_events(raw_text, "user_msg", body.get("evidenceUri"))
-            policy_events = extract_policy_events(raw_text, "memory_policy", body.get("evidenceUri"))
-            insert_pref_events(events + policy_events)
-            refresh_profiles(now_sec())
-
-            # Apply learned memory policy defaults.
-            pol = profile_snapshot()["memoryPolicies"]
-            polmap = {x["key"]: x["value"] for x in pol}
-            retention = str(polmap.get("retention.default", "deep"))
-            ttl_days = int(polmap.get("ttl.default_days", "365"))
-            privacy = str(polmap.get("privacy.default", "private"))
-
-            with LOCK:
-                with conn() as c:
-                    c.execute(
-                        """
-                        INSERT INTO memory_trace
-                        (id, ts_sec, type, importance, confidence, strength, volatility_class,
-                         facts_json, tags_json, raw_text, emb_json, access_count, last_access_at_sec,
-                         updated_at_sec, retention_scope, ttl_days, privacy_scope)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
-                        ON CONFLICT(id) DO UPDATE SET
-                          ts_sec=excluded.ts_sec,
-                          type=excluded.type,
-                          importance=excluded.importance,
-                          confidence=excluded.confidence,
-                          strength=excluded.strength,
-                          volatility_class=excluded.volatility_class,
-                          facts_json=excluded.facts_json,
-                          tags_json=excluded.tags_json,
-                          raw_text=excluded.raw_text,
-                          emb_json=excluded.emb_json,
-                          updated_at_sec=excluded.updated_at_sec,
-                          retention_scope=excluded.retention_scope,
-                          ttl_days=excluded.ttl_days,
-                          privacy_scope=excluded.privacy_scope
-                        """,
-                        (
-                            trace_id,
-                            int(body.get("tsSec", now_sec())),
-                            body.get("type", "note"),
-                            float(body.get("importance", 0.5)),
-                            float(body.get("confidence", 0.7)),
-                            float(body.get("strength", 0.5)),
-                            body.get("volatilityClass", "medium"),
-                            json.dumps(sanitized, ensure_ascii=True),
-                            json.dumps(body.get("tags", []), ensure_ascii=True),
-                            raw_text,
-                            json.dumps(body.get("vector", [])),
-                            now_sec(),
-                            now_sec(),
-                            retention,
-                            ttl_days,
-                            privacy,
-                        ),
-                    )
-                    c.commit()
-            return self._json({"ok": True, "acceptedFacts": len(sanitized), "quarantinedFacts": len(facts_in) - len(sanitized)})
+        if p == "/conversation/summarize":
+            sid = str(body.get("sessionId", "default") or "default")
+            now_v = body.get("nowSec")
+            now_i: Optional[int] = None
+            try:
+                if now_v is not None:
+                    now_i = int(now_v)
+            except Exception:
+                now_i = None
+            return self._json(summarize_conversation(sid, body.get("items", []), now_i))
 
         if p == "/index/search":
             q = body.get("vector") or [0.0] * DIM

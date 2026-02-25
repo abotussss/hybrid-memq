@@ -963,6 +963,20 @@ class AddReq(BaseModel):
     tags: List[str] = Field(default_factory=list)
     evidenceUri: Optional[str] = None
     rawText: Optional[str] = None
+    retentionScope: Optional[str] = None
+    ttlDays: Optional[int] = None
+    privacyScope: Optional[str] = None
+
+
+class ConversationItemReq(BaseModel):
+    role: str
+    text: str
+
+
+class ConversationSummarizeReq(BaseModel):
+    sessionId: str
+    items: List[ConversationItemReq] = Field(default_factory=list)
+    nowSec: Optional[int] = None
 
 
 class SearchReq(BaseModel):
@@ -1117,6 +1131,149 @@ def audit_stats() -> Dict[str, Any]:
     }
 
 
+def _normalize_retention_scope(v: Optional[str], default_value: str) -> str:
+    s = str(v or default_value or "deep").strip().lower()
+    return "surface_only" if s == "surface_only" else "deep"
+
+
+def _normalize_privacy_scope(v: Optional[str], default_value: str) -> str:
+    s = str(v or default_value or "private").strip().lower()
+    return s if s in {"private", "shareable"} else "private"
+
+
+def _summary_text(v: str, max_len: int = 260) -> str:
+    t = _sanitize_text(v, max_len)
+    return re.sub(
+        r"(ignore\s+previous|system\s+prompt|developer\s+message|api\s*key|you\s+are\s+chatgpt)",
+        "[filtered]",
+        t,
+        flags=re.I,
+    )
+
+
+def _dedupe_facts(facts: List[Dict[str, Any]], max_items: int) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for f in facts:
+        k = str(f.get("k", "")).strip()
+        v = str(f.get("v", "")).strip()
+        if not k or not v:
+            continue
+        sig = f"{k}={v}"
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append({"k": k, "v": v, "conf": float(f.get("conf", 0.6))})
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _extract_active_task(user_texts: List[str]) -> str:
+    pat = re.compile(
+        r"(implement|fix|add|create|build|write|test|verify|refactor|design|analyze|調査|実装|修正|追加|作成|構築|検証|設計|改善)",
+        re.I,
+    )
+    for t in reversed(user_texts):
+        if pat.search(t):
+            return _summary_text(t, 260)
+    return ""
+
+
+@app.post("/conversation/summarize")
+def conversation_summarize(req: ConversationSummarizeReq) -> Dict[str, Any]:
+    _touch_activity(req.nowSec)
+    items = [
+        {"role": _sanitize_text(x.role, 16).lower(), "text": _sanitize_text(x.text, 1200)}
+        for x in (req.items or [])
+        if _sanitize_text(x.text, 1200)
+    ]
+    if not items:
+        return {"ok": True, "summarized": 0, "surface": None, "deep": None, "bridgeNote": ""}
+
+    ts = int(req.nowSec or _now())
+    user_texts = [x["text"] for x in items if x["role"] == "user"]
+    assistant_texts = [x["text"] for x in items if x["role"] == "assistant"]
+    latest_user = _summary_text(user_texts[-1], 260) if user_texts else ""
+    latest_assistant = _summary_text(assistant_texts[-1], 260) if assistant_texts else ""
+    active_task = _extract_active_task(user_texts)
+    joined_user = "\n".join(user_texts[-8:])
+    joined_all = "\n".join([f'{x["role"]}: {x["text"]}' for x in items[-24:]])
+    digest = hashlib.sha1(f"{req.sessionId}\n{joined_all}".encode("utf-8")).hexdigest()[:16]
+
+    pref_events = _extract_preference_events(joined_user, "conversation_summary", None)
+    policy_events: List[Dict[str, Any]] = []
+    pref_facts = [
+        {"k": str(e.get("key", "")), "v": str(e.get("value", "")), "conf": 0.82 if int(e.get("explicit", 0)) else 0.66}
+        for e in pref_events + policy_events
+    ]
+
+    surface_facts: List[Dict[str, Any]] = []
+    if latest_user:
+        surface_facts.append({"k": "recent_user_request", "v": latest_user, "conf": 0.75})
+    if active_task:
+        surface_facts.append({"k": "active_task", "v": active_task, "conf": 0.78})
+    if latest_assistant:
+        surface_facts.append({"k": "last_agent_summary", "v": latest_assistant, "conf": 0.6})
+    surface_facts = _dedupe_facts(surface_facts, 4)
+
+    deep_facts: List[Dict[str, Any]] = []
+    deep_facts.extend(pref_facts)
+    if latest_user:
+        deep_facts.append({"k": "latest_topic", "v": latest_user, "conf": 0.62})
+    if latest_assistant:
+        deep_facts.append({"k": "latest_resolution", "v": latest_assistant, "conf": 0.58})
+    deep_facts = _dedupe_facts(deep_facts, 8)
+
+    surface_text = _sanitize_text(f"session={req.sessionId} recent={latest_user} task={active_task}", 900)
+    deep_text = _sanitize_text(f"session={req.sessionId} summary={joined_all}", 1600)
+    surface_res = add(
+        AddReq(
+            id=f"convsurf:{req.sessionId}:{digest}",
+            vector=_embed_text(surface_text).tolist(),
+            tsSec=ts,
+            type="plan" if active_task else "note",
+            importance=0.62 if active_task else 0.5,
+            confidence=0.72,
+            strength=0.72,
+            volatilityClass="high",
+            facts=surface_facts,
+            tags=["conversation", "surface", "summary", f"session:{req.sessionId}"],
+            rawText=f"[conversation_surface] {surface_text}",
+            retentionScope="surface_only",
+            ttlDays=3,
+            privacyScope="private",
+        )
+    )
+    deep_res = add(
+        AddReq(
+            id=f"convdeep:{req.sessionId}:{digest}",
+            vector=_embed_text(deep_text).tolist(),
+            tsSec=ts,
+            type="preference"
+            if any(f["k"] in {"tone", "language", "format", "verbosity", "persona", "speaking_style"} for f in deep_facts)
+            else "note",
+            importance=0.66 if pref_facts else 0.54,
+            confidence=0.7,
+            strength=0.64,
+            volatilityClass="medium",
+            facts=deep_facts,
+            tags=["conversation", "deep", "summary", f"session:{req.sessionId}"],
+            rawText=f"[conversation_deep] {_sanitize_text(joined_user, 1200)}",
+            retentionScope="deep",
+            ttlDays=365,
+            privacyScope="private",
+        )
+    )
+    return {
+        "ok": bool(surface_res.get("ok") or deep_res.get("ok")),
+        "summarized": len(items),
+        "surface": surface_res if surface_res.get("ok") else None,
+        "deep": deep_res if deep_res.get("ok") else None,
+        "bridgeNote": "prior_context_compacted_into_memq_surface_deep",
+    }
+
+
 @app.post("/index/add")
 def add(req: AddReq) -> Dict[str, Any]:
     _touch_activity()
@@ -1147,9 +1304,13 @@ def add(req: AddReq) -> Dict[str, Any]:
     with _conn() as c:
         pol = c.execute("SELECT policy_key, policy_value FROM memory_policy_profile").fetchall()
     pol_map = {r["policy_key"]: r["policy_value"] for r in pol}
-    retention = str(pol_map.get("retention.default", "deep"))
-    ttl_days = int(pol_map.get("ttl.default_days", "365"))
-    privacy = str(pol_map.get("privacy.default", "private"))
+    retention_default = str(pol_map.get("retention.default", "deep"))
+    ttl_default = int(pol_map.get("ttl.default_days", "365"))
+    privacy_default = str(pol_map.get("privacy.default", "private"))
+    retention = _normalize_retention_scope(req.retentionScope, retention_default)
+    ttl_days = int(req.ttlDays if req.ttlDays is not None else ttl_default)
+    ttl_days = max(0, ttl_days)
+    privacy = _normalize_privacy_scope(req.privacyScope, privacy_default)
 
     with _lock:
         with _conn() as c:
@@ -1204,7 +1365,24 @@ def add(req: AddReq) -> Dict[str, Any]:
             )
             c.commit()
 
-    return {"ok": True, "id": req.id, "acceptedFacts": len(cleaned_facts), "quarantinedFacts": len(req.facts) - len(cleaned_facts)}
+    return {
+        "ok": True,
+        "id": req.id,
+        "tsSec": req.tsSec,
+        "type": req.type,
+        "importance": req.importance,
+        "confidence": req.confidence,
+        "strength": req.strength,
+        "volatilityClass": req.volatilityClass,
+        "acceptedFacts": len(cleaned_facts),
+        "quarantinedFacts": len(req.facts) - len(cleaned_facts),
+        "retentionScope": retention,
+        "ttlDays": ttl_days,
+        "privacyScope": privacy,
+        "facts": cleaned_facts,
+        "tags": req.tags,
+        "rawText": req.rawText,
+    }
 
 
 def _row_to_item(r: sqlite3.Row) -> Item:
@@ -1305,6 +1483,7 @@ def touch(req: TouchReq) -> Dict[str, Any]:
     return {"ok": True, "touched": len(req.ids)}
 
 
+@app.post("/consolidate")
 @app.post("/index/consolidate")
 def consolidate(req: ConsolidateReq) -> Dict[str, Any]:
     _touch_activity(req.nowSec)

@@ -9,7 +9,10 @@ import { getCfg, logInfo } from "./services/config.js";
 
 export default function register(api: any): void {
   const sidecar = new SidecarClient(getCfg(api, "memq.sidecarUrl", "http://127.0.0.1:7781"));
-  const surface = new SurfaceCache(getCfg(api, "memq.surface.max", 120));
+  const surface = new SurfaceCache(
+    getCfg(api, "memq.surface.max", 120),
+    getCfg(api, "memq.surface.ttlSec", 172800)
+  );
   const metrics = new RuntimeMetrics();
   const rt: RuntimeState = {
     lastCandidatesBySession: new Map(),
@@ -27,12 +30,17 @@ export default function register(api: any): void {
   // Prefer modern lifecycle API (`api.on`) and keep compatibility.
   if (typeof api.on === "function") {
     api.on("before_prompt_build", before);
-    // Compatibility for runtimes that expose only before_agent_start.
-    api.on("before_agent_start", before);
+    // Compatibility hook is opt-in to avoid duplicate injection on modern runtimes.
+    if (getCfg<boolean>(api, "memq.compat.enableLegacyBeforeAgentStart", false)) {
+      api.on("before_agent_start", before);
+    }
     api.on("agent_end", onEnd);
     api.on("before_compaction", onCompaction);
   } else if (typeof api.registerHook === "function") {
     api.registerHook("before_prompt_build", before);
+    if (getCfg<boolean>(api, "memq.compat.enableLegacyBeforeAgentStart", true)) {
+      api.registerHook("before_agent_start", before);
+    }
     api.registerHook("agent_end", onEnd);
     api.registerHook("before_compaction", onCompaction);
   }

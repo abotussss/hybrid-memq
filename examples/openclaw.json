@@ -2,7 +2,7 @@
   "plugins": {
     "load": {
       "paths": [
-        "/Users/hiroyukimiyake/Documents/New project/plugin/openclaw-memory-memq"
+        "~/hybrid-memq/plugin/openclaw-memory-memq"
       ]
     },
     "slots": {
@@ -10,13 +10,17 @@
     }
   },
   "memq": {
-    "workspaceRoot": "/Users/hiroyukimiyake/Documents/New project",
+    "workspaceRoot": "~/hybrid-memq",
     "sidecarUrl": "http://127.0.0.1:7781",
     "mode": "api_text",
     "budgetTokens": 120,
     "topK": 5,
+    "retrieval": {
+      "topM": 12
+    },
     "surface": {
-      "max": 120
+      "max": 120,
+      "ttlSec": 172800
     },
     "writeGate": {
       "low": 0.45,
@@ -28,6 +32,29 @@
     },
     "consolidation": {
       "intervalSec": 3600
+    },
+    "history": {
+      "reconstruct": {
+        "enabled": true
+      },
+      "hardCap": {
+        "enabled": true
+      },
+      "keepRecentMessages": 6,
+      "keepStrategy": "importance_recency",
+      "summarizeMinMessages": 8,
+      "archivePruned": {
+        "enabled": true,
+        "redactSecrets": {
+          "enabled": true
+        },
+        "maxFileBytes": 5242880,
+        "maxFiles": 20,
+        "retentionDays": 14
+      }
+    },
+    "compat": {
+      "enableLegacyBeforeAgentStart": false
     }
   }
 }
