@@ -205,6 +205,104 @@ function scoreMessageForRetention(m: any, idx: number, total: number): number {
   return score;
 }
 
+function expandToolCallKeys(value: unknown): string[] {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!raw) return [];
+  const base = raw.split("|", 1)[0]?.trim() ?? "";
+  return [...new Set([raw, base].filter(Boolean))];
+}
+
+function messageContentBlocks(m: any): any[] {
+  const content = (m as any)?.content;
+  return Array.isArray(content) ? content : [];
+}
+
+function extractToolEmitterKeys(m: any): string[] {
+  const keys = new Set<string>();
+  const role = String((m as any)?.role ?? "").toLowerCase();
+  const add = (v: unknown): void => {
+    for (const k of expandToolCallKeys(v)) keys.add(k);
+  };
+  if (role !== "assistant") return [];
+  const toolCalls = Array.isArray((m as any)?.tool_calls) ? (m as any).tool_calls : [];
+  for (const tc of toolCalls) add((tc as any)?.id);
+  for (const b of messageContentBlocks(m)) {
+    if (!b || typeof b !== "object") continue;
+    if (String((b as any).type ?? "") === "toolCall") add((b as any).id);
+  }
+  return [...keys];
+}
+
+function extractToolOutputKeys(m: any): string[] {
+  const keys = new Set<string>();
+  const role = String((m as any)?.role ?? "").toLowerCase();
+  const add = (v: unknown): void => {
+    for (const k of expandToolCallKeys(v)) keys.add(k);
+  };
+  if (role === "tool" || role === "toolresult" || role === "function_call_output") {
+    add((m as any)?.toolCallId);
+    add((m as any)?.tool_call_id);
+    add((m as any)?.call_id);
+  }
+  if ((m as any)?.toolCallId || (m as any)?.tool_call_id || (m as any)?.call_id) {
+    add((m as any)?.toolCallId);
+    add((m as any)?.tool_call_id);
+    add((m as any)?.call_id);
+  }
+  for (const b of messageContentBlocks(m)) {
+    if (!b || typeof b !== "object") continue;
+    const t = String((b as any).type ?? "");
+    if (t === "toolResult" || t === "function_call_output") {
+      add((b as any).toolCallId);
+      add((b as any).tool_call_id);
+      add((b as any).call_id);
+      add((b as any).id);
+    }
+  }
+  return [...keys];
+}
+
+function closeToolCallGroups(messages: any[], keep: Set<number>): void {
+  type Group = { emitters: Set<number>; outputs: Set<number> };
+  const groups = new Map<string, Group>();
+  const upsert = (key: string): Group => {
+    let g = groups.get(key);
+    if (!g) {
+      g = { emitters: new Set<number>(), outputs: new Set<number>() };
+      groups.set(key, g);
+    }
+    return g;
+  };
+  for (let i = 0; i < messages.length; i += 1) {
+    for (const key of extractToolEmitterKeys(messages[i])) upsert(key).emitters.add(i);
+    for (const key of extractToolOutputKeys(messages[i])) upsert(key).outputs.add(i);
+  }
+
+  // Remove incomplete fragments first: orphan tool outputs / orphan tool calls
+  // are the primary source of Responses API call_id validation errors.
+  for (const g of groups.values()) {
+    if (g.emitters.size > 0 && g.outputs.size > 0) continue;
+    for (const idx of g.emitters) keep.delete(idx);
+    for (const idx of g.outputs) keep.delete(idx);
+  }
+
+  // If one side is kept, keep the complete tool-call chain together.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const g of groups.values()) {
+      if (!(g.emitters.size > 0 && g.outputs.size > 0)) continue;
+      const groupIdx = [...g.emitters, ...g.outputs];
+      if (!groupIdx.some((idx) => keep.has(idx))) continue;
+      for (const idx of groupIdx) {
+        if (keep.has(idx)) continue;
+        keep.add(idx);
+        changed = true;
+      }
+    }
+  }
+}
+
 function selectMessageIndicesToKeep(messages: any[], maxKeep: number, strategy: string): number[] {
   if (messages.length <= maxKeep) {
     return messages.map((_, i) => i);
@@ -228,6 +326,7 @@ function selectMessageIndicesToKeep(messages: any[], maxKeep: number, strategy: 
     if (keep.size >= maxKeep) break;
     keep.add(item.idx);
   }
+  closeToolCallGroups(messages, keep);
   return [...keep].sort((a, b) => a - b);
 }
 
