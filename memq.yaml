@@ -31,6 +31,7 @@ security:
 
 style:
   enabled: true
+  maxBudgetTokens: 220
 
 archive:
   enabled: true

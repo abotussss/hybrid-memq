@@ -137,6 +137,7 @@ cfg = {
   "memq.security.llmAuditThreshold": 0.2,
   "memq.security.blockThreshold": 0.85,
   "memq.style.enabled": True,
+  "memq.style.maxBudgetTokens": 220,
   "memq.idle.enabled": True,
   "memq.idle.idleSeconds": 120,
 }

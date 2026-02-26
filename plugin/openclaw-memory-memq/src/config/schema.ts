@@ -19,6 +19,7 @@ export const defaults = {
   "memq.security.llmAuditThreshold": 0.2,
   "memq.security.blockThreshold": 0.85,
   "memq.style.enabled": true,
+  "memq.style.maxBudgetTokens": 220,
   "memq.idle.enabled": true,
   "memq.idle.idleSeconds": 120,
 } as const;

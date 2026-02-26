@@ -95,11 +95,22 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
     const t0 = Date.now();
     const sessionKey = sessionKeyOf(event, hookCtx);
     const workspaceRoot = getCfg(api, "memq.workspaceRoot", defaults["memq.workspaceRoot"]);
+    const prompt = String(event?.prompt ?? "");
+    rt.lastPromptBySession.set(sessionKey, prompt);
+
+    const styleBase = Math.max(8, getCfg(api, "memq.budgets.styleTokens", defaults["memq.budgets.styleTokens"]));
+    const styleMax = Math.max(styleBase, getCfg(api, "memq.style.maxBudgetTokens", defaults["memq.style.maxBudgetTokens"]));
+    let styleBudget = styleBase;
+    const styleCue = /(口調|性格|キャラ|人格|style|persona|なりき|呼び方|一人称)/i.test(prompt);
+    const prevStyle = String(rt.lastMemstyleBySession.get(sessionKey) || "");
+    const prevNeed = Math.min(styleMax, Math.max(72, estimateTokens(prevStyle) + 12));
+    if (styleCue) styleBudget = Math.max(styleBudget, 120);
+    if (prevNeed > styleBudget) styleBudget = Math.max(styleBudget, prevNeed);
 
     const budgets = {
       memctx: Math.max(32, getCfg(api, "memq.budgets.memctxTokens", defaults["memq.budgets.memctxTokens"])),
       rules: Math.max(24, getCfg(api, "memq.budgets.rulesTokens", defaults["memq.budgets.rulesTokens"])),
-      style: Math.max(8, getCfg(api, "memq.budgets.styleTokens", defaults["memq.budgets.styleTokens"])),
+      style: Math.min(styleMax, styleBudget),
     };
 
     const recentMax = Math.max(800, getCfg(api, "memq.recent.maxTokens", defaults["memq.recent.maxTokens"]));
@@ -109,9 +120,6 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
     const surfaceThreshold = Number(getCfg(api, "memq.retrieval.surfaceThreshold", defaults["memq.retrieval.surfaceThreshold"]));
     const deepEnabled = Boolean(getCfg(api, "memq.retrieval.deepEnabled", defaults["memq.retrieval.deepEnabled"]));
     const styleEnabled = Boolean(getCfg(api, "memq.style.enabled", defaults["memq.style.enabled"]));
-
-    const prompt = String(event?.prompt ?? "");
-    rt.lastPromptBySession.set(sessionKey, prompt);
 
     const ensured = await sidecar.ensureUp(workspaceRoot);
     if (!ensured) {

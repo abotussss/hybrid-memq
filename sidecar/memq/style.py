@@ -36,6 +36,17 @@ def _normalize_call_user(raw: str) -> str:
     return v.strip()
 
 
+def _normalize_persona(raw: str) -> str:
+    v = " ".join((raw or "").split()).strip()
+    if not v:
+        return ""
+    if re.search(r"(ロックマンエグゼ|ロックマン\.?exe|rockman\.?\s*exe)", v, re.IGNORECASE):
+        return "ロックマン"
+    if re.search(r"(ロックマン|rockman)", v, re.IGNORECASE):
+        return "ロックマン"
+    return v[:120]
+
+
 def extract_style_updates(user_text: str) -> Dict[str, str]:
     text = user_text or ""
     out: Dict[str, str] = {}
@@ -44,7 +55,7 @@ def extract_style_updates(user_text: str) -> Dict[str, str]:
             out[kv[0]] = kv[1]
 
     if re.search(r"(persona|キャラ|性格|話し方|口調|なりき|模倣|として振る舞|act as|roleplay)", text, re.IGNORECASE):
-        out["persona"] = _compact(text, 320)
+        out["persona"] = _normalize_persona(_compact(text, 320))
 
     m_first = re.search(r"一人称.*?(ボク|僕|私|わたし|俺)", text)
     if m_first:
@@ -88,7 +99,7 @@ def extract_style_updates(user_text: str) -> Dict[str, str]:
         re.IGNORECASE,
     )
     if m_role:
-        out["persona"] = _compact(m_role.group(1), 120)
+        out["persona"] = _normalize_persona(_compact(m_role.group(1), 120))
 
     # Local-style convenience: Rockman.EXE profile seed if explicitly requested.
     if re.search(r"(ロックマンエグゼ|Rockman\\.EXE|Rockman EXE)", text, re.IGNORECASE) and re.search(
@@ -96,21 +107,23 @@ def extract_style_updates(user_text: str) -> Dict[str, str]:
         text,
         re.IGNORECASE,
     ):
-        out.setdefault("persona", "Rockman.EXE")
+        out["persona"] = "ロックマン"
         out.setdefault("tone", "polite_gentle")
         out.setdefault("verbosity", "medium")
         out["firstPerson"] = out.get("firstPerson") or "僕"
         if "熱斗" in text:
-            out["callUser"] = "熱斗くん"
+            out.setdefault("callUser", "熱斗くん")
         else:
             out.setdefault("callUser", "オペレーター")
         out["prefix"] = f"{out['callUser']}、"
-        out.setdefault("speakingStyle", "supportive_kind_heroic")
-        out.setdefault("avoid", "cold,hostile,slang,out_of_character")
+        out.setdefault("speakingStyle", "真面目で優しい。丁寧＋親しい口調で、自然な日本語で話す。語尾は「〜だね/〜だよ/〜かな？」を過剰にならない範囲で使う。")
+        out.setdefault("avoid", "翻訳調,不自然な自己紹介,メタ発言,冷淡,高圧的")
 
     # Auto-prefix from callUser if prefix missing.
     if "callUser" in out and "prefix" not in out:
         out["prefix"] = f"{out['callUser']}、"
+    if "persona" in out:
+        out["persona"] = _normalize_persona(out["persona"])
     return out
 
 
@@ -124,6 +137,18 @@ def apply_style_updates(db: MemqDB, updates: Dict[str, str]) -> int:
 
 def style_profile_lines(db: MemqDB) -> List[str]:
     prof = db.get_style_profile()
+    persona = _normalize_persona(prof.get("persona", ""))
+    if persona:
+        prof["persona"] = persona
+        if persona == "ロックマン":
+            prof.setdefault("firstPerson", "僕")
+            prof.setdefault("tone", "polite_gentle")
+            prof.setdefault(
+                "speakingStyle",
+                "真面目で優しい。丁寧＋親しい口調で、自然な日本語で話す。語尾は「〜だね/〜だよ/〜かな？」を過剰にならない範囲で使う。",
+            )
+            prof.setdefault("avoid", "翻訳調,不自然な自己紹介,メタ発言,冷淡,高圧的")
+
     order = ["tone", "verbosity", "firstPerson", "callUser", "prefix", "persona", "speakingStyle", "avoid"]
     lines: List[str] = []
     for key in order:
