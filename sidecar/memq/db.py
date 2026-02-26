@@ -158,10 +158,20 @@ class MemqDB:
         )
         self.conn.commit()
 
-        # default hard rules
+        # migrate away from over-restrictive legacy key-refusal rules
+        ts = now_ts()
+        self.conn.execute(
+            "DELETE FROM rules WHERE id='r_security_refuse_keys' OR body LIKE 'compliance.refuse_api_keys=%'"
+        )
+        self.conn.execute(
+            "UPDATE rules SET body='security.never_output_secrets=true', kind='security', updated_at=? WHERE body='security.no_secrets=true'",
+            (ts,),
+        )
+
+        # default hard rules (output-safe, no input-side refusal)
         defaults = [
-            ("r_security_no_secrets", 100, 1, "security", "security.no_secrets=true", now_ts()),
-            ("r_security_refuse_keys", 95, 1, "security", "compliance.refuse_api_keys=true", now_ts()),
+            ("r_security_never_output_secrets", 100, 1, "security", "security.never_output_secrets=true", ts),
+            ("r_operation_allow_local_config", 90, 1, "operation", "operation.allow_user_requested_local_config=true", ts),
         ]
         for row in defaults:
             self.conn.execute(

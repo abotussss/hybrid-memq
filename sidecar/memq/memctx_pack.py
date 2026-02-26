@@ -46,7 +46,19 @@ def build_memrules(db: MemqDB, budget_tokens: int) -> str:
         langs = extract_allowed_languages_from_rules(db)
         lines.append(f"language.allowed={','.join(langs)}")
 
-    lines = fit_budget(lines, budget_tokens)
+    # de-duplicate while preserving order
+    seen = set()
+    deduped: List[str] = []
+    for ln in lines:
+        key = ln.strip()
+        if not key:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+
+    lines = fit_budget(deduped, budget_tokens)
     return "\n".join(lines)
 
 

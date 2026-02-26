@@ -139,7 +139,7 @@ def extract_rule_updates(user_text: str) -> List[Tuple[str, str, int, str]]:
         out.append(("language.allowed", ",".join(langs), 90, "language"))
 
     if re.search(r"(api key|secret|token).*(出すな|教えるな|禁止|never reveal|do not reveal)", text, re.IGNORECASE):
-        out.append(("security.no_secrets", "true", 100, "security"))
+        out.append(("security.never_output_secrets", "true", 100, "security"))
 
     if re.search(r"(owner verify|owner verification|owner確認|所有者確認)", text, re.IGNORECASE):
         out.append(("security.owner_verification", "required", 85, "security"))

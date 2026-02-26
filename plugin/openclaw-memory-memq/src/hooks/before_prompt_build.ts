@@ -15,8 +15,8 @@ function buildDegradedBlocks(prompt: string, budgets: { memctx: number; rules: n
   memctx: string;
 } {
   const memrules = ensureBudget([
-    "rules.security.no_secrets=true",
-    "rules.security.refuse_api_keys=true",
+    "rules.security.never_output_secrets=true",
+    "rules.operation.allow_user_requested_local_config=true",
   ].join("\n"), budgets.rules);
   const memstyle = "";
   const memctx = ensureBudget([
