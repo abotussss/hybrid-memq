@@ -186,6 +186,7 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
           memstyle = mergeMemstyle(memstyle, overrides, budgets.style);
         }
       }
+      rt.lastMemstyleBySession.set(sessionKey, memstyle);
       surfaceHit = Boolean(q.meta?.surfaceHit);
       deepCalled = Boolean(q.meta?.deepCalled);
     } catch (err) {
@@ -195,6 +196,7 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
       memrules = d.memrules;
       memstyle = d.memstyle;
       memctx = d.memctx;
+      rt.lastMemstyleBySession.set(sessionKey, memstyle);
     }
 
     const prependContext = composeInjectedBlocks(memrules, memstyle, memctx);

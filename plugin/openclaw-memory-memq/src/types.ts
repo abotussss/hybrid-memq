@@ -39,4 +39,5 @@ export interface RuntimeState {
   lastUserBySession: Map<string, string>;
   lastPromptBySession: Map<string, string>;
   lastKeptBySession: Map<string, MemqMessage[]>;
+  lastMemstyleBySession: Map<string, string>;
 }

@@ -13,13 +13,14 @@ export default function register(api: any): void {
     lastUserBySession: new Map(),
     lastPromptBySession: new Map(),
     lastKeptBySession: new Map(),
+    lastMemstyleBySession: new Map(),
   };
 
   const beforePromptBuild = createBeforePromptBuild(api, sidecar, rt);
   const agentEnd = createAgentEnd(api, sidecar, rt);
   const beforeCompaction = createBeforeCompaction(api, sidecar);
   const gatewayStart = createGatewayStart(api, sidecar);
-  const messageSending = createMessageSending(api, sidecar);
+  const messageSending = createMessageSending(api, sidecar, rt);
 
   const on = typeof api.on === "function" ? api.on.bind(api) : (typeof api.registerHook === "function" ? api.registerHook.bind(api) : null);
   if (on) {

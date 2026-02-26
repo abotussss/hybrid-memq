@@ -122,7 +122,7 @@ cfg = {
   "memq.workspaceRoot": "__ROOT__",
   "memq.budgets.memctxTokens": 120,
   "memq.budgets.rulesTokens": 80,
-  "memq.budgets.styleTokens": 24,
+  "memq.budgets.styleTokens": 120,
   "memq.recent.maxTokens": 5000,
   "memq.recent.minKeepMessages": 6,
   "memq.retrieval.topK": 5,

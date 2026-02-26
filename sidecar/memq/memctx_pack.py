@@ -29,6 +29,12 @@ def fit_budget(lines: Sequence[str], budget: int) -> List[str]:
 
 def build_memrules(db: MemqDB, budget_tokens: int) -> str:
     lines: List[str] = [f"budget_tokens={budget_tokens}"]
+    # Reserve precedence hints early so they survive budget trimming.
+    style = db.get_style_profile()
+    if style.get("persona"):
+        lines.append("identity.precedence=memstyle")
+        lines.append("identity.no_generic_assistant_label=true")
+
     rules = db.list_rules()
     for row in rules:
         body = str(row["body"])

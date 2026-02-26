@@ -13,7 +13,7 @@
 
       "memq.budgets.memctxTokens": { "type": "number", "default": 120 },
       "memq.budgets.rulesTokens": { "type": "number", "default": 80 },
-      "memq.budgets.styleTokens": { "type": "number", "default": 24 },
+      "memq.budgets.styleTokens": { "type": "number", "default": 120 },
 
       "memq.recent.maxTokens": { "type": "number", "default": 5000 },
       "memq.recent.minKeepMessages": { "type": "number", "default": 6 },
