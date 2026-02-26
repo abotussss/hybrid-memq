@@ -52,14 +52,22 @@ function enforceIdentityStyle(text: string, memstyle: string): { text: string; c
   const prefix = kv.get("prefix") || kv.get("mustPrefix") || (callUser ? `${callUser}、` : "");
   if (!persona) return { text: out, changed: false };
 
-  const jpAssistantClaim = /(?:僕|私|わたし|俺)\s*は[^。!\n]{0,48}(?:OpenClaw|assistant|アシスタント)[^。!\n]{0,48}[。.!！?？]?/giu;
-  const enAssistantClaim = /I\s*am[^.\n]{0,80}\bassistant\b[^.\n]{0,40}[.!?]?/giu;
-  const hadClaim = jpAssistantClaim.test(out) || enAssistantClaim.test(out);
+  const jpAssistantClaim =
+    /(?:僕|私|わたし|俺)\s*は[^。!\n]{0,96}(?:OpenClaw|openclaw|assistant|アシスタント|AIアシスタント)[^。!\n]{0,96}[。.!！?？]?/giu;
+  const enAssistantClaim =
+    /I\s*am[^.\n]{0,120}\b(?:assistant|ai assistant)\b[^.\n]{0,80}[.!?]?/giu;
+  const hadClaim = out.search(jpAssistantClaim) >= 0 || out.search(enAssistantClaim) >= 0;
   if (!hadClaim) return { text: out, changed: false };
 
   out = out.replace(jpAssistantClaim, "").replace(enAssistantClaim, "").trim();
-  const identityLine = `${prefix}${first}は${persona}として応答するよ。`.trim();
-  out = out ? `${identityLine}\n${out}` : identityLine;
+  out = out
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (!out) {
+    const fallback = `${prefix}${first}がサポートするよ。`.trim();
+    out = fallback || `${first}がサポートするよ。`;
+  }
   return { text: out, changed: true };
 }
 
