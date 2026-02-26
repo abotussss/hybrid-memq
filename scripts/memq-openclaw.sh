@@ -119,6 +119,7 @@ cmd_reset_config() {
 import json
 cfg = {
   "memq.sidecarUrl": "http://127.0.0.1:7781",
+  "memq.workspaceRoot": "__ROOT__",
   "memq.budgets.memctxTokens": 120,
   "memq.budgets.rulesTokens": 80,
   "memq.budgets.styleTokens": 24,
@@ -142,6 +143,7 @@ cfg = {
 print(json.dumps(cfg, separators=(',',':')))
 PY
 )"
+  cfg="${cfg/__ROOT__/$ROOT_DIR}"
   openclaw config set "plugins.entries.$PLUGIN_ID.config" "$cfg" >/dev/null
   echo "plugin config reset to v2 defaults"
 }

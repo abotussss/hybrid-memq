@@ -113,6 +113,11 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
     const prompt = String(event?.prompt ?? "");
     rt.lastPromptBySession.set(sessionKey, prompt);
 
+    const ensured = await sidecar.ensureUp(workspaceRoot);
+    if (!ensured) {
+      logInfo(api, `[memq-v2] before_prompt_build sidecar_unavailable session=${sessionKey}`);
+    }
+
     try {
       await sidecar.idleTick(Math.floor(Date.now() / 1000));
     } catch {

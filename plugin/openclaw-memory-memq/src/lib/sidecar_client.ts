@@ -1,4 +1,7 @@
 import type { MemqMessage, MemqQueryRequest, MemqQueryResponse } from "../types.js";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { spawn } from "node:child_process";
 
 export class SidecarClient {
   constructor(private readonly baseUrl: string) {}
@@ -27,6 +30,33 @@ export class SidecarClient {
     } catch {
       return false;
     }
+  }
+
+  async ensureUp(workspaceRoot: string): Promise<boolean> {
+    if (await this.health()) return true;
+    const root = String(workspaceRoot || "").trim();
+    if (!root) return false;
+    const app = join(root, "sidecar", "minisidecar.py");
+    if (!existsSync(app)) return false;
+    const venvPy = join(root, "sidecar", ".venv", "bin", "python");
+    const py = existsSync(venvPy) ? venvPy : "python3";
+    try {
+      const child = spawn(py, [app], {
+        cwd: root,
+        detached: true,
+        stdio: "ignore",
+        env: process.env,
+      });
+      child.unref();
+    } catch {
+      return false;
+    }
+
+    for (let i = 0; i < 12; i += 1) {
+      await new Promise((r) => setTimeout(r, 300));
+      if (await this.health()) return true;
+    }
+    return false;
   }
 
   async bootstrapImportMd(workspaceRoot: string): Promise<void> {
