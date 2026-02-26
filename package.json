@@ -3,12 +3,9 @@
   "private": true,
   "version": "0.1.0",
   "workspaces": [
-    "core",
-    "plugin/openclaw-memory-memq",
-    "bench"
+    "plugin/openclaw-memory-memq"
   ],
   "scripts": {
-    "build": "pnpm -r build",
-    "bench": "pnpm --filter @memq/bench bench"
+    "build": "pnpm --filter openclaw-memory-memq build"
   }
 }

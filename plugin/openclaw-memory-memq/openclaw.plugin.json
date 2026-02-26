@@ -1,52 +1,42 @@
 {
   "id": "openclaw-memory-memq",
-  "name": "Memory MEMQ",
-  "version": "0.1.0",
+  "name": "Hybrid MEMQ v2",
+  "version": "2.0.0",
   "kind": "memory",
   "entry": "dist/index.js",
-  "description": "Surface/Deep + quantized memory plugin with MEMCTX v1 injection",
+  "description": "Surface/Deep/Ephemeral memory plugin with fixed-budget MEMRULES+MEMSTYLE+MEMCTX injection",
   "configSchema": {
     "type": "object",
     "properties": {
       "memq.sidecarUrl": { "type": "string", "default": "http://127.0.0.1:7781" },
-      "memq.budgetTokens": { "type": "number", "default": 120 },
-      "memq.rules.budgetTokens": { "type": "number", "default": 80 },
-      "memq.rules.strict": { "type": "boolean", "default": false },
-      "memq.rules.allowedLanguages": { "type": "string", "default": "" },
-      "memq.rules.autoLanguageFromPrompt": { "type": "boolean", "default": true },
-      "memq.rules.hard": { "type": "string", "default": "" },
-      "memq.style.enabled": { "type": "boolean", "default": false },
-      "memq.style.budgetTokens": { "type": "number", "default": 24 },
-      "memq.style.strict": { "type": "boolean", "default": false },
-      "memq.style.tone": { "type": "string", "default": "" },
-      "memq.style.persona": { "type": "string", "default": "" },
-      "memq.style.speakingStyle": { "type": "string", "default": "" },
-      "memq.style.verbosity": { "type": "string", "default": "" },
-      "memq.style.avoid": { "type": "string", "default": "" },
-      "memq.precedence.enabled": { "type": "boolean", "default": true },
-      "memq.history.reconstruct.enabled": { "type": "boolean", "default": true },
-      "memq.history.hardCap.enabled": { "type": "boolean", "default": true },
-      "memq.history.keepRecentMessages": { "type": "number", "default": 6 },
-      "memq.history.keepRecentToolWindow": { "type": "number", "default": 8 },
-      "memq.history.keepStrategy": { "type": "string", "default": "importance_recency" },
-      "memq.history.summarizeMinMessages": { "type": "number", "default": 8 },
-      "memq.history.archivePruned.enabled": { "type": "boolean", "default": true },
-      "memq.history.archivePruned.redactSecrets.enabled": { "type": "boolean", "default": true },
-      "memq.history.archivePruned.maxFileBytes": { "type": "number", "default": 5242880 },
-      "memq.history.archivePruned.maxFiles": { "type": "number", "default": 20 },
-      "memq.history.archivePruned.retentionDays": { "type": "number", "default": 14 },
-      "memq.compat.enableLegacyBeforeAgentStart": { "type": "boolean", "default": false },
-      "memq.retrieval.topM": { "type": "number", "default": 12 },
-      "memq.topK": { "type": "number", "default": 5 },
-      "memq.surface.max": { "type": "number", "default": 120 },
-      "memq.surface.ttlSec": { "type": "number", "default": 172800 }
-    }
-  },
-  "uiHints": {
-    "fields": {
-      "apiKey": {
-        "sensitive": true
-      }
+      "memq.workspaceRoot": { "type": "string", "default": "" },
+
+      "memq.budgets.memctxTokens": { "type": "number", "default": 120 },
+      "memq.budgets.rulesTokens": { "type": "number", "default": 80 },
+      "memq.budgets.styleTokens": { "type": "number", "default": 24 },
+
+      "memq.recent.maxTokens": { "type": "number", "default": 5000 },
+      "memq.recent.minKeepMessages": { "type": "number", "default": 6 },
+
+      "memq.retrieval.topK": { "type": "number", "default": 5 },
+      "memq.retrieval.surfaceFirst": { "type": "boolean", "default": true },
+      "memq.retrieval.surfaceThreshold": { "type": "number", "default": 0.85 },
+      "memq.retrieval.deepEnabled": { "type": "boolean", "default": true },
+
+      "memq.archive.enabled": { "type": "boolean", "default": true },
+      "memq.archive.maxFileBytes": { "type": "number", "default": 8000000 },
+      "memq.archive.maxFiles": { "type": "number", "default": 30 },
+
+      "memq.degraded.enabled": { "type": "boolean", "default": true },
+
+      "memq.security.primaryRulesEnabled": { "type": "boolean", "default": true },
+      "memq.security.llmAuditEnabled": { "type": "boolean", "default": false },
+      "memq.security.llmAuditThreshold": { "type": "number", "default": 0.2 },
+      "memq.security.blockThreshold": { "type": "number", "default": 0.85 },
+      "memq.style.enabled": { "type": "boolean", "default": true },
+
+      "memq.idle.enabled": { "type": "boolean", "default": true },
+      "memq.idle.idleSeconds": { "type": "number", "default": 120 }
     }
   }
 }

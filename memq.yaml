@@ -1,43 +1,41 @@
-mode: api_text
-sidecar:
-  url: http://127.0.0.1:7781
-  db_path: .memq/sidecar.sqlite3
-embedding:
-  provider: local
-  dim: 256
-quantization:
-  kind: scalar_int8
-  pq:
-    enabled: false
-    m: 64
-    bits: 6
+sidecarUrl: http://127.0.0.1:7781
+
 budgets:
-  mem_tokens: 120
-surface:
-  max: 120
-  ttl_sec: 172800
+  memctxTokens: 120
+  rulesTokens: 80
+  styleTokens: 24
+
+recent:
+  maxTokens: 5000
+  minKeepMessages: 6
+
 retrieval:
-  topM: 200
   topK: 5
-  cue_depth: 2
-write_gate:
-  low: 0.45
-  high: 0.65
-fallback:
-  max_score_min: 0.32
-  entropy_max: 1.2
-consolidation:
-  interval_sec: 3600
-history:
-  reconstruct_enabled: true
-  hard_cap_enabled: true
-  keep_recent_messages: 6
-  keep_strategy: importance_recency
-  summarize_min_messages: 8
-  archive_pruned_enabled: true
-  archive_pruned_redact_secrets_enabled: true
-  archive_pruned_max_file_bytes: 5242880
-  archive_pruned_max_files: 20
-  archive_pruned_retention_days: 14
-compat:
-  enable_legacy_before_agent_start: false
+  surfaceFirst: true
+  surfaceThreshold: 0.85
+  deepEnabled: true
+
+quant:
+  bitsPerDim: 8
+  normalize: true
+
+idle:
+  enabled: true
+  idleSeconds: 120
+
+security:
+  primaryRulesEnabled: true
+  llmAuditEnabled: false
+  llmAuditThreshold: 0.20
+  blockThreshold: 0.85
+
+style:
+  enabled: true
+
+archive:
+  enabled: true
+  maxFileBytes: 8000000
+  maxFiles: 30
+
+degraded:
+  enabled: true

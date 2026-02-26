@@ -15,6 +15,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: pnpm install
-      - run: pnpm build
-      - run: pnpm bench
+      - run: pnpm install --filter openclaw-memory-memq...
+      - run: pnpm --filter openclaw-memory-memq build
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -r sidecar/requirements.txt
+      - run: python -m py_compile sidecar/minisidecar.py sidecar/memq/*.py

@@ -1,23 +1,43 @@
-# OpenClaw setup
+# OpenClaw Setup (Mode A)
 
-## Install plugin (dev link)
+## 1) Quick setup
+
 ```bash
-openclaw plugins install -l /Users/hiroyukimiyake/Documents/New project/plugin/openclaw-memory-memq
+cd /path/to/hybrid-memq
+scripts/memq-openclaw.sh setup
 ```
 
-## Configure memory slot
-`plugins.slots.memory = "openclaw-memory-memq"`
+This runs plugin build/install, sidecar startup, and memory slot switch to `openclaw-memory-memq`.
 
-## Recommended memq config
-- `memq.budgetTokens`: e.g. `120`
-- `memq.topK`: e.g. `5`
-- `memq.surface.max`: e.g. `120`
-- `memq.writeGate.low/high`
-- `memq.fallback.maxScoreMin/entropyMax`
+## 2) Verify
 
-## Start sidecar
 ```bash
-cd /Users/hiroyukimiyake/Documents/New project/sidecar
-source .venv/bin/activate
-uvicorn memq_sidecar.app:app --host 127.0.0.1 --port 7781
+scripts/memq-openclaw.sh status
+curl -sS http://127.0.0.1:7781/health
 ```
+
+Expected:
+
+- memory slot = `openclaw-memory-memq`
+- sidecar `ok=true`
+
+## 3) Optional: secondary LLM audit
+
+```bash
+export MEMQ_LLM_AUDIT_API_KEY='YOUR_API_KEY'
+scripts/memq-openclaw.sh audit-on https://api.openai.com/v1/chat/completions gpt-5.2 0.20 0.85
+```
+
+Disable:
+
+```bash
+scripts/memq-openclaw.sh audit-off
+```
+
+## 4) Restore previous backend
+
+```bash
+scripts/memq-openclaw.sh disable
+```
+
+This restores the pre-MEMQ plugin slot/config saved during `enable`.

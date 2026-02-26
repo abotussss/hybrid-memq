@@ -1,24 +1,16 @@
-# OS/editor artifacts
+# OS/editor
 .DS_Store
 
 # local runtime state
 .memq/
+*/.memq/
 .pnpm-store/
 node_modules/
 plugin/openclaw-memory-memq/node_modules/
+plugin/openclaw-memory-memq/dist/
 sidecar/.venv/
 __pycache__/
 *.pyc
 
-# mode B is intentionally excluded from OSS release
-modeb/
-docs/mode-b-requirements.md
-
-# local benchmark/eval artifacts (not for production distribution)
-bench/scripts/*.py
-bench/scripts/*.sh
-bench/scripts/*.mjs
-bench/results/
-bench/report*.md
-bench/plots/
-bench/data/
+# optional local artifacts
+sidecar.log

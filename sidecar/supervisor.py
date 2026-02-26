@@ -1,81 +1,68 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
 import os
 import signal
 import subprocess
-import sys
 import time
-import shutil
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-STATE_DIR = ROOT / ".memq"
-STATE_DIR.mkdir(parents=True, exist_ok=True)
-CHILD_PID_FILE = STATE_DIR / "minisidecar.child.pid"
 
-_stop = False
+STOP = False
+CHILD: subprocess.Popen[bytes] | None = None
 
 
-def _on_signal(signum, _frame):
-    global _stop
-    _stop = True
-    print(f"[memq-supervisor] received signal={signum}, shutting down", flush=True)
-
-
-def _write_child_pid(pid: int | None) -> None:
-    if pid is None:
+def _handle_stop(_signum, _frame) -> None:
+    global STOP, CHILD
+    STOP = True
+    if CHILD and CHILD.poll() is None:
         try:
-            CHILD_PID_FILE.unlink(missing_ok=True)
+            CHILD.terminate()
         except Exception:
             pass
-        return
-    CHILD_PID_FILE.write_text(f"{pid}\n", encoding="utf-8")
 
 
 def main() -> int:
-    signal.signal(signal.SIGINT, _on_signal)
-    signal.signal(signal.SIGTERM, _on_signal)
+    parser = argparse.ArgumentParser(description="Hybrid MEMQ sidecar supervisor")
+    parser.add_argument("--python", required=True, help="Python executable for minisidecar")
+    parser.add_argument("--app", required=True, help="Path to minisidecar.py")
+    parser.add_argument("--log", required=True, help="Log file path")
+    parser.add_argument("--restart-delay-sec", type=float, default=1.0)
+    args = parser.parse_args()
 
-    configured = os.getenv("MEMQ_SIDECAR_PYTHON", "").strip()
-    candidates = [
-        configured,
-        "/opt/homebrew/bin/python3",
-        "/usr/bin/python3",
-        shutil.which("python3") or "",
-        sys.executable or "",
-    ]
-    python = ""
-    for c in candidates:
-        if c and Path(c).exists():
-            python = c
-            break
-    if not python:
-        python = "python3"
-    cmd = [python, str(ROOT / "sidecar" / "minisidecar.py")]
+    signal.signal(signal.SIGTERM, _handle_stop)
+    signal.signal(signal.SIGINT, _handle_stop)
 
-    restart_count = 0
-    while not _stop:
-        try:
-            print(f"[memq-supervisor] starting sidecar: {' '.join(cmd)}", flush=True)
-            child = subprocess.Popen(cmd, cwd=str(ROOT), env=os.environ.copy())
-            _write_child_pid(child.pid)
-            rc = child.wait()
-            _write_child_pid(None)
-            if _stop:
+    py = str(Path(args.python))
+    app = str(Path(args.app))
+    log_path = Path(args.log)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    env = os.environ.copy()
+    delay = max(0.2, float(args.restart_delay_sec))
+
+    with log_path.open("a", encoding="utf-8") as logf:
+        while not STOP:
+            logf.write(f"[memq-supervisor] starting child: {py} {app}\n")
+            logf.flush()
+            global CHILD
+            CHILD = subprocess.Popen(
+                [py, app],
+                stdin=subprocess.DEVNULL,
+                stdout=logf,
+                stderr=logf,
+                env=env,
+            )
+            rc = CHILD.wait()
+            logf.write(f"[memq-supervisor] child exited rc={rc}\n")
+            logf.flush()
+            CHILD = None
+            if STOP:
                 break
-            restart_count += 1
-            delay = min(10, 1 + restart_count)
-            print(f"[memq-supervisor] sidecar exited rc={rc}, restart in {delay}s", flush=True)
             time.sleep(delay)
-        except Exception as e:
-            restart_count += 1
-            delay = min(10, 1 + restart_count)
-            print(f"[memq-supervisor] launch error={e}, retry in {delay}s", flush=True)
-            time.sleep(delay)
-
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

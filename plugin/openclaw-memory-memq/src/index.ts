@@ -1,71 +1,42 @@
-import type { RuntimeState } from "./types.js";
 import { createAgentEnd } from "./hooks/agent_end.js";
 import { createBeforeCompaction } from "./hooks/before_compaction.js";
 import { createBeforePromptBuild } from "./hooks/before_prompt_build.js";
 import { createGatewayStart } from "./hooks/gateway_start.js";
-import { SidecarClient } from "./services/sidecar.js";
-import { RuntimeMetrics, SurfaceCache } from "./services/state.js";
-import { getCfg, logInfo } from "./services/config.js";
+import { createMessageSending } from "./hooks/message_sending.js";
+import { defaults, getCfg } from "./config/schema.js";
+import { SidecarClient } from "./lib/sidecar_client.js";
+import type { RuntimeState } from "./types.js";
 
 export default function register(api: any): void {
-  const sidecar = new SidecarClient(getCfg(api, "memq.sidecarUrl", "http://127.0.0.1:7781"));
-  const surface = new SurfaceCache(
-    getCfg(api, "memq.surface.max", 120),
-    getCfg(api, "memq.surface.ttlSec", 172800)
-  );
-  const metrics = new RuntimeMetrics();
+  const sidecar = new SidecarClient(getCfg(api, "memq.sidecarUrl", defaults["memq.sidecarUrl"]));
   const rt: RuntimeState = {
-    lastCandidatesBySession: new Map(),
-    lastAllowedLanguagesBySession: new Map(),
-    lastPreferredLanguageBySession: new Map(),
-    lastAuditBypassBySession: new Map(),
-    lastStyleProfileBySession: new Map()
+    lastUserBySession: new Map(),
+    lastPromptBySession: new Map(),
+    lastKeptBySession: new Map(),
   };
 
-  const before = createBeforePromptBuild(api, sidecar, surface, rt, metrics);
-  const onEnd = createAgentEnd(api, sidecar, surface, rt);
-  const onCompaction = createBeforeCompaction(api, sidecar);
-  const onStart = createGatewayStart(api, sidecar);
+  const beforePromptBuild = createBeforePromptBuild(api, sidecar, rt);
+  const agentEnd = createAgentEnd(api, sidecar, rt);
+  const beforeCompaction = createBeforeCompaction(api, sidecar);
+  const gatewayStart = createGatewayStart(api, sidecar);
+  const messageSending = createMessageSending(api, sidecar);
 
-  // Prefer modern lifecycle API (`api.on`) and keep compatibility.
-  if (typeof api.on === "function") {
-    api.on("before_prompt_build", before);
-    // Compatibility hook is opt-in to avoid duplicate injection on modern runtimes.
-    if (getCfg<boolean>(api, "memq.compat.enableLegacyBeforeAgentStart", false)) {
-      api.on("before_agent_start", before);
-    }
-    api.on("agent_end", onEnd);
-    api.on("before_compaction", onCompaction);
-  } else if (typeof api.registerHook === "function") {
-    api.registerHook("before_prompt_build", before);
-    if (getCfg<boolean>(api, "memq.compat.enableLegacyBeforeAgentStart", true)) {
-      api.registerHook("before_agent_start", before);
-    }
-    api.registerHook("agent_end", onEnd);
-    api.registerHook("before_compaction", onCompaction);
+  const on = typeof api.on === "function" ? api.on.bind(api) : (typeof api.registerHook === "function" ? api.registerHook.bind(api) : null);
+  if (on) {
+    on("before_prompt_build", beforePromptBuild);
+    on("agent_end", agentEnd);
+    on("before_compaction", beforeCompaction);
+    on("message_sending", messageSending);
+    on("gateway_start", gatewayStart);
   }
 
   if (typeof api.registerService === "function") {
     api.registerService({
-      id: "memq-runtime",
+      id: "memq-v2-runtime",
       start: async () => {
-        await onStart();
+        await gatewayStart();
       },
-      stop: async () => {}
+      stop: async () => {},
     });
-  }
-
-  const metricsHook = async () => {
-    const s = metrics.summary();
-    logInfo(
-      api,
-      `[memq] metrics turns=${s.turns} deep_call_rate=${s.deepCallRate.toFixed(2)} surface_hit_rate=${s.surfaceHitRate.toFixed(2)} fallback_rate=${s.fallbackRate.toFixed(2)}`
-    );
-  };
-
-  if (typeof api.on === "function") {
-    api.on("agent_end", metricsHook);
-  } else if (typeof api.registerHook === "function") {
-    api.registerHook("agent_end", metricsHook);
   }
 }

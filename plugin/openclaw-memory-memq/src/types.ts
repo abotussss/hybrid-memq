@@ -1,58 +1,42 @@
-import type { MemoryType, VolatilityClass } from "./memq_core.js";
+export type Json = string | number | boolean | null | Json[] | { [k: string]: Json };
 
-export interface PromptBuildInput {
-  userText: string;
-  recentMessages: string[];
-  sessionId?: string;
+export interface MemqMessage {
+  role: string;
+  text: string;
+  ts?: number;
 }
 
-export interface PromptBuildOutput {
-  prependContext?: string;
-  systemPrompt?: string;
+export interface MemqBudgets {
+  memctxTokens: number;
+  rulesTokens: number;
+  styleTokens: number;
 }
 
-export interface AgentEndInput {
-  referencedMemoryIds?: string[];
-  sessionId?: string;
+export interface MemqQueryRequest {
+  sessionKey: string;
+  prompt: string;
+  recentMessages: MemqMessage[];
+  budgets: MemqBudgets;
+  topK: number;
+  surfaceThreshold?: number;
+  deepEnabled?: boolean;
 }
 
-export interface PluginApi {
-  registerHook: (name: string, handler: (ctx: unknown) => Promise<unknown> | unknown) => void;
-  config?: Record<string, unknown>;
-  pluginConfig?: Record<string, unknown>;
-}
-
-export interface SidecarSearchResult {
-  id: string;
-  score: number;
-  tsSec: number;
-  updatedAtSec?: number;
-  lastAccessAtSec?: number;
-  accessCount?: number;
-  type: MemoryType;
-  importance: number;
-  confidence: number;
-  strength: number;
-  volatilityClass: VolatilityClass;
-  facts: Array<{ k: string; v: string; conf?: number }>;
-  tags?: string[];
-  rawText?: string;
+export interface MemqQueryResponse {
+  ok: boolean;
+  memrules: string;
+  memstyle: string;
+  memctx: string;
+  meta: {
+    surfaceHit: boolean;
+    deepCalled: boolean;
+    usedMemoryIds: string[];
+    debug?: Record<string, Json>;
+  };
 }
 
 export interface RuntimeState {
-  lastCandidatesBySession: Map<string, SidecarSearchResult[]>;
-  lastAllowedLanguagesBySession?: Map<string, string[]>;
-  lastPreferredLanguageBySession?: Map<string, string>;
-  lastAuditBypassBySession?: Map<string, boolean>;
-  lastStyleProfileBySession?: Map<
-    string,
-    {
-      tone?: string;
-      persona?: string;
-      speakingStyle?: string;
-      verbosity?: string;
-      avoid?: string[];
-      strict?: boolean;
-    }
-  >;
+  lastUserBySession: Map<string, string>;
+  lastPromptBySession: Map<string, string>;
+  lastKeptBySession: Map<string, MemqMessage[]>;
 }

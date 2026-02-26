@@ -1,29 +1,28 @@
-# sidecar
+# MEMQ Sidecar
 
-Local vector + quant engine for memq.
+Local FastAPI service for Hybrid MEMQ v2 (Mode A).
 
 ## Run
+
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn memq_sidecar.app:app --host 127.0.0.1 --port 7781
+cd /path/to/hybrid-memq
+python3 -m venv sidecar/.venv
+sidecar/.venv/bin/pip install -r sidecar/requirements.txt
+sidecar/.venv/bin/python sidecar/minisidecar.py
 ```
 
-## Endpoints
-- `GET /health`
-- `GET /stats`
-- `POST /embed`
-- `POST /index/add`
-- `POST /index/search`
-- `POST /index/touch`
-- `POST /index/consolidate`
-- `POST /index/rebuild`
+## Health
 
-## Storage
-- SQLite DB: `.memq/sidecar.sqlite3`
-- Embedding code: scalar int8 quantized bytes
+```bash
+curl -sS http://127.0.0.1:7781/health
+```
 
-## Notes
-- ANNは現在 brute-force cosine（MVP）
-- FAISS/PQ backend への置換ポイント: `/index/search` と `/index/rebuild`
+## Main endpoints
+
+- `POST /memctx/query`
+- `POST /memory/ingest_turn`
+- `POST /conversation/summarize`
+- `POST /idle/run_once`
+- `POST /audit/output`
+- `GET /profile`
+- `GET /quarantine`

@@ -8,14 +8,6 @@ importers:
 
   .: {}
 
-  bench: {}
-
-  core:
-    devDependencies:
-      typescript:
-        specifier: ^5.6.3
-        version: 5.9.3
-
   plugin/openclaw-memory-memq:
     devDependencies:
       '@types/node':
