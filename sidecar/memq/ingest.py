@@ -25,12 +25,13 @@ RUNTIME_NOISE_PATTERNS = [
     re.compile(r"\[\[reply_to_current\]\]", re.IGNORECASE),
 ]
 
-MEM_BLOCK_RE = re.compile(r"<MEM(?:RULES|STYLE|CTX)\\s+v1>[\\s\\S]*?</MEM(?:RULES|STYLE|CTX)\\s+v1>", re.IGNORECASE)
+MEM_BLOCK_RE = re.compile(r"<MEM(?:RULES|STYLE|CTX)\s+v1>[\s\S]*?</MEM(?:RULES|STYLE|CTX)\s+v1>", re.IGNORECASE)
 MEM_BLOCK_BRACKET_RE = re.compile(r"\[MEM(?:RULES|STYLE|CTX)\s+v1\][\s\S]*?(?=\n{2,}|\Z)", re.IGNORECASE)
 
 
 def _sanitize_turn_text(text: str) -> str:
-    t = text or ""
+    raw = text or ""
+    t = raw
     t = MEM_BLOCK_RE.sub(" ", t)
     t = MEM_BLOCK_BRACKET_RE.sub(" ", t)
     # Drop known structured-injection fragments that should never become memory facts.
@@ -58,6 +59,12 @@ def _sanitize_turn_text(text: str) -> str:
     out = re.sub(r"\[\[reply_to_current\]\]", " ", out, flags=re.IGNORECASE)
     out = re.sub(r"\*{1,3}", "", out)
     out = re.sub(r"\s+", " ", out).strip()
+    raw_norm = re.sub(r"\s+", " ", raw).strip()
+    # Fail-open guard: if sanitization over-trims normal input, keep normalized original.
+    if raw_norm and len(raw_norm) >= 120:
+        min_len = max(12, int(len(raw_norm) * 0.08))
+        if len(out) < min_len:
+            out = raw_norm
     return out[:4000]
 
 

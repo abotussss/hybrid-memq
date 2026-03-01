@@ -29,6 +29,15 @@ IMPERATIVE_STYLE_RE = re.compile(
 )
 
 
+def _is_noise_summary(text: str) -> bool:
+    s = text or ""
+    if not s:
+        return False
+    m = NOISE_SUMMARY_RE.search(s)
+    # Guard against accidental empty-match regexes.
+    return bool(m and m.group(0))
+
+
 def _source_trust(source: str) -> float:
     s = (source or "").strip().lower()
     if s == "turn":
@@ -211,7 +220,7 @@ def search_deep(db: MemqDB, session_key: str, query_text: str, qvec: np.ndarray,
     key_hits: List[Dict[str, Any]] = []
     for r in rows:
         summary_raw = str(r["summary"] or "")
-        if NOISE_SUMMARY_RE.search(summary_raw):
+        if _is_noise_summary(summary_raw):
             continue
         if META_DIAGNOSTIC_RE.search(summary_raw):
             continue

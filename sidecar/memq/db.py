@@ -800,7 +800,23 @@ class MemqDB:
         self.conn.commit()
         return len(drop)
 
-    def cleanup_noisy_memory(self) -> Dict[str, int]:
+    def _compile_safe_cleanup_patterns(self, patterns: Sequence[str]) -> List[re.Pattern[str]]:
+        compiled: List[re.Pattern[str]] = []
+        for p in patterns:
+            raw = str(p or "").strip()
+            if not raw:
+                continue
+            try:
+                cre = re.compile(raw, re.IGNORECASE)
+            except re.error:
+                continue
+            # Reject patterns that can match empty-string. They can delete everything.
+            if cre.search(""):
+                continue
+            compiled.append(cre)
+        return compiled
+
+    def cleanup_noisy_memory(self, max_delete: int = 50) -> Dict[str, int]:
         patterns = [
             r"<MEM(?:RULES|STYLE|CTX)\s+v1>",
             r"\[MEM(?:RULES|STYLE|CTX)\s+v1\]",
@@ -823,9 +839,11 @@ class MemqDB:
             r"I am .*assistant",
             r"(?:お前自身は|あなたは).*(?:ロックマン|persona|キャラ|roleplay|act as)",
         ]
+        safe_patterns = self._compile_safe_cleanup_patterns(patterns)
         removed_items = 0
+        capped = False
         rows = self.conn.execute(
-            "SELECT id,summary,session_key,layer,importance FROM memory_items WHERE layer IN ('surface','deep')"
+            "SELECT id,summary,session_key,layer,importance,tags FROM memory_items WHERE layer IN ('surface','deep')"
         ).fetchall()
         durable_pat = re.compile(r"(覚えて(?!る)|必ず|ルール|方針|制約|remember|always|must|rule|policy)", re.IGNORECASE)
         question_like_pat = re.compile(r"(教えて|覚えてる|何|だれ|誰|どこ|いつ|how|what|who|where|when)\??$", re.IGNORECASE)
@@ -844,10 +862,16 @@ class MemqDB:
                 and not isinstance(fact, dict)
                 and any(fk.startswith(("profile.", "pref.", "rule.")) for fk in fks)
             ):
+                if removed_items >= max_delete:
+                    capped = True
+                    break
                 self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
                 removed_items += 1
                 continue
-            if any(re.search(p, s, re.IGNORECASE) for p in patterns):
+            if any(p.search(s) for p in safe_patterns):
+                if removed_items >= max_delete:
+                    capped = True
+                    break
                 self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
                 removed_items += 1
                 continue
@@ -857,10 +881,16 @@ class MemqDB:
                 if question_like_pat.search("".join(s.split())):
                     q_like = True
                 if q_like and not durable_pat.search(s) and float(r["importance"]) < 0.85:
+                    if removed_items >= max_delete:
+                        capped = True
+                        break
                     self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
                     removed_items += 1
                     continue
                 if len(" ".join(s.split())) < 12 and not durable_pat.search(s) and float(r["importance"]) < 0.85:
+                    if removed_items >= max_delete:
+                        capped = True
+                        break
                     self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
                     removed_items += 1
                     continue
@@ -875,7 +905,7 @@ class MemqDB:
                 t = " ".join(ln.strip().split())
                 if not t:
                     continue
-                if any(re.search(p, t, re.IGNORECASE) for p in patterns):
+                if any(p.search(t) for p in safe_patterns):
                     continue
                 k = t.lower()
                 if k in seen:
@@ -891,7 +921,12 @@ class MemqDB:
                 sanitized_conv += 1
 
         self.conn.commit()
-        return {"removed_memory_items": removed_items, "sanitized_conv_summaries": sanitized_conv}
+        return {
+            "removed_memory_items": removed_items,
+            "sanitized_conv_summaries": sanitized_conv,
+            "cleanup_pattern_count": len(safe_patterns),
+            "cleanup_capped": 1 if capped else 0,
+        }
 
     def memory_stats(self) -> Dict[str, int]:
         rows = self.conn.execute(

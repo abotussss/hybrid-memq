@@ -127,8 +127,9 @@ def build_memctx(
         t = str(s or "")
         t = re.sub(r"<MEM(?:RULES|STYLE|CTX)\s+v1>[\s\S]*?</MEM(?:RULES|STYLE|CTX)\s+v1>", " ", t, flags=re.IGNORECASE)
         t = re.sub(r"\[MEM(?:RULES|STYLE|CTX)\s+v1\][\s\S]*?(?=\n{2,}|\Z)", " ", t, flags=re.IGNORECASE)
-        t = re.sub(r"Conversation info \(untrusted metadata\):[\s\S]*?(?:```[\s\S]*?```)?", " ", t, flags=re.IGNORECASE)
-        t = re.sub(r"```[\s\S]*?```", " ", t)
+        # Strip only the metadata header line; do not erase broad multiline content.
+        t = re.sub(r"Conversation info \(untrusted metadata\):[^\n]*", " ", t, flags=re.IGNORECASE)
+        t = re.sub(r"```[^`]*```", " ", t)
         t = re.sub(r"https?://\S+", " ", t)
         t = re.sub(r"\bsha256:[0-9a-f]{16,}\b", " ", t, flags=re.IGNORECASE)
         t = re.sub(r"/Users/\S+", " ", t)

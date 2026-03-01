@@ -3,7 +3,7 @@ sidecarUrl: http://127.0.0.1:7781
 budgets:
   memctxTokens: 120
   rulesTokens: 80
-  styleTokens: 120
+  styleTokens: 24
 
 recent:
   maxTokens: 5000
@@ -31,7 +31,7 @@ security:
 
 style:
   enabled: true
-  maxBudgetTokens: 220
+  maxBudgetTokens: 48
 
 archive:
   enabled: true
