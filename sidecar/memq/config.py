@@ -69,7 +69,7 @@ def load_config() -> MemqConfig:
         bits_per_dim=bits,
         memctx_tokens=max(32, _env_int("MEMQ_MEMCTX_TOKENS", 120)),
         rules_tokens=max(16, _env_int("MEMQ_RULES_TOKENS", 80)),
-        style_tokens=max(8, _env_int("MEMQ_STYLE_TOKENS", 24)),
+        style_tokens=max(8, _env_int("MEMQ_STYLE_TOKENS", 120)),
         recent_tokens=max(400, _env_int("MEMQ_RECENT_TOKENS", 5000)),
         retrieval_top_k=max(1, _env_int("MEMQ_TOP_K", 5)),
         surface_threshold=max(0.0, min(1.0, _env_float("MEMQ_SURFACE_THRESHOLD", 0.85))),

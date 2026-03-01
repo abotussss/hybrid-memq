@@ -14,7 +14,7 @@ class Message(BaseModel):
 class QueryBudgets(BaseModel):
     memctxTokens: int = 120
     rulesTokens: int = 80
-    styleTokens: int = 24
+    styleTokens: int = 120
 
 
 class MemctxQueryRequest(BaseModel):

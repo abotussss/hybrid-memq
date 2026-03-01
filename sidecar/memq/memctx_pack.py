@@ -9,6 +9,7 @@ from .db import MemqDB
 from .fact_keys import infer_query_fact_keys
 from .rules import extract_allowed_languages_from_rules
 from .style import style_profile_lines
+from .text_sanitize import strip_memq_blocks
 
 
 def estimate_tokens(text: str) -> int:
@@ -124,9 +125,7 @@ def build_memctx(
         return True
 
     def _clean_summary(s: str, limit: int = 180) -> str:
-        t = str(s or "")
-        t = re.sub(r"<MEM(?:RULES|STYLE|CTX)\s+v1>[\s\S]*?</MEM(?:RULES|STYLE|CTX)\s+v1>", " ", t, flags=re.IGNORECASE)
-        t = re.sub(r"\[MEM(?:RULES|STYLE|CTX)\s+v1\][\s\S]*?(?=\n{2,}|\Z)", " ", t, flags=re.IGNORECASE)
+        t = strip_memq_blocks(str(s or ""))
         # Strip only the metadata header line; do not erase broad multiline content.
         t = re.sub(r"Conversation info \(untrusted metadata\):[^\n]*", " ", t, flags=re.IGNORECASE)
         t = re.sub(r"```[^`]*```", " ", t)

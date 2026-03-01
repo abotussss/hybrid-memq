@@ -91,6 +91,14 @@ curl -sS http://127.0.0.1:7781/health
 4. `gateway_start`
 - sidecar health check and markdown bootstrap import
 
+## Verification
+
+```bash
+python3 -m py_compile sidecar/minisidecar.py sidecar/memq/*.py
+python3 -m unittest -v
+python3 bench/src/text_sanitization_regression.py
+```
+
 ## Persistence and Restart Behavior
 
 - Memory, style, rules, and profiles are persisted in sidecar SQLite.
@@ -198,6 +206,14 @@ curl -sS http://127.0.0.1:7781/health
 
 4. `gateway_start`
 - sidecarヘルス確認 + Markdown初期取り込み
+
+## 検証コマンド
+
+```bash
+python3 -m py_compile sidecar/minisidecar.py sidecar/memq/*.py
+python3 -m unittest -v
+python3 bench/src/text_sanitization_regression.py
+```
 
 ## 永続性と再起動
 

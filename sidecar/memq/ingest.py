@@ -8,6 +8,7 @@ from .db import MemqDB
 from .quant import embed_text, f16_blob, quantize
 from .rules import apply_rule_updates, extract_preference_events, extract_rule_updates
 from .style import apply_style_updates, extract_style_updates
+from .text_sanitize import strip_memq_blocks
 
 
 INJECTION_PATTERNS = [
@@ -25,15 +26,9 @@ RUNTIME_NOISE_PATTERNS = [
     re.compile(r"\[\[reply_to_current\]\]", re.IGNORECASE),
 ]
 
-MEM_BLOCK_RE = re.compile(r"<MEM(?:RULES|STYLE|CTX)\s+v1>[\s\S]*?</MEM(?:RULES|STYLE|CTX)\s+v1>", re.IGNORECASE)
-MEM_BLOCK_BRACKET_RE = re.compile(r"\[MEM(?:RULES|STYLE|CTX)\s+v1\][\s\S]*?(?=\n{2,}|\Z)", re.IGNORECASE)
-
-
 def _sanitize_turn_text(text: str) -> str:
     raw = text or ""
-    t = raw
-    t = MEM_BLOCK_RE.sub(" ", t)
-    t = MEM_BLOCK_BRACKET_RE.sub(" ", t)
+    t = strip_memq_blocks(raw)
     # Drop known structured-injection fragments that should never become memory facts.
     bad_lines = []
     for ln in t.splitlines():

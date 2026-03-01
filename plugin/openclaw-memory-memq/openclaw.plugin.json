@@ -13,7 +13,7 @@
 
       "memq.budgets.memctxTokens": { "type": "number", "default": 120 },
       "memq.budgets.rulesTokens": { "type": "number", "default": 80 },
-      "memq.budgets.styleTokens": { "type": "number", "default": 24 },
+      "memq.budgets.styleTokens": { "type": "number", "default": 120 },
 
       "memq.recent.maxTokens": { "type": "number", "default": 5000 },
       "memq.recent.minKeepMessages": { "type": "number", "default": 6 },
@@ -34,7 +34,7 @@
       "memq.security.llmAuditThreshold": { "type": "number", "default": 0.2 },
       "memq.security.blockThreshold": { "type": "number", "default": 0.85 },
       "memq.style.enabled": { "type": "boolean", "default": true },
-      "memq.style.maxBudgetTokens": { "type": "number", "default": 48 },
+      "memq.style.maxBudgetTokens": { "type": "number", "default": 120 },
 
       "memq.idle.enabled": { "type": "boolean", "default": true },
       "memq.idle.idleSeconds": { "type": "number", "default": 120 }

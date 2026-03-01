@@ -4,6 +4,7 @@ import re
 from typing import List, Sequence, Tuple
 
 from .models import Message
+from .text_sanitize import strip_memq_blocks
 
 
 IMPORTANT_PATTERNS = [
@@ -20,8 +21,6 @@ PROMOTE_EXCLUDE_PATTERNS = [
     re.compile(r"((?:お前|あなた|you).*(?:として振る舞|になりき|act as|roleplay)|(?:しろ|しなさい|してください)\s*$)", re.IGNORECASE),
 ]
 
-MEM_BLOCK_RE = re.compile(r"<MEM(?:RULES|STYLE|CTX)\s+v1>[\s\S]*?</MEM(?:RULES|STYLE|CTX)\s+v1>", re.IGNORECASE)
-MEM_BLOCK_BRACKET_RE = re.compile(r"\[MEM(?:RULES|STYLE|CTX)\s+v1\][\s\S]*?(?=\n{2,}|\Z)", re.IGNORECASE)
 UNTRUSTED_META_RE = re.compile(r"Conversation info \(untrusted metadata\):[\s\S]*?(?:```[\s\S]*?```)?", re.IGNORECASE)
 FENCED_BLOCK_RE = re.compile(r"```[\s\S]*?```", re.IGNORECASE)
 RUNTIME_META_RE = re.compile(
@@ -32,8 +31,7 @@ RUNTIME_META_RE = re.compile(
 
 def _normalize_line(s: str) -> str:
     t = s or ""
-    t = MEM_BLOCK_RE.sub(" ", t)
-    t = MEM_BLOCK_BRACKET_RE.sub(" ", t)
+    t = strip_memq_blocks(t)
     t = UNTRUSTED_META_RE.sub(" ", t)
     t = FENCED_BLOCK_RE.sub(" ", t)
     t = re.sub(r"\[\[reply_to_current\]\]", " ", t, flags=re.IGNORECASE)
