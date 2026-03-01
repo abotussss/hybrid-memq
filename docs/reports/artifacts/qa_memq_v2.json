@@ -1,0 +1,25 @@
+{
+  "ok": true,
+  "checks": {
+    "style_rule_separation": true,
+    "long_memory_recall": true,
+    "memctx_budget_guard": true,
+    "dedup_and_overwrite": true,
+    "ephemeral_decay_prune": true,
+    "quarantine_trigger": true
+  },
+  "metrics": {
+    "memctx_tokens": 29,
+    "story_hit_terms": 3,
+    "deep_called": true,
+    "db_counts": {
+      "deep": 3,
+      "surface": 44
+    },
+    "dup_deep_rows": 2,
+    "dup_brave_rows": 0,
+    "dup_google_rows": 1,
+    "ephemeral_before": 8,
+    "ephemeral_after": 0
+  }
+}

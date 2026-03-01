@@ -7,16 +7,16 @@ from threading import Lock
 from typing import Any, Dict, List
 
 from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
 
 from memq.audit import audit_output
 from memq.config import MemqConfig, load_config
-from memq.conv_summarize import merge_summary, summarize_for_deep, summarize_for_surface
+from memq.conv_summarize import deep_summary_candidates, merge_summary, summarize_for_deep, summarize_for_surface
 from memq.db import MemqDB
 from memq.idle_consolidation import run_idle_consolidation
 from memq.ingest import ingest_turn
 from memq.ingest_md import import_markdown_memory
 from memq.memctx_pack import build_memctx, build_memrules, build_memstyle
+from memq.quant import embed_text, f16_blob, quantize
 from memq.models import (
     AuditRequest,
     AuditResponse,
@@ -36,6 +36,13 @@ from memq.models import (
 )
 from memq.retrieval import retrieve_candidates
 from memq.rules import refresh_preference_profiles
+from memq.structured_facts import (
+    extract_structured_facts_from_text,
+    is_durable_fact_text,
+    normalize_fact_value,
+    parse_fact_signature_from_row,
+    structured_fact_summary,
+)
 
 
 app = FastAPI(title="hybrid-memq-sidecar", version="2.0.0")
@@ -49,6 +56,71 @@ state: Dict[str, Any] = {
     "last_session_key": "default",
     "idle_runs": 0,
 }
+
+def _has_fact(session_key: str, fact_key: str, value: str, limit: int = 6000) -> bool:
+    value_l = normalize_fact_value(value).lower()
+    if not fact_key or not value_l:
+        return False
+    for r in db.list_memory_items("deep", session_key, limit=limit):
+        fk, fv = parse_fact_signature_from_row(dict(r))
+        if fk == fact_key and fv == value_l:
+            return True
+    return False
+
+
+def _promote_deep_candidates(session_key: str, candidates: List[str]) -> int:
+    now = int(time.time())
+    wrote = 0
+    for c in candidates:
+        facts = extract_structured_facts_from_text(c, ts=now, source="conv_summarize")
+        if not facts:
+            continue
+        durable = is_durable_fact_text(c)
+        for fact in facts:
+            fk = str(fact.get("fact_key") or "")
+            fv = str(fact.get("value") or "")
+            if _has_fact(session_key, fk, fv):
+                continue
+            summary = structured_fact_summary(fact)
+            emb = embed_text(summary, cfg.dim)
+            item_id = db.add_memory_item(
+                session_key=session_key,
+                layer="deep",
+                text=summary,
+                summary=summary,
+                importance=0.72,
+                tags={"kind": "structured_fact", "from": "pruned", "ts": now, "fact_keys": [fk], "fact": fact},
+                emb_f16=f16_blob(emb),
+                emb_q=quantize(emb, cfg.bits_per_dim),
+                emb_dim=cfg.dim,
+                source="conv_summarize",
+            )
+            if fk:
+                wrote += db.expire_conflicting_fact_keys("deep", session_key, [fk], item_id)
+            wrote += 1
+            if durable and not _has_fact("global", fk, fv):
+                gid = db.add_memory_item(
+                    session_key="global",
+                    layer="deep",
+                    text=summary,
+                    summary=summary,
+                    importance=0.78,
+                    tags={"kind": "durable_global_fact", "from": "pruned", "ts": now, "fact_keys": [fk], "fact": fact},
+                    emb_f16=f16_blob(emb),
+                    emb_q=quantize(emb, cfg.bits_per_dim),
+                    emb_dim=cfg.dim,
+                    source="conv_summarize",
+                )
+                if fk:
+                    wrote += db.expire_conflicting_fact_keys(
+                        "deep",
+                        "global",
+                        [fk],
+                        gid,
+                        include_all_sessions=True,
+                    )
+                wrote += 1
+    return wrote
 
 
 def _touch(session_key: str) -> None:
@@ -72,7 +144,7 @@ async def _idle_loop() -> None:
             continue
         if now - last_run < max(30, cfg.idle_seconds // 2):
             continue
-        res = run_idle_consolidation(db, session_key=session_key)
+        res = run_idle_consolidation(db, session_key=session_key, dim=cfg.dim, bits_per_dim=cfg.bits_per_dim)
         with state_lock:
             state["last_consolidation_at"] = now
             state["idle_runs"] = int(state.get("idle_runs", 0)) + 1
@@ -133,7 +205,8 @@ def conversation_summarize(req: SummarizeRequest) -> SummarizeResponse:
     old = db.get_conv_summary(req.sessionKey, "deep") or ""
     merged = merge_summary(old, new_summary, max_chars=2400)
     cid = db.upsert_conv_summary(req.sessionKey, "deep", merged)
-    return SummarizeResponse(ok=True, convdeepId=cid, stats={"lines": len(merged.splitlines())})
+    promoted = _promote_deep_candidates(req.sessionKey, deep_summary_candidates(new_summary, max_lines=8))
+    return SummarizeResponse(ok=True, convdeepId=cid, stats={"lines": len(merged.splitlines()), "promotedDeep": promoted})
 
 
 @app.post("/memory/ingest_turn", response_model=IngestTurnResponse)
@@ -204,7 +277,7 @@ def idle_run_once(req: IdleRunRequest) -> IdleRunResponse:
     now = int(req.nowTs or time.time())
     with state_lock:
         session_key = str(state.get("last_session_key", "default"))
-    res = run_idle_consolidation(db, session_key=session_key)
+    res = run_idle_consolidation(db, session_key=session_key, dim=cfg.dim, bits_per_dim=cfg.bits_per_dim)
     with state_lock:
         state["last_consolidation_at"] = now
         state["idle_runs"] = int(state.get("idle_runs", 0)) + 1
@@ -242,6 +315,20 @@ def profile() -> ProfileResponse:
 @app.get("/quarantine", response_model=QuarantineResponse)
 def quarantine(limit: int = Query(default=50, ge=1, le=500)) -> QuarantineResponse:
     return QuarantineResponse(ok=True, items=db.get_quarantine(limit=limit))
+
+
+@app.get("/memory/stats")
+def memory_stats() -> Dict[str, Any]:
+    return {"ok": True, "stats": db.memory_stats()}
+
+
+@app.get("/memory/list")
+def memory_list(
+    layer: str | None = Query(default=None),
+    sessionKey: str | None = Query(default=None),
+    limit: int = Query(default=30, ge=1, le=500),
+) -> Dict[str, Any]:
+    return {"ok": True, "items": db.list_memory_debug(layer=layer, session_key=sessionKey, limit=limit)}
 
 
 if __name__ == "__main__":

@@ -219,6 +219,8 @@ cmd_start_sidecar() {
   py="$(choose_sidecar_python)"
   load_sidecar_env
   nohup env \
+    MEMQ_ROOT="$ROOT_DIR" \
+    MEMQ_DB_PATH=".memq/sidecar.sqlite3" \
     MEMQ_LLM_AUDIT_ENABLED="${MEMQ_LLM_AUDIT_ENABLED:-0}" \
     MEMQ_LLM_AUDIT_URL="${MEMQ_LLM_AUDIT_URL:-https://api.openai.com/v1/chat/completions}" \
     MEMQ_LLM_AUDIT_MODEL="${MEMQ_LLM_AUDIT_MODEL:-gpt-5.2}" \
@@ -254,6 +256,9 @@ cmd_stop_sidecar() {
     fi
     rm -f "$PID_FILE"
   fi
+  # Best-effort cleanup in case PID file is stale or multiple supervisors were spawned.
+  pkill -f "$ROOT_DIR/sidecar/supervisor.py" 2>/dev/null || true
+  pkill -f "$ROOT_DIR/sidecar/minisidecar.py" 2>/dev/null || true
   kill_port_7781
   echo "sidecar stopped"
 }
@@ -287,6 +292,8 @@ cmd_audit_on() {
   set_plugin_cfg_key "memq.security.blockThreshold" "$block"
 
   {
+    echo "MEMQ_ROOT=$ROOT_DIR"
+    echo "MEMQ_DB_PATH=.memq/sidecar.sqlite3"
     echo "MEMQ_LLM_AUDIT_ENABLED=1"
     echo "MEMQ_LLM_AUDIT_URL=$url"
     echo "MEMQ_LLM_AUDIT_MODEL=$model"
@@ -301,6 +308,8 @@ cmd_audit_on() {
 cmd_audit_off() {
   set_plugin_cfg_key "memq.security.llmAuditEnabled" "false"
   {
+    echo "MEMQ_ROOT=$ROOT_DIR"
+    echo "MEMQ_DB_PATH=.memq/sidecar.sqlite3"
     echo "MEMQ_LLM_AUDIT_ENABLED=0"
     echo "MEMQ_LLM_AUDIT_URL=https://api.openai.com/v1/chat/completions"
     echo "MEMQ_LLM_AUDIT_MODEL=gpt-5.2"

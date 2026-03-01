@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from hashlib import blake2b
+import re
 from typing import Iterable, List
 
 import numpy as np
@@ -14,13 +15,44 @@ def normalize(v: np.ndarray) -> np.ndarray:
     return (v / n).astype(np.float32)
 
 
+def _tokenize_for_embed(text: str) -> List[str]:
+    s = (text or "").lower().replace("\n", " ")
+    out: List[str] = []
+
+    # Latin words / numbers.
+    out.extend(re.findall(r"[a-z0-9_]{2,}", s))
+
+    # CJK / Kana chunks -> overlapping bi/tri-grams to avoid whitespace dependency.
+    for chunk in re.findall(r"[ぁ-んァ-ヶ一-龠]{2,}", s):
+        n = len(chunk)
+        if n <= 4:
+            out.append(chunk)
+        for i in range(0, max(0, n - 1)):
+            out.append(chunk[i : i + 2])
+        for i in range(0, max(0, n - 2)):
+            out.append(chunk[i : i + 3])
+
+    # Global char n-grams give robustness for mixed-script prompts.
+    compact = re.sub(r"\s+", "", s)
+    for n in (3, 4):
+        if len(compact) < n:
+            continue
+        for i in range(0, min(len(compact) - n + 1, 512)):
+            out.append(compact[i : i + n])
+
+    if not out and compact:
+        out.append(compact[:64])
+    return out[:4096]
+
+
 def embed_text(text: str, dim: int) -> np.ndarray:
     # Deterministic local embedding to avoid API dependency in sidecar core.
+    # Uses mixed tokenization (word + CJK n-gram) for cross-language recall.
     vec = np.zeros((dim,), dtype=np.float32)
-    tokens = [t for t in text.lower().replace("\n", " ").split(" ") if t]
+    tokens = _tokenize_for_embed(text)
     if not tokens:
         return vec
-    for tok in tokens[:2048]:
+    for tok in tokens:
         h = blake2b(tok.encode("utf-8", errors="ignore"), digest_size=16).digest()
         i1 = int.from_bytes(h[:4], "big") % dim
         i2 = int.from_bytes(h[4:8], "big") % dim

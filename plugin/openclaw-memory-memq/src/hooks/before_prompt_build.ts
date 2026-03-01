@@ -1,5 +1,7 @@
 import { archivePrunedMessages } from "../lib/archive.js";
 import { composeInjectedBlocks, ensureBudget } from "../lib/memctx_blocks.js";
+import { flushIngestQueue } from "../lib/ingest_queue.js";
+import { readStyleCache, writeStyleCache } from "../lib/style_cache.js";
 import { SidecarClient } from "../lib/sidecar_client.js";
 import { estimateTokens, messageText, normalizeMessages, splitRecentByTokenBudget } from "../lib/token_estimate.js";
 import { defaults, getCfg, logInfo } from "../config/schema.js";
@@ -90,6 +92,126 @@ function mergeMemstyle(base: string, overrides: Record<string, string>, budgetTo
   return ensureBudget(merged, budgetTokens);
 }
 
+function toolCallIdsInMessage(m: any): string[] {
+  const ids = new Set<string>();
+  if (!m || typeof m !== "object") return [];
+
+  if (String(m.role ?? "") === "assistant") {
+    const blocks = Array.isArray(m.content) ? m.content : [];
+    for (const b of blocks) {
+      if (!b || typeof b !== "object") continue;
+      const t = String((b as any).type ?? "");
+      if (t === "toolCall" || t === "tool_call" || t === "tool-use" || t === "function_call") {
+        const id = String((b as any).id ?? "").trim();
+        if (id) ids.add(id);
+      }
+    }
+
+    const toolCalls = Array.isArray((m as any).tool_calls) ? (m as any).tool_calls : [];
+    for (const tc of toolCalls) {
+      const id = String(tc?.id ?? "").trim();
+      if (id) ids.add(id);
+    }
+  }
+  return [...ids];
+}
+
+function toolResultIdInMessage(m: any): string {
+  if (!m || typeof m !== "object") return "";
+  return String(
+    (m as any).toolCallId ??
+      (m as any).tool_call_id ??
+      (m as any).toolCallID ??
+      (m as any).call_id ??
+      ""
+  ).trim();
+}
+
+function toolResultIdsInContentBlocks(m: any): string[] {
+  const ids = new Set<string>();
+  if (!m || typeof m !== "object") return [];
+  const blocks = Array.isArray((m as any).content) ? (m as any).content : [];
+  for (const b of blocks) {
+    if (!b || typeof b !== "object") continue;
+    const t = String((b as any).type ?? "");
+    if (t !== "toolResult" && t !== "tool_result" && t !== "function_call_output" && t !== "tool-output") continue;
+    const id = String(
+      (b as any).toolCallId ??
+        (b as any).tool_call_id ??
+        (b as any).call_id ??
+        (b as any).id ??
+        ""
+    ).trim();
+    if (id) ids.add(id);
+  }
+  return [...ids];
+}
+
+function filterOrphanToolResultBlocks(m: any, callIds: Set<string>): { msg: any; removed: number } {
+  const blocks = Array.isArray(m?.content) ? m.content : null;
+  if (!blocks) return { msg: m, removed: 0 };
+  let removed = 0;
+  const keptBlocks = blocks.filter((b: any) => {
+    if (!b || typeof b !== "object") return true;
+    const t = String((b as any).type ?? "");
+    if (t !== "toolResult" && t !== "tool_result" && t !== "function_call_output" && t !== "tool-output") {
+      return true;
+    }
+    const id = String(
+      (b as any).toolCallId ??
+        (b as any).tool_call_id ??
+        (b as any).call_id ??
+        (b as any).id ??
+        ""
+    ).trim();
+    if (id && callIds.has(id)) return true;
+    removed += 1;
+    return false;
+  });
+  if (removed === 0) return { msg: m, removed: 0 };
+  return { msg: { ...m, content: keptBlocks }, removed };
+}
+
+export function repairToolIntegrity(messages: any[]): { kept: any[]; removed: number } {
+  if (!Array.isArray(messages) || messages.length === 0) return { kept: [], removed: 0 };
+
+  const callIds = new Set<string>();
+  for (const m of messages) {
+    for (const id of toolCallIdsInMessage(m)) callIds.add(id);
+  }
+
+  const kept: any[] = [];
+  let removed = 0;
+  for (const m of messages) {
+    const role = String(m?.role ?? "");
+    const isToolResult = role === "toolResult" || role === "tool" || role === "function";
+    if (!isToolResult) {
+      kept.push(m);
+      continue;
+    }
+    const rid = toolResultIdInMessage(m);
+    if (rid && callIds.has(rid)) {
+      kept.push(m);
+      continue;
+    }
+    removed += 1;
+  }
+
+  const repaired: any[] = [];
+  for (const m of kept) {
+    const { msg, removed: r } = filterOrphanToolResultBlocks(m, callIds);
+    removed += r;
+    // if message became empty content array, keep it only when it still carries text content
+    if (Array.isArray(msg?.content) && msg.content.length === 0) {
+      const rid = toolResultIdInMessage(msg);
+      const blockIds = toolResultIdsInContentBlocks(msg);
+      if (!rid && blockIds.length === 0) continue;
+    }
+    repaired.push(msg);
+  }
+  return { kept: repaired, removed };
+}
+
 export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: RuntimeState) {
   return async (event: any, hookCtx: any): Promise<any> => {
     const t0 = Date.now();
@@ -97,6 +219,10 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
     const workspaceRoot = getCfg(api, "memq.workspaceRoot", defaults["memq.workspaceRoot"]);
     const prompt = String(event?.prompt ?? "");
     rt.lastPromptBySession.set(sessionKey, prompt);
+    const cachedStyle = readStyleCache(workspaceRoot, sessionKey);
+    if (cachedStyle && !rt.lastMemstyleBySession.get(sessionKey)) {
+      rt.lastMemstyleBySession.set(sessionKey, cachedStyle);
+    }
 
     const styleBase = Math.max(8, getCfg(api, "memq.budgets.styleTokens", defaults["memq.budgets.styleTokens"]));
     const styleMax = Math.max(styleBase, getCfg(api, "memq.style.maxBudgetTokens", defaults["memq.style.maxBudgetTokens"]));
@@ -124,6 +250,15 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
     const ensured = await sidecar.ensureUp(workspaceRoot);
     if (!ensured) {
       logInfo(api, `[memq-v2] before_prompt_build sidecar_unavailable session=${sessionKey}`);
+    } else {
+      try {
+        const q = await flushIngestQueue(workspaceRoot, sidecar, 64);
+        if (q.sent > 0 || q.remain > 0) {
+          logInfo(api, `[memq-v2] before_prompt_build ingest_queue_flush sent=${q.sent} remain=${q.remain}`);
+        }
+      } catch {
+        // best effort
+      }
     }
 
     try {
@@ -147,7 +282,7 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
       }
 
       try {
-        const prunedNorm = normalizeMessages(sliced.pruned);
+        const prunedNorm = normalizeMessages(sliced.pruned).filter((m) => m.role === "user" || m.role === "assistant");
         await sidecar.summarizeConversation(sessionKey, prunedNorm, "surface_only");
         await sidecar.summarizeConversation(sessionKey, prunedNorm, "deep");
       } catch {
@@ -155,12 +290,18 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
       }
     }
 
-    // in-place prune for latest OpenClaw runtime behavior
-    if (Array.isArray(event?.messages) && sliced.keepStart > 0) {
-      event.messages.splice(0, event.messages.length, ...sliced.kept);
+    const repaired = repairToolIntegrity(sliced.kept);
+    if (repaired.removed > 0) {
+      logInfo(api, `[memq-v2] before_prompt_build session=${sessionKey} tool_orphan_removed=${repaired.removed}`);
+    }
+    const keptForPrompt = repaired.kept;
+
+    // in-place rewrite for latest OpenClaw runtime behavior
+    if (Array.isArray(event?.messages) && (sliced.keepStart > 0 || repaired.removed > 0)) {
+      event.messages.splice(0, event.messages.length, ...keptForPrompt);
     }
 
-    const recentMessages = normalizeMessages(sliced.kept);
+    const recentMessages = normalizeMessages(keptForPrompt).filter((m) => m.role === "user" || m.role === "assistant");
     rt.lastKeptBySession.set(sessionKey, recentMessages);
     const lastUser = [...recentMessages].reverse().find((m) => m.role === "user")?.text ?? prompt;
     rt.lastUserBySession.set(sessionKey, lastUser);
@@ -195,6 +336,7 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
         }
       }
       rt.lastMemstyleBySession.set(sessionKey, memstyle);
+      writeStyleCache(workspaceRoot, sessionKey, memstyle);
       surfaceHit = Boolean(q.meta?.surfaceHit);
       deepCalled = Boolean(q.meta?.deepCalled);
     } catch (err) {
@@ -202,7 +344,11 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
       if (!degradedEnabled) throw err;
       const d = buildDegradedBlocks(prompt, budgets);
       memrules = d.memrules;
-      memstyle = d.memstyle;
+      memstyle =
+        (styleEnabled ? rt.lastMemstyleBySession.get(sessionKey) || cachedStyle : "") || d.memstyle;
+      if (styleEnabled && memstyle) {
+        memstyle = ensureBudget(memstyle, budgets.style);
+      }
       memctx = d.memctx;
       rt.lastMemstyleBySession.set(sessionKey, memstyle);
     }
@@ -212,7 +358,7 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
 
     logInfo(
       api,
-      `[memq-v2] before_prompt_build session=${sessionKey} kept_msgs=${sliced.kept.length} pruned_msgs=${sliced.pruned.length} kept_tokens=${sliced.keptTokens} recent_budget=${recentMax} injected_tokens=${injectedTokens} surface_hit=${surfaceHit ? 1 : 0} deep_called=${deepCalled ? 1 : 0} latency_ms=${Date.now() - t0}`
+      `[memq-v2] before_prompt_build session=${sessionKey} kept_msgs=${keptForPrompt.length} pruned_msgs=${sliced.pruned.length} kept_tokens=${sliced.keptTokens} recent_budget=${recentMax} injected_tokens=${injectedTokens} surface_hit=${surfaceHit ? 1 : 0} deep_called=${deepCalled ? 1 : 0} latency_ms=${Date.now() - t0}`
     );
 
     return { prependContext };

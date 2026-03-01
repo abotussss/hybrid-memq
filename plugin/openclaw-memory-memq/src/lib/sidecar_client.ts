@@ -41,11 +41,12 @@ export class SidecarClient {
     const venvPy = join(root, "sidecar", ".venv", "bin", "python");
     const py = existsSync(venvPy) ? venvPy : "python3";
     try {
+      const env = { ...process.env, MEMQ_ROOT: root, MEMQ_DB_PATH: ".memq/sidecar.sqlite3" };
       const child = spawn(py, [app], {
         cwd: root,
         detached: true,
         stdio: "ignore",
-        env: process.env,
+        env,
       });
       child.unref();
     } catch {

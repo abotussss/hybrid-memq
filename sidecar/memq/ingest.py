@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 from .db import MemqDB
 from .quant import embed_text, f16_blob, quantize
@@ -16,18 +17,29 @@ INJECTION_PATTERNS = [
     re.compile(r"reveal\s+.*(api\s*key|secret|token)", re.IGNORECASE),
     re.compile(r"apiキー.*(教え|出して)", re.IGNORECASE),
 ]
+RUNTIME_NOISE_PATTERNS = [
+    re.compile(r"read\s+(?:agents|soul|identity|heartbeat)\.md", re.IGNORECASE),
+    re.compile(r"workspace context", re.IGNORECASE),
+    re.compile(r"follow it strictly", re.IGNORECASE),
+    re.compile(r"do not infer or repeat old tasks", re.IGNORECASE),
+    re.compile(r"\[\[reply_to_current\]\]", re.IGNORECASE),
+]
 
 MEM_BLOCK_RE = re.compile(r"<MEM(?:RULES|STYLE|CTX)\\s+v1>[\\s\\S]*?</MEM(?:RULES|STYLE|CTX)\\s+v1>", re.IGNORECASE)
+MEM_BLOCK_BRACKET_RE = re.compile(r"\[MEM(?:RULES|STYLE|CTX)\s+v1\][\s\S]*?(?=\n{2,}|\Z)", re.IGNORECASE)
 
 
 def _sanitize_turn_text(text: str) -> str:
     t = text or ""
     t = MEM_BLOCK_RE.sub(" ", t)
+    t = MEM_BLOCK_BRACKET_RE.sub(" ", t)
     # Drop known structured-injection fragments that should never become memory facts.
     bad_lines = []
     for ln in t.splitlines():
         s = ln.strip()
         if not s:
+            continue
+        if any(p.search(s) for p in RUNTIME_NOISE_PATTERNS):
             continue
         if s.startswith("budget_tokens="):
             continue
@@ -39,8 +51,14 @@ def _sanitize_turn_text(text: str) -> str:
             continue
         if s.startswith("procedure."):
             continue
+        if s.startswith("[MEM"):
+            continue
         bad_lines.append(s)
-    return " ".join(" ".join(bad_lines).split())[:4000]
+    out = " ".join(" ".join(bad_lines).split())
+    out = re.sub(r"\[\[reply_to_current\]\]", " ", out, flags=re.IGNORECASE)
+    out = re.sub(r"\*{1,3}", "", out)
+    out = re.sub(r"\s+", " ", out).strip()
+    return out[:4000]
 
 
 def _is_high_risk_text(text: str) -> Tuple[bool, str, float]:
@@ -61,11 +79,333 @@ def _surface_summary(user_text: str, assistant_text: str) -> str:
     return (u or a)[:220]
 
 
+FACT_KEYWORDS = re.compile(
+    r"(覚えて|remember|必ず|always|重要|important|ルール|rule|方針|policy|制約|constraint|名前|name|呼称|call me|一人称|first person|好み|prefer|目標|goal|期限|deadline)",
+    re.IGNORECASE,
+)
+EXPLICIT_REMEMBER_RE = re.compile(
+    r"(remember\s+(this|that)|please\s+remember|must|always|ルール|方針|制約|覚えて(?:おいて|ください|くれ|ね|。|！|$|:))",
+    re.IGNORECASE,
+)
+
+
+def _split_sentences(text: str) -> List[str]:
+    if not text:
+        return []
+    raw = re.split(r"[。．\.!！?？\n;；]+", text)
+    out: List[str] = []
+    for r in raw:
+        s = " ".join(r.strip().split())
+        if not s:
+            continue
+        if any(p.search(s) for p in RUNTIME_NOISE_PATTERNS):
+            continue
+        if len(s) < 3:
+            continue
+        out.append(s)
+    return out
+
+
+def _make_fact_summary(text: str, limit: int = 220) -> str:
+    cands = _split_sentences(text)
+    if not cands:
+        return ""
+    prioritized = [s for s in cands if FACT_KEYWORDS.search(s)]
+    picked: List[str] = []
+    for s in prioritized:
+        picked.append(s)
+        if len(picked) >= 3:
+            break
+    if 0 < len(picked) < 2:
+        for s in cands:
+            if s in picked:
+                continue
+            picked.append(s)
+            if len(picked) >= 2:
+                break
+    if not picked:
+        picked = cands[:2]
+    out = " | ".join(picked)
+    out = re.sub(r"\s+", " ", out).strip()
+    return out[:limit]
+
+
 def _deep_candidate(user_text: str, assistant_text: str) -> str:
-    u = " ".join((user_text or "").split())
-    a = " ".join((assistant_text or "").split())
-    merged = (u + "\n" + a).strip()
-    return merged[:400]
+    # Deep should store compact user-grounded facts, not long assistant prose.
+    u = _make_fact_summary(user_text, 260)
+    if u:
+        return u
+    a = _make_fact_summary(assistant_text, 200)
+    return a[:260]
+
+
+def _contains_stable_fact_signal(text: str) -> bool:
+    t = text or ""
+    if re.search(r"(memstyle|スタイルを更新|口調を更新|キャラを更新|性格を更新)", t, re.IGNORECASE):
+        return False
+    return bool(
+        re.search(r"(私の名前|僕の名前|俺の名前|呼び方|一人称|好み|苦手|目標|期限|ルール|方針|制約|性格|口調)", t)
+        or re.search(r"(my name|call me|i prefer|i dislike|my goal|deadline|rule|policy|constraint|persona|style)", t, re.IGNORECASE)
+    )
+
+
+def _exists_summary(db: MemqDB, layer: str, session_key: str, sig: str, limit: int = 512) -> bool:
+    target = sig.strip().lower()
+    if not target:
+        return True
+    for row in db.list_memory_items(layer, session_key, limit=limit):
+        if str(row["summary"]).strip().lower() == target:
+            return True
+    return False
+
+
+def _extract_fact_keys(user_text: str, styles: Dict[str, str], rules: List[Tuple[str, str, int, str]]) -> List[str]:
+    out: List[str] = []
+    t = user_text or ""
+    if "callUser" in styles:
+        out.append("style.callUser")
+    if "firstPerson" in styles:
+        out.append("style.firstPerson")
+    if "persona" in styles:
+        out.append("style.persona")
+    if "tone" in styles:
+        out.append("style.tone")
+    if "verbosity" in styles:
+        out.append("style.verbosity")
+
+    for rk, _rv, _prio, _kind in rules:
+        if rk:
+            out.append(f"rule.{rk}")
+
+    if re.search(r"(検索|search).*(brave|google|bing|duckduckgo)", t, re.IGNORECASE):
+        out.append("pref.search.engine")
+    if re.search(r"(返答|回答|answer|reply).*(結論から|first|summary first)", t, re.IGNORECASE):
+        out.append("rule.output.order")
+    if re.search(r"(箇条書き|bullet|list format)", t, re.IGNORECASE):
+        out.append("rule.output.format")
+    if re.search(r"(家族|family|妻|奥さま|夫|husband|wife|子ども|息子|娘|犬|猫|ペット|pet)", t, re.IGNORECASE):
+        out.append("profile.family")
+    if re.search(r"(妻|奥さま|夫|husband|wife)", t, re.IGNORECASE):
+        out.append("profile.family.spouse")
+    if re.search(r"(犬|猫|ペット|愛犬|dog|cat|pet)", t, re.IGNORECASE):
+        out.append("profile.family.pet")
+    if re.search(r"(子ども|子供|息子|娘|child|son|daughter)", t, re.IGNORECASE):
+        out.append("profile.family.child")
+    if re.search(r"(人格|persona|キャラ|ロール|roleplay|口調|tone|話し方|speaking style)", t, re.IGNORECASE):
+        out.append("profile.persona")
+        out.append("profile.persona.role")
+    if re.search(r"(呼称|呼び方|call me)", t, re.IGNORECASE):
+        out.append("profile.identity.call_user")
+    if re.search(r"(一人称|first person)", t, re.IGNORECASE):
+        out.append("profile.identity.first_person")
+    if re.search(r"(10分前|直近|recent|さっき|minutes? ago)", t, re.IGNORECASE):
+        out.append("memory.recent")
+
+    uniq: List[str] = []
+    seen = set()
+    for k in out:
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(k)
+    return uniq
+
+
+def _norm_val(v: str, max_len: int = 48) -> str:
+    return re.sub(r"\s+", " ", (v or "").strip())[:max_len]
+
+
+def _extract_structured_facts(
+    user_text: str,
+    styles: Dict[str, str],
+    rules: List[Tuple[str, str, int, str]],
+    explicit_memory_signal: bool,
+) -> List[Dict[str, Any]]:
+    t = user_text or ""
+    out: List[Dict[str, Any]] = []
+
+    def add_fact(subject: str, relation: str, value: str, fact_key: str, confidence: float, stable: bool = True, ttl_days: int = 365) -> None:
+        vv = _norm_val(value)
+        if not vv:
+            return
+        out.append(
+            {
+                "subject": subject,
+                "relation": relation,
+                "value": vv,
+                "fact_key": fact_key,
+                "confidence": float(confidence),
+                "source": "user_msg",
+                "stable": bool(stable),
+                "ttl_days": int(ttl_days),
+                "explicit": bool(explicit_memory_signal),
+            }
+        )
+
+    spouse = re.search(r"(?:妻|奥さま|奥さん|夫|旦那|husband|wife)\s*(?:は|が|:|：)\s*([A-Za-z0-9ぁ-んァ-ヶ一-龠ー\-]{1,24})", t, re.IGNORECASE)
+    if spouse:
+        add_fact("user", "family.spouse", spouse.group(1), "profile.family.spouse", 0.93)
+
+    pet = re.search(r"(?:愛犬|犬|猫|ペット|dog|cat|pet)\s*(?:は|が|:|：)\s*([A-Za-z0-9ぁ-んァ-ヶ一-龠ー\-]{1,24})", t, re.IGNORECASE)
+    if pet:
+        add_fact("user", "family.pet", pet.group(1), "profile.family.pet", 0.92)
+
+    child = re.search(r"(?:子ども|子供|息子|娘|child|son|daughter)\s*(?:は|が|:|：)\s*([A-Za-z0-9ぁ-んァ-ヶ一-龠ー\-]{1,24})", t, re.IGNORECASE)
+    if child:
+        add_fact("user", "family.child", child.group(1), "profile.family.child", 0.90)
+
+    call_user = styles.get("callUser")
+    if call_user:
+        add_fact("assistant", "identity.call_user", call_user, "profile.identity.call_user", 0.96)
+    else:
+        m_call = re.search(r"(?:俺|ぼく|僕|私|わたし|オレ)のことは\s*([A-Za-z0-9ぁ-んァ-ヶ一-龠ー]{1,24})", t, re.IGNORECASE)
+        if m_call:
+            add_fact("assistant", "identity.call_user", m_call.group(1), "profile.identity.call_user", 0.93)
+
+    first_person = styles.get("firstPerson")
+    if first_person:
+        add_fact("assistant", "identity.first_person", first_person, "profile.identity.first_person", 0.95)
+
+    persona = styles.get("persona")
+    if persona:
+        add_fact("assistant", "persona.role", persona, "profile.persona.role", 0.94)
+
+    tone = styles.get("tone")
+    if tone:
+        add_fact("assistant", "persona.tone", tone, "profile.persona.tone", 0.86)
+
+    m_engine = re.search(r"(?:検索|search).*(brave|google|bing|duckduckgo)", t, re.IGNORECASE)
+    if m_engine:
+        add_fact("user", "preference.search_engine", m_engine.group(1).lower(), "pref.search.engine", 0.90)
+
+    if re.search(r"(結論から|summary first|first then details)", t, re.IGNORECASE):
+        add_fact("assistant", "rule.output_order", "summary_first", "rule.output.order", 0.88)
+    if re.search(r"(箇条書き|bullet|list format)", t, re.IGNORECASE):
+        add_fact("assistant", "rule.output_format", "bullets", "rule.output.format", 0.86)
+
+    # Rule updates from parser are also durable structured memory.
+    for rk, rv, _p, _kind in rules:
+        if not rk:
+            continue
+        add_fact("assistant", f"rule.{rk}", rv, f"rule.{rk}", 0.85)
+
+    uniq: List[Dict[str, Any]] = []
+    seen = set()
+    for f in out:
+        sig = f"{f['fact_key']}::{f['value']}".lower()
+        if sig in seen:
+            continue
+        seen.add(sig)
+        uniq.append(f)
+    return uniq
+
+
+def _fact_novelty(db: MemqDB, session_key: str, fact_key: str, value: str, limit: int = 800) -> Tuple[float, bool]:
+    value_l = (value or "").strip().lower()
+    rows = db.list_memory_items("deep", session_key, limit=limit)
+    same_value = False
+    same_key_diff = False
+    for r in rows:
+        try:
+            tags = json.loads(str(r["tags"] or "{}"))
+        except Exception:
+            tags = {}
+        f = tags.get("fact") or {}
+        k = str(f.get("fact_key") or "")
+        v = str(f.get("value") or "").strip().lower()
+        if k != fact_key:
+            continue
+        if v and v == value_l:
+            same_value = True
+            break
+        same_key_diff = True
+    if same_value:
+        return 0.0, True
+    if same_key_diff:
+        return 0.35, False
+    return 1.0, False
+
+
+def _fact_repetition(db: MemqDB, session_key: str, fact_key: str, limit: int = 800) -> float:
+    if not fact_key:
+        return 0.0
+    rows = db.list_memory_items("deep", session_key, limit=limit)
+    n = 0
+    for r in rows:
+        try:
+            tags = json.loads(str(r["tags"] or "{}"))
+        except Exception:
+            tags = {}
+        fk = set(tags.get("fact_keys") or [])
+        if fact_key in fk:
+            n += 1
+    return max(0.0, min(1.0, float(n) / 3.0))
+
+
+def _subject_match(user_text: str, fact: Dict[str, Any]) -> float:
+    t = user_text or ""
+    subject = str(fact.get("subject") or "user")
+    rel = str(fact.get("relation") or "")
+    if subject == "user":
+        if re.search(r"(私|わたし|僕|ぼく|俺|オレ|my|me|I\\b)", t, re.IGNORECASE):
+            return 1.0
+        return 0.55
+    if subject == "assistant":
+        if re.search(r"(呼称|呼び方|一人称|口調|人格|キャラ|call me|first person|tone|persona)", t, re.IGNORECASE):
+            return 1.0
+        if rel.startswith("rule."):
+            return 0.9
+        return 0.65
+    return 0.6
+
+
+def _write_gate_score(user_text: str, fact: Dict[str, Any], novelty: float, repetition: float, subj_match: float) -> Tuple[float, float]:
+    fact_key = str(fact.get("fact_key") or "")
+    explicit = 1.0 if EXPLICIT_REMEMBER_RE.search(user_text or "") else 0.0
+    utility = 1.0 if bool(fact.get("stable", True)) else 0.55
+    stability = 1.0 if fact_key.startswith(("profile.", "pref.", "rule.")) else 0.6
+    redundancy = 1.0 - max(0.0, min(1.0, novelty))
+    score = (
+        0.28 * utility
+        + 0.22 * novelty
+        + 0.18 * stability
+        + 0.22 * explicit
+        + 0.14 * repetition
+        + 0.16 * subj_match
+        - 0.16 * redundancy
+    )
+    threshold = 0.52 if fact_key.startswith(("profile.", "pref.", "rule.")) else 0.68
+    return float(score), float(threshold)
+
+
+def _structured_fact_summary(f: Dict[str, Any]) -> str:
+    rel = str(f.get("relation") or "")
+    val = str(f.get("value") or "")
+    subj = str(f.get("subject") or "user")
+    conf = float(f.get("confidence", 0.8))
+    src = str(f.get("source") or "user_msg")
+    ttl_days = int(f.get("ttl_days") or 365)
+    if rel == "family.spouse":
+        core = f"家族: 妻={val}"
+    elif rel == "family.pet":
+        core = f"家族: ペット={val}"
+    elif rel == "family.child":
+        core = f"家族: 子ども={val}"
+    elif rel == "identity.call_user":
+        core = f"呼称: ユーザー呼称={val}"
+    elif rel == "identity.first_person":
+        core = f"一人称: {val}"
+    elif rel == "persona.role":
+        core = f"人格: persona={val}"
+    elif rel == "preference.search_engine":
+        core = f"設定: 検索エンジン={val}"
+    elif rel == "rule.output_order":
+        core = f"ルール: 出力順={val}"
+    elif rel == "rule.output_format":
+        core = f"ルール: 出力形式={val}"
+    else:
+        core = f"fact: {rel}={val}"
+    return f"{core} | subject={subj} | conf={conf:.2f} | src={src} | ttl={ttl_days}d"[:220]
 
 
 def ingest_turn(
@@ -95,6 +435,14 @@ def ingest_turn(
     styles = extract_style_updates(user_text)
     wrote["rules"] += apply_rule_updates(db, rules)
     wrote["style"] += apply_style_updates(db, styles)
+    style_update_intent = len(styles) > 0
+    explicit_memory_signal = bool(EXPLICIT_REMEMBER_RE.search(user_text))
+    structured_facts = _extract_structured_facts(user_text, styles, rules, explicit_memory_signal)
+    fact_keys = _extract_fact_keys(user_text, styles, rules)
+    for f in structured_facts:
+        fk = str(f.get("fact_key") or "")
+        if fk and fk not in fact_keys:
+            fact_keys.append(fk)
 
     pref_events = extract_preference_events(user_text)
     for key, value, weight, explicit, source in pref_events:
@@ -113,13 +461,13 @@ def ingest_turn(
     summary = _surface_summary(user_text, assistant_text)
     if summary:
         emb = embed_text(summary, dim)
-        db.add_memory_item(
+        db.add_or_merge_memory_item(
             session_key=session_key,
             layer="surface",
             text=summary,
             summary=summary,
             importance=0.55,
-            tags={"kind": "turn", "ts": ts},
+            tags={"kind": "turn", "ts": ts, "fact_keys": fact_keys},
             emb_f16=f16_blob(emb),
             emb_q=None,
             emb_dim=dim,
@@ -127,28 +475,153 @@ def ingest_turn(
         )
         wrote["surface"] += 1
 
-    deep_signal = bool(
-        re.search(r"(remember|覚えて|重要|must|always|goal|制約|方針|ルール)", user_text, re.IGNORECASE)
-        or re.search(r"(preference|好み|口調|性格|style)", user_text, re.IGNORECASE)
+    deep_signal = explicit_memory_signal or bool(structured_facts)
+    # Promote structured user facts even without explicit "remember".
+    auto_deep_signal = _contains_stable_fact_signal(user_text) and len(user_text.strip()) >= 24
+    deep_signal = deep_signal or (auto_deep_signal and not style_update_intent)
+
+    durable_signal = bool(
+        EXPLICIT_REMEMBER_RE.search(user_text)
+        or re.search(r"(常に|rule|policy|identity|一人称|呼称|口調|性格|style)", user_text, re.IGNORECASE)
     )
+    if auto_deep_signal and not style_update_intent:
+        durable_signal = True
+    if structured_facts:
+        durable_signal = True
 
     if deep_signal and not high_risk:
-        deep_text = _deep_candidate(user_text, assistant_text)
-        if deep_text:
+        structured_written = 0
+        for fact in structured_facts:
+            fact_key = str(fact.get("fact_key") or "")
+            fact_value = str(fact.get("value") or "")
+            novelty, same_value_exists = _fact_novelty(db, session_key, fact_key, fact_value)
+            if same_value_exists:
+                continue
+            repetition = _fact_repetition(db, session_key, fact_key)
+            subj_match = _subject_match(user_text, fact)
+            gate_score, gate_threshold = _write_gate_score(user_text, fact, novelty, repetition, subj_match)
+            if gate_score < gate_threshold:
+                continue
+
+            fact = dict(fact)
+            fact["ts"] = int(ts)
+            deep_text = _structured_fact_summary(fact)
             emb = embed_text(deep_text, dim)
-            db.add_memory_item(
+            deep_id = db.add_memory_item(
                 session_key=session_key,
                 layer="deep",
                 text=deep_text,
-                summary=deep_text[:220],
-                importance=0.72,
-                tags={"kind": "signal_deep", "ts": ts},
+                summary=deep_text,
+                importance=0.80,
+                tags={
+                    "kind": "structured_fact",
+                    "ts": ts,
+                    "fact_keys": [fact_key],
+                    "fact": fact,
+                    "gate": {
+                        "score": round(gate_score, 3),
+                        "threshold": round(gate_threshold, 3),
+                        "novelty": round(novelty, 3),
+                        "repetition": round(repetition, 3),
+                        "subject_match": round(subj_match, 3),
+                    },
+                },
                 emb_f16=f16_blob(emb),
                 emb_q=quantize(emb, bits_per_dim),
                 emb_dim=dim,
                 source="turn",
             )
+            if fact_key:
+                wrote["deep"] += db.expire_conflicting_fact_keys("deep", session_key, [fact_key], deep_id)
             wrote["deep"] += 1
+            structured_written += 1
+
+            if durable_signal:
+                session_sig = deep_text[:220].strip().lower()
+                if not _exists_summary(db, "deep", "global", session_sig):
+                    gid = db.add_memory_item(
+                        session_key="global",
+                        layer="deep",
+                        text=deep_text,
+                        summary=deep_text,
+                        importance=0.88,
+                        tags={"kind": "durable_global_fact", "ts": ts, "fact_keys": [fact_key], "fact": fact},
+                        emb_f16=f16_blob(emb),
+                        emb_q=quantize(emb, bits_per_dim),
+                        emb_dim=dim,
+                        source="turn",
+                    )
+                    if fact_key:
+                        wrote["deep"] += db.expire_conflicting_fact_keys(
+                            "deep",
+                            "global",
+                            [fact_key],
+                            gid,
+                            include_all_sessions=True,
+                        )
+                    wrote["deep"] += 1
+
+        # fallback deep: only explicit-remember, and store as structured note fact
+        if structured_written == 0 and explicit_memory_signal and not structured_facts:
+            deep_text = _deep_candidate(user_text, assistant_text)
+            if deep_text:
+                note_fact = {
+                    "subject": "user",
+                    "relation": "memory.note",
+                    "value": deep_text[:120],
+                    "fact_key": "memory.note",
+                    "confidence": 0.62,
+                    "source": "user_msg",
+                    "stable": True,
+                    "ttl_days": 120,
+                    "explicit": True,
+                    "ts": int(ts),
+                }
+                deep_text = _structured_fact_summary(note_fact)
+                emb = embed_text(deep_text, dim)
+                session_sig = deep_text[:220].strip().lower()
+                deep_id = db.add_memory_item(
+                    session_key=session_key,
+                    layer="deep",
+                    text=deep_text,
+                    summary=deep_text[:220],
+                    importance=0.70,
+                    tags={
+                        "kind": "structured_fact",
+                        "ts": ts,
+                        "fact_keys": ["memory.note"],
+                        "fact": note_fact,
+                    },
+                    emb_f16=f16_blob(emb),
+                    emb_q=quantize(emb, bits_per_dim),
+                    emb_dim=dim,
+                    source="turn",
+                )
+                wrote["deep"] += db.expire_conflicting_fact_keys("deep", session_key, ["memory.note"], deep_id)
+                wrote["deep"] += 1
+
+                # Mirror selective deep facts to global so memory survives session-key churn.
+                if durable_signal and not _exists_summary(db, "deep", "global", session_sig):
+                    gid = db.add_memory_item(
+                        session_key="global",
+                        layer="deep",
+                        text=deep_text,
+                        summary=deep_text[:220],
+                        importance=0.78,
+                        tags={"kind": "durable_global_fact", "ts": ts, "fact_keys": ["memory.note"], "fact": note_fact},
+                        emb_f16=f16_blob(emb),
+                        emb_q=quantize(emb, bits_per_dim),
+                        emb_dim=dim,
+                        source="turn",
+                    )
+                    wrote["deep"] += db.expire_conflicting_fact_keys(
+                        "deep",
+                        "global",
+                        ["memory.note"],
+                        gid,
+                        include_all_sessions=True,
+                    )
+                    wrote["deep"] += 1
 
     # Ephemeral for short low-value chatter.
     if len(user_text.strip()) <= 64 and not deep_signal:

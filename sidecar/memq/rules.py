@@ -150,6 +150,10 @@ def extract_rule_updates(user_text: str) -> List[Tuple[str, str, int, str]]:
 
     if re.search(r"(余計な提案|extra suggestions?).*(するな|しない|avoid|no)", text, re.IGNORECASE):
         out.append(("procedure.avoid_extra_suggestions", "true", 65, "procedure"))
+    if re.search(r"(余計な提案|extra suggestions?).*(していい|許可|allow|ok)", text, re.IGNORECASE):
+        out.append(("procedure.avoid_extra_suggestions", "false", 65, "procedure"))
+    if re.search(r"(owner verify|owner verification|owner確認|所有者確認).*(不要|off|disable|無効)", text, re.IGNORECASE):
+        out.append(("security.owner_verification", "optional", 85, "security"))
 
     # Never store style/persona in MEMRULES.
     filtered: List[Tuple[str, str, int, str]] = []
@@ -248,6 +252,10 @@ def apply_rule_updates(db: MemqDB, updates: List[Tuple[str, str, int, str]]) -> 
         db.upsert_rule(rid, prio, True, kind, body)
         count += 1
     return count
+
+
+def prune_stale_rule_overrides(db: MemqDB, now_sec: int) -> int:
+    return db.prune_stale_user_rules(now_sec=now_sec, max_age_sec=86400 * 45)
 
 
 def extract_allowed_languages_from_rules(db: MemqDB) -> List[str]:

@@ -50,14 +50,20 @@ function enforceIdentityStyle(text: string, memstyle: string): { text: string; c
   const first = kv.get("firstPerson") || kv.get("mustFirstPerson") || "僕";
   const callUser = kv.get("callUser") || kv.get("mustCallUser") || "";
   const prefix = kv.get("prefix") || kv.get("mustPrefix") || (callUser ? `${callUser}、` : "");
-  if (!persona) return { text: out, changed: false };
+  let changed = false;
+  if (prefix && out.trim() && !out.trim().startsWith(prefix)) {
+    out = `${prefix}${out.replace(/^\s+/, "")}`;
+    changed = true;
+  }
+
+  if (!persona) return { text: out, changed };
 
   const jpAssistantClaim =
     /(?:僕|私|わたし|俺)\s*は[^。!\n]{0,96}(?:OpenClaw|openclaw|assistant|アシスタント|AIアシスタント)[^。!\n]{0,96}[。.!！?？]?/giu;
   const enAssistantClaim =
     /I\s*am[^.\n]{0,120}\b(?:assistant|ai assistant)\b[^.\n]{0,80}[.!?]?/giu;
   const hadClaim = out.search(jpAssistantClaim) >= 0 || out.search(enAssistantClaim) >= 0;
-  if (!hadClaim) return { text: out, changed: false };
+  if (!hadClaim) return { text: out, changed };
 
   out = out.replace(jpAssistantClaim, "").replace(enAssistantClaim, "").trim();
   out = out

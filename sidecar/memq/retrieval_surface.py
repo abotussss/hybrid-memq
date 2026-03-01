@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Dict, List
 
 import numpy as np
 
 from .db import MemqDB
 from .quant import dequantize, dot, from_f16_blob
+
+NOISE_SUMMARY_RE = re.compile(
+    r"(<MEM(?:RULES|STYLE|CTX)\s+v1>|\[MEM(?:RULES|STYLE|CTX)\s+v1\]|\[\[reply_to_current\]\]|read\s+(?:agents|soul|identity|heartbeat)\.md|workspace context)",
+    re.IGNORECASE,
+)
 
 
 def _score(sim: float, importance: float, usage_count: int, age_sec: int) -> float:
@@ -15,11 +21,31 @@ def _score(sim: float, importance: float, usage_count: int, age_sec: int) -> flo
     return sim + 0.45 * recency + 0.15 * freq + 0.5 * float(importance)
 
 
-def search_surface(db: MemqDB, session_key: str, qvec: np.ndarray, top_k: int, bits: int) -> List[Dict[str, Any]]:
+def _tokenize(text: str) -> set[str]:
+    s = (text or "").lower()
+    out = set(re.findall(r"[a-z0-9_]{2,}", s))
+    out.update(re.findall(r"[ぁ-んァ-ヶ一-龠]{1,8}", s))
+    return out
+
+
+def _lex_overlap(q_tokens: set[str], text: str) -> float:
+    if not q_tokens:
+        return 0.0
+    t = _tokenize(text)
+    if not t:
+        return 0.0
+    return float(len(q_tokens & t)) / float(len(q_tokens))
+
+
+def search_surface(db: MemqDB, session_key: str, query_text: str, qvec: np.ndarray, top_k: int, bits: int) -> List[Dict[str, Any]]:
     rows = db.list_memory_items("surface", session_key, limit=2000)
+    q_tokens = _tokenize(query_text)
     now = __import__("time").time()
     scored: List[Dict[str, Any]] = []
     for r in rows:
+        summary_raw = str(r["summary"] or "")
+        if NOISE_SUMMARY_RE.search(summary_raw):
+            continue
         emb = None
         if r["emb_f16"]:
             emb = from_f16_blob(r["emb_f16"], int(r["emb_dim"]))
@@ -28,14 +54,16 @@ def search_surface(db: MemqDB, session_key: str, qvec: np.ndarray, top_k: int, b
         if emb is None:
             continue
         sim = dot(qvec, emb)
+        lex = _lex_overlap(q_tokens, summary_raw)
         age = int(now - int(r["last_access_at"]))
-        s = _score(sim, float(r["importance"]), int(r["usage_count"]), age)
+        s = _score(sim, float(r["importance"]), int(r["usage_count"]), age) + 0.35 * lex
         scored.append(
             {
                 "id": str(r["id"]),
                 "score": float(s),
                 "sim": float(sim),
-                "summary": str(r["summary"]),
+                "lex": float(lex),
+                "summary": summary_raw,
                 "layer": "surface",
                 "importance": float(r["importance"]),
             }
