@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import Dict, List
 
 from .db import MemqDB
-from .quant import embed_text, f16_blob, quantize
 
 
 def _read_text(path: Path) -> str:
@@ -15,6 +14,8 @@ def _read_text(path: Path) -> str:
 
 
 def import_markdown_memory(db: MemqDB, workspace_root: Path, dim: int, bits_per_dim: int) -> Dict[str, int]:
+    _ = dim
+    _ = bits_per_dim
     wrote = {"surface": 0, "deep": 0}
 
     files: List[Path] = []
@@ -33,7 +34,6 @@ def import_markdown_memory(db: MemqDB, workspace_root: Path, dim: int, bits_per_
         chunks = [c.strip() for c in text.split("\n\n") if c.strip()]
         for ch in chunks[:200]:
             summary = " ".join(ch.split())[:220]
-            emb = embed_text(summary, dim)
             layer = "deep" if path.name in {"MEMORY.md", "IDENTITY.md", "SOUL.md", "HEARTBEAT.md"} else "surface"
             db.add_memory_item(
                 session_key=session_key,
@@ -42,9 +42,9 @@ def import_markdown_memory(db: MemqDB, workspace_root: Path, dim: int, bits_per_
                 summary=summary,
                 importance=0.68 if layer == "deep" else 0.55,
                 tags={"source": str(path.name), "kind": "md_import"},
-                emb_f16=f16_blob(emb),
-                emb_q=quantize(emb, bits_per_dim) if layer == "deep" else None,
-                emb_dim=dim,
+                emb_f16=None,
+                emb_q=None,
+                emb_dim=0,
                 source="md_import",
             )
             wrote[layer] += 1

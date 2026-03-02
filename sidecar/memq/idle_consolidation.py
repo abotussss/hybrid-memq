@@ -5,7 +5,6 @@ import time
 from typing import Dict, List
 
 from .db import MemqDB
-from .quant import embed_text, f16_blob, quantize
 from .rules import prune_stale_rule_overrides, refresh_preference_profiles
 from .structured_facts import (
     extract_structured_facts_from_text,
@@ -16,6 +15,8 @@ from .structured_facts import (
 
 
 def _promote_structured_from_conv(db: MemqDB, *, dim: int, bits_per_dim: int, max_rows: int = 200) -> int:
+    _ = dim
+    _ = bits_per_dim
     rows = db.conn.execute(
         "SELECT session_key,summary,updated_at FROM conv_summaries WHERE retention_scope='deep' ORDER BY updated_at DESC LIMIT ?",
         (int(max_rows),),
@@ -53,7 +54,6 @@ def _promote_structured_from_conv(db: MemqDB, *, dim: int, bits_per_dim: int, ma
                 if (session_key, fk, fv) in existing:
                     continue
                 summary = structured_fact_summary(fact)
-                emb = embed_text(summary, dim)
                 mid = db.add_memory_item(
                     session_key=session_key,
                     layer="deep",
@@ -61,9 +61,9 @@ def _promote_structured_from_conv(db: MemqDB, *, dim: int, bits_per_dim: int, ma
                     summary=summary,
                     importance=0.70,
                     tags={"kind": "structured_fact", "from": "idle_promote", "ts": ts, "fact_keys": [fk], "fact": fact},
-                    emb_f16=f16_blob(emb),
-                    emb_q=quantize(emb, bits_per_dim),
-                    emb_dim=dim,
+                    emb_f16=None,
+                    emb_q=None,
+                    emb_dim=0,
                     source="idle_consolidation",
                 )
                 wrote += db.expire_conflicting_fact_keys("deep", session_key, [fk], mid)
@@ -78,9 +78,9 @@ def _promote_structured_from_conv(db: MemqDB, *, dim: int, bits_per_dim: int, ma
                         summary=summary,
                         importance=0.76,
                         tags={"kind": "durable_global_fact", "from": "idle_promote", "ts": ts, "fact_keys": [fk], "fact": fact},
-                        emb_f16=f16_blob(emb),
-                        emb_q=quantize(emb, bits_per_dim),
-                        emb_dim=dim,
+                        emb_f16=None,
+                        emb_q=None,
+                        emb_dim=0,
                         source="idle_consolidation",
                     )
                     wrote += db.expire_conflicting_fact_keys("deep", "global", [fk], gid)
@@ -120,6 +120,8 @@ def _prune_invalid_profile_facts(db: MemqDB) -> int:
 
 
 def _promote_profile_facts(db: MemqDB, *, dim: int, bits_per_dim: int) -> int:
+    _ = dim
+    _ = bits_per_dim
     style = db.get_style_profile()
     if not style:
         return 0
@@ -177,7 +179,6 @@ def _promote_profile_facts(db: MemqDB, *, dim: int, bits_per_dim: int) -> int:
             "ts": now,
         }
         summary = structured_fact_summary(fact)
-        emb = embed_text(summary, dim)
         gid = db.add_memory_item(
             session_key="global",
             layer="deep",
@@ -185,9 +186,9 @@ def _promote_profile_facts(db: MemqDB, *, dim: int, bits_per_dim: int) -> int:
             summary=summary,
             importance=0.90,
             tags={"kind": "durable_global_fact", "from": "profile_sync", "ts": now, "fact_keys": [fk], "fact": fact},
-            emb_f16=f16_blob(emb),
-            emb_q=quantize(emb, bits_per_dim),
-            emb_dim=dim,
+            emb_f16=None,
+            emb_q=None,
+            emb_dim=0,
             source="idle_consolidation",
         )
         wrote += db.expire_conflicting_fact_keys("deep", "global", [fk], gid)

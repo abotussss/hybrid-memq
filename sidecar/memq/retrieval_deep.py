@@ -5,11 +5,8 @@ import math
 import re
 from typing import Any, Dict, List
 
-import numpy as np
-
 from .db import MemqDB
 from .fact_keys import infer_query_fact_keys
-from .quant import dequantize, dot, from_f16_blob
 
 NOISE_SUMMARY_RE = re.compile(
     r"(<MEM(?:RULES|STYLE|CTX)\s+v1>|\[MEM(?:RULES|STYLE|CTX)\s+v1\]|\[\[reply_to_current\]\]|read\s+(?:agents|soul|identity|heartbeat)\.md|workspace context)",
@@ -148,12 +145,12 @@ def _row_fact_keys(row: Any, summary: str) -> set[str]:
     return keys
 
 
-def _score(sim: float, importance: float, usage_count: int, age_sec: int) -> float:
+def _score(sim_proxy: float, importance: float, usage_count: int, age_sec: int) -> float:
     recency = math.exp(-max(0, age_sec) / 604800.0)
     # Clamp frequency impact so old frequently-hit rules do not dominate every query.
     freq = min(1.25, math.log1p(max(0, usage_count)))
     imp = min(0.85, float(importance))
-    return sim + 0.34 * recency + 0.12 * freq + 0.44 * imp
+    return sim_proxy + 0.34 * recency + 0.12 * freq + 0.44 * imp
 
 
 def _tokenize(text: str) -> set[str]:
@@ -206,7 +203,7 @@ def _session_scope_bonus(session_key: str, row_session: str) -> float:
     return -0.04
 
 
-def search_deep(db: MemqDB, session_key: str, query_text: str, qvec: np.ndarray, top_k: int, bits: int, top_m: int = 200) -> List[Dict[str, Any]]:
+def search_deep(db: MemqDB, session_key: str, query_text: str, top_k: int, top_m: int = 200) -> List[Dict[str, Any]]:
     q_fact_keys = infer_query_fact_keys(query_text)
     rows = db.list_memory_items("deep", session_key, limit=5000)
     if q_fact_keys:
@@ -248,15 +245,8 @@ def search_deep(db: MemqDB, session_key: str, query_text: str, qvec: np.ndarray,
             continue
         if is_recent_query and RECENT_DIAGNOSTIC_RE.search(summary_raw):
             continue
-        emb = None
-        if r["emb_q"]:
-            emb = dequantize(r["emb_q"], int(r["emb_dim"]), bits)
-        elif r["emb_f16"]:
-            emb = from_f16_blob(r["emb_f16"], int(r["emb_dim"]))
-        if emb is None:
-            continue
-        sim = dot(qvec, emb)
         lex = _lex_overlap(q_tokens, summary_raw)
+        sim = lex
         age = int(now - int(r["last_access_at"]))
         row_session = str(r["session_key"])
         source = str(r["source"] or "turn")

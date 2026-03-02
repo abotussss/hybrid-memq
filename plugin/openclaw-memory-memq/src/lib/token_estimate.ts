@@ -2,7 +2,13 @@ import type { MemqMessage } from "../types.js";
 
 export function estimateTokens(text: string): number {
   const s = String(text || "");
-  return Math.max(1, Math.ceil(s.length / 4));
+  if (!s) return 1;
+  const cjk = (s.match(/[\u3040-\u30ff\u3400-\u9fff]/g) || []).length;
+  const ascii = (s.match(/[A-Za-z0-9_]/g) || []).length;
+  const other = Math.max(0, s.length - cjk - ascii);
+  // Heuristic: CJK tends to tokenize denser than ascii chunks.
+  const est = Math.ceil(cjk * 1.05 + ascii / 3.6 + other / 2.4);
+  return Math.max(1, est);
 }
 
 export function messageText(m: any): string {

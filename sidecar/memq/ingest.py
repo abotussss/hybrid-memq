@@ -5,7 +5,6 @@ import re
 from typing import Any, Dict, List, Tuple
 
 from .db import MemqDB
-from .quant import embed_text, f16_blob, quantize
 from .rules import apply_rule_updates, extract_preference_events, extract_rule_updates
 from .style import apply_style_updates, extract_style_updates
 from .text_sanitize import strip_memq_blocks
@@ -439,6 +438,8 @@ def ingest_turn(
     dim: int,
     bits_per_dim: int,
 ) -> Dict[str, int]:
+    _ = dim
+    _ = bits_per_dim
     user_text = _sanitize_turn_text(user_text)
     assistant_text = _sanitize_turn_text(assistant_text)
 
@@ -486,7 +487,6 @@ def ingest_turn(
     # Surface memory for every turn (unless text totally empty).
     summary = _surface_summary(user_text, assistant_text)
     if summary:
-        emb = embed_text(summary, dim)
         db.add_or_merge_memory_item(
             session_key=session_key,
             layer="surface",
@@ -494,9 +494,9 @@ def ingest_turn(
             summary=summary,
             importance=0.55,
             tags={"kind": "turn", "ts": ts, "fact_keys": fact_keys},
-            emb_f16=f16_blob(emb),
+            emb_f16=None,
             emb_q=None,
-            emb_dim=dim,
+            emb_dim=0,
             source="turn",
         )
         wrote["surface"] += 1
@@ -540,7 +540,6 @@ def ingest_turn(
                 fact_ttl_days = max(1, min(fact_ttl_days, policy_ttl_days))
             ttl_expires_at = ts + (fact_ttl_days * 86400)
             deep_text = _structured_fact_summary(fact)
-            emb = embed_text(deep_text, dim)
             deep_id = db.add_memory_item(
                 session_key=session_key,
                 layer="deep",
@@ -560,9 +559,9 @@ def ingest_turn(
                         "subject_match": round(subj_match, 3),
                     },
                 },
-                emb_f16=f16_blob(emb),
-                emb_q=quantize(emb, bits_per_dim),
-                emb_dim=dim,
+                emb_f16=None,
+                emb_q=None,
+                emb_dim=0,
                 ttl_expires_at=ttl_expires_at,
                 source="turn",
             )
@@ -581,9 +580,9 @@ def ingest_turn(
                         summary=deep_text,
                         importance=0.88,
                         tags={"kind": "durable_global_fact", "ts": ts, "fact_keys": [fact_key], "fact": fact},
-                        emb_f16=f16_blob(emb),
-                        emb_q=quantize(emb, bits_per_dim),
-                        emb_dim=dim,
+                        emb_f16=None,
+                        emb_q=None,
+                        emb_dim=0,
                         source="turn",
                     )
                     if fact_key:
@@ -612,7 +611,6 @@ def ingest_turn(
                     "ts": int(ts),
                 }
                 deep_text = _structured_fact_summary(note_fact)
-                emb = embed_text(deep_text, dim)
                 session_sig = deep_text[:220].strip().lower()
                 note_ttl_days = int(note_fact.get("ttl_days") or policy_ttl_days)
                 if not explicit_memory_signal:
@@ -630,9 +628,9 @@ def ingest_turn(
                         "fact_keys": ["memory.note"],
                         "fact": note_fact,
                     },
-                    emb_f16=f16_blob(emb),
-                    emb_q=quantize(emb, bits_per_dim),
-                    emb_dim=dim,
+                    emb_f16=None,
+                    emb_q=None,
+                    emb_dim=0,
                     ttl_expires_at=note_ttl,
                     source="turn",
                 )
@@ -648,9 +646,9 @@ def ingest_turn(
                         summary=deep_text[:220],
                         importance=0.78,
                         tags={"kind": "durable_global_fact", "ts": ts, "fact_keys": ["memory.note"], "fact": note_fact},
-                        emb_f16=f16_blob(emb),
-                        emb_q=quantize(emb, bits_per_dim),
-                        emb_dim=dim,
+                        emb_f16=None,
+                        emb_q=None,
+                        emb_dim=0,
                         source="turn",
                     )
                     wrote["deep"] += db.expire_conflicting_fact_keys(
@@ -665,7 +663,6 @@ def ingest_turn(
     if len(user_text.strip()) <= 64 and not deep_signal:
         eph = _surface_summary(user_text, assistant_text)
         if eph:
-            emb = embed_text(eph, dim)
             db.add_memory_item(
                 session_key=session_key,
                 layer="ephemeral",
@@ -673,9 +670,9 @@ def ingest_turn(
                 summary=eph[:120],
                 importance=0.3,
                 tags={"kind": "ephemeral", "ts": ts},
-                emb_f16=f16_blob(emb),
+                emb_f16=None,
                 emb_q=None,
-                emb_dim=dim,
+                emb_dim=0,
                 # Ephemeral expires by low-value decay/prune, not fixed wall-clock TTL.
                 ttl_expires_at=None,
                 source="turn",

@@ -16,7 +16,6 @@ from memq.idle_consolidation import run_idle_consolidation
 from memq.ingest import ingest_turn
 from memq.ingest_md import import_markdown_memory
 from memq.memctx_pack import build_memctx, build_memrules, build_memstyle
-from memq.quant import embed_text, f16_blob, quantize
 from memq.models import (
     AuditRequest,
     AuditResponse,
@@ -92,7 +91,6 @@ def _promote_deep_candidates(session_key: str, candidates: List[str]) -> int:
             if _has_fact(session_key, fk, fv):
                 continue
             summary = structured_fact_summary(fact)
-            emb = embed_text(summary, cfg.dim)
             item_id = db.add_memory_item(
                 session_key=session_key,
                 layer="deep",
@@ -100,9 +98,9 @@ def _promote_deep_candidates(session_key: str, candidates: List[str]) -> int:
                 summary=summary,
                 importance=0.72,
                 tags={"kind": "structured_fact", "from": "pruned", "ts": now, "fact_keys": [fk], "fact": fact},
-                emb_f16=f16_blob(emb),
-                emb_q=quantize(emb, cfg.bits_per_dim),
-                emb_dim=cfg.dim,
+                emb_f16=None,
+                emb_q=None,
+                emb_dim=0,
                 source="conv_summarize",
             )
             if fk:
@@ -116,9 +114,9 @@ def _promote_deep_candidates(session_key: str, candidates: List[str]) -> int:
                     summary=summary,
                     importance=0.78,
                     tags={"kind": "durable_global_fact", "from": "pruned", "ts": now, "fact_keys": [fk], "fact": fact},
-                    emb_f16=f16_blob(emb),
-                    emb_q=quantize(emb, cfg.bits_per_dim),
-                    emb_dim=cfg.dim,
+                    emb_f16=None,
+                    emb_q=None,
+                    emb_dim=0,
                     source="conv_summarize",
                 )
                 if fk:

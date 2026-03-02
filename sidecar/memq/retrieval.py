@@ -5,17 +5,8 @@ from typing import Any, Dict, List, Tuple
 
 from .db import MemqDB
 from .fact_keys import infer_query_fact_keys
-from .quant import embed_text
 from .retrieval_deep import search_deep
 from .retrieval_surface import search_surface
-
-
-def _embed_query_text(prompt: str) -> str:
-    q = prompt or ""
-    keys: List[str] = sorted(list(infer_query_fact_keys(q)))
-    if not keys:
-        return q
-    return f"{q}\n[memq_keys={','.join(keys)}]"
 
 
 def retrieve_candidates(
@@ -29,9 +20,9 @@ def retrieve_candidates(
     surface_threshold: float,
     deep_enabled: bool,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
-    qvec = embed_text(_embed_query_text(prompt), dim)
-
-    surface = search_surface(db, session_key, prompt, qvec, top_k=max(1, top_k), bits=bits_per_dim)
+    _ = dim
+    _ = bits_per_dim
+    surface = search_surface(db, session_key, prompt, top_k=max(1, top_k))
 
     deep_called = False
     deep: List[Dict[str, Any]] = []
@@ -49,7 +40,7 @@ def retrieve_candidates(
         min_lex = 0.12
         if long_term_required or (not surface) or (best_surface_sim < float(surface_threshold)) or (best_surface_lex < min_lex):
             deep_called = True
-            deep = search_deep(db, session_key, prompt, qvec, top_k=max(1, top_k), bits=bits_per_dim)
+            deep = search_deep(db, session_key, prompt, top_k=max(1, top_k))
 
     debug = {
         "surface_count": len(surface),
