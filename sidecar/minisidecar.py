@@ -42,6 +42,7 @@ from memq.structured_facts import (
     parse_fact_signature_from_row,
     structured_fact_summary,
 )
+from memq.timeline import detect_timeline_range
 
 
 app = FastAPI(title="hybrid-memq-sidecar", version="2.0.0")
@@ -227,6 +228,7 @@ def memory_ingest_turn(req: IngestTurnRequest) -> IngestTurnResponse:
         ts=req.ts,
         dim=cfg.dim,
         bits_per_dim=cfg.bits_per_dim,
+        metadata=req.metadata,
     )
     refresh_preference_profiles(db, int(time.time()))
     return IngestTurnResponse(ok=True, wrote=wrote)
@@ -239,16 +241,25 @@ def memctx_query(req: MemctxQueryRequest) -> MemctxQueryResponse:
     top_k = max(1, int(req.topK or cfg.retrieval_top_k))
     surface_threshold = float(req.surfaceThreshold if req.surfaceThreshold is not None else cfg.surface_threshold)
     deep_enabled = bool(req.deepEnabled if req.deepEnabled is not None else cfg.deep_enabled)
+    timeline_range = detect_timeline_range(req.prompt)
+    timeline_first = bool(timeline_range and timeline_range.explicit)
+    deep_enabled_for_retrieval = deep_enabled and not timeline_first
+    top_k_for_retrieval = max(1, min(top_k, 3)) if timeline_first else top_k
+
     surf, deep, meta = retrieve_candidates(
         db=db,
         session_key=req.sessionKey,
         prompt=req.prompt,
         dim=cfg.dim,
         bits_per_dim=cfg.bits_per_dim,
-        top_k=top_k,
+        top_k=top_k_for_retrieval,
         surface_threshold=surface_threshold,
-        deep_enabled=deep_enabled,
+        deep_enabled=deep_enabled_for_retrieval,
     )
+    dbg = dict(meta.get("debug") or {})
+    dbg["timeline_route"] = 1 if timeline_first else 0
+    dbg["timeline_label"] = timeline_range.label if timeline_range else ""
+    meta["debug"] = dbg
 
     used_ids = [x["id"] for x in surf] + [x["id"] for x in deep]
     db.touch_items(used_ids)

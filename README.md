@@ -16,6 +16,7 @@ Each turn injects three bounded channels in fixed order:
 - Ephemeral is not fixed 1-day expiry anymore; it decays and is pruned by low value.
 - Output audit redaction is applied even when `block=false` (if `redactedText` is returned).
 - `MEMSTYLE` budget default is fixed to `120` tokens (`styleTokens=120`, `maxBudgetTokens=120`).
+- Timeline memory is persisted as `events` + `daily_digests` for time-scoped prompts like “yesterday/recent”.
 
 ## Why This Plugin Exists
 
@@ -32,6 +33,7 @@ Each turn injects three bounded channels in fixed order:
 - Surface-first retrieval with Deep fallback gating.
 - Deep fact indexing (`fact_key`) to improve long-lag recall beyond recent-item limits.
 - Conversation pruning by token budget, archive of pruned history, and sidecar reconstruction summaries.
+- Episodic timeline pipeline: turn/action events -> idle daily digest -> compact `t.*` MEMCTX injection.
 - Idle sleep-style consolidation (decay, dedup, promotion, profile refresh, cleanup).
 - Quarantine for suspicious memory candidates (prompt-injection-like inputs).
 - Primary rule-based output audit + optional secondary LLM audit.
@@ -113,6 +115,7 @@ These are configured in:
 - repair orphan tool-result integrity in kept window
 - query sidecar for `MEMRULES/MEMSTYLE/MEMCTX`
 - inject in fixed order: `MEMRULES -> MEMSTYLE -> MEMCTX`
+- for time-scoped prompts (`昨日/先週/recent`), timeline route is prioritized and injects `t.range/t.digest/t.ev*`
 
 2. `agent_end`
 - ingest current turn into sidecar
@@ -146,6 +149,7 @@ python3 -m py_compile sidecar/minisidecar.py sidecar/memq/*.py
 python3 -m unittest -v
 python3 -m unittest -v sidecar.tests.test_regressions
 python3 bench/src/text_sanitization_regression.py
+python3 bench/src/timeline_scale_check.py
 pnpm -C plugin/openclaw-memory-memq build
 ```
 
@@ -153,6 +157,7 @@ pnpm -C plugin/openclaw-memory-memq build
 
 - Runtime retrieval currently does not require external embedding APIs.
 - `sidecar/memq/quant.py` remains in the repository, while current retrieval is lexical/fact-key driven.
+- timeline range parsing is based on `Asia/Tokyo` day boundaries.
 
 ---
 
@@ -175,6 +180,7 @@ Hybrid MEMQ は、OpenClaw向けの記憶プラグインです。
 - Ephemeralは「固定1日削除」ではなく、価値減衰と低価値剪定で整理。
 - 出力監査の`redactedText`は`block=false`でも反映。
 - `MEMSTYLE`予算は既定で`120`固定（`styleTokens=120`、`maxBudgetTokens=120`）。
+- 「昨日/最近」系の問い合わせ向けに、`events`と`daily_digests`の時系列記憶を保持。
 
 ## このプラグインの狙い
 
@@ -188,6 +194,7 @@ Hybrid MEMQ は、OpenClaw向けの記憶プラグインです。
 - Surface優先、必要時のみDeep検索のゲーティング。
 - `fact_key`索引による長期想起強化（古い重要記憶の取りこぼし抑制）。
 - 会話のトークン予算剪定、剪定履歴アーカイブ、要約再構成。
+- エピソード時系列パイプライン（turn/actionイベント -> アイドル時の日次ダイジェスト -> `t.*`としてMEMCTX注入）。
 - アイドル時の睡眠整理（減衰、重複統合、昇格、プロファイル更新、クリーンアップ）。
 - 汚染疑い入力の隔離（quarantine）。
 - 一次監査（ルールベース）+ 任意の二次LLM監査。
@@ -269,6 +276,7 @@ curl -sS http://127.0.0.1:7781/health
 - kept側のtool-result整合を修復
 - sidecarから`MEMRULES/MEMSTYLE/MEMCTX`を取得
 - `MEMRULES -> MEMSTYLE -> MEMCTX`の順で注入
+- `昨日/先週/recent`などの時間表現は時系列ルートを優先し、`t.range/t.digest/t.ev*`を注入
 
 2. `agent_end`
 - 現在ターンをsidecarへingest
@@ -302,6 +310,7 @@ python3 -m py_compile sidecar/minisidecar.py sidecar/memq/*.py
 python3 -m unittest -v
 python3 -m unittest -v sidecar.tests.test_regressions
 python3 bench/src/text_sanitization_regression.py
+python3 bench/src/timeline_scale_check.py
 pnpm -C plugin/openclaw-memory-memq build
 ```
 
@@ -309,3 +318,4 @@ pnpm -C plugin/openclaw-memory-memq build
 
 - 現行実装は外部Embedding APIに依存しません。
 - `sidecar/memq/quant.py`はリポジトリに残っていますが、現行の実行経路は語彙/fact-key中心の検索です。
+- 時系列の日付解釈は`Asia/Tokyo`境界で行います。

@@ -11,6 +11,7 @@ from sidecar.memq.idle_consolidation import run_idle_consolidation
 from sidecar.memq.memctx_pack import build_memctx
 from sidecar.memq.retrieval_deep import NOISE_SUMMARY_RE as DEEP_NOISE_RE
 from sidecar.memq.retrieval_surface import NOISE_SUMMARY_RE as SURFACE_NOISE_RE
+from sidecar.memq.timeline import day_key_from_ts, detect_timeline_range
 
 
 class RegressionGuardsTest(unittest.TestCase):
@@ -217,6 +218,86 @@ class RegressionGuardsTest(unittest.TestCase):
             "SELECT COUNT(*) AS c FROM memory_items WHERE layer='deep' AND session_key='global'"
         ).fetchone()
         self.assertGreaterEqual(int(rows["c"]), 1)
+
+    def test_timeline_range_detect_yesterday(self) -> None:
+        tr = detect_timeline_range("昨日何したか覚えてる？")
+        self.assertIsNotNone(tr)
+        assert tr is not None
+        self.assertEqual("yesterday", tr.label)
+        self.assertEqual(tr.start_day, tr.end_day)
+
+    def test_memctx_includes_timeline_digest_or_events(self) -> None:
+        now = int(time.time())
+        y = now - 86400
+        y_day = day_key_from_ts(y)
+        self.db.add_event(
+            session_key="s1",
+            ts=y,
+            actor="user",
+            kind="chat",
+            summary="昨日は要件整理とREADME更新を進めた",
+            tags={"source": "test"},
+            importance=0.8,
+            ttl_expires_at=None,
+        )
+        self.db.upsert_daily_digest(
+            day_key=y_day,
+            scope="session",
+            session_key="s1",
+            compact_text="- [user/chat] 昨日は要件整理とREADME更新を進めた",
+            updated_at=now,
+        )
+        ctx = build_memctx(
+            db=self.db,
+            session_key="s1",
+            prompt="昨日何したか覚えてる？",
+            surface=[],
+            deep=[],
+            budget_tokens=220,
+        )
+        self.assertIn("t.range=", ctx)
+        self.assertTrue(("t.digest=" in ctx) or ("t.ev1=" in ctx))
+
+    def test_ingest_turn_writes_action_events_from_metadata(self) -> None:
+        now = int(time.time())
+        ingest_turn(
+            db=self.db,
+            session_key="s1",
+            user_text="この方針でお願いします",
+            assistant_text="了解。対応します。",
+            ts=now,
+            dim=64,
+            bits_per_dim=8,
+            metadata={"actionSummaries": ["tool_call:write_file /tmp/a.txt", "tool_call:run tests"]},
+        )
+        rows = self.db.conn.execute(
+            "SELECT kind,summary FROM events WHERE session_key='s1' ORDER BY ts DESC, created_at DESC LIMIT 20"
+        ).fetchall()
+        kinds = [str(r["kind"]) for r in rows]
+        self.assertIn("action", kinds)
+        joined = " ".join(str(r["summary"]) for r in rows)
+        self.assertIn("tool_call:write_file", joined)
+
+    def test_idle_consolidation_updates_daily_digest(self) -> None:
+        now = int(time.time())
+        y = now - 86400
+        self.db.add_event(
+            session_key="s1",
+            ts=y,
+            actor="assistant",
+            kind="action",
+            summary="READMEを更新してpushした",
+            tags={"source": "test"},
+            importance=0.72,
+            ttl_expires_at=None,
+        )
+        res = run_idle_consolidation(self.db, session_key="s1", dim=64, bits_per_dim=8)
+        self.assertIn("daily_digest_refresh", list(res.get("did", [])))
+        rows = self.db.conn.execute(
+            "SELECT day_key,compact_text FROM daily_digests WHERE session_key='s1' AND scope='session' ORDER BY day_key DESC LIMIT 5"
+        ).fetchall()
+        self.assertGreaterEqual(len(rows), 1)
+        self.assertIn("READMEを更新", str(rows[0]["compact_text"]))
 
 
 if __name__ == "__main__":

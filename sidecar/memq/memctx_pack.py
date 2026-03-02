@@ -10,6 +10,7 @@ from .fact_keys import infer_query_fact_keys
 from .rules import extract_allowed_languages_from_rules
 from .style import style_profile_lines
 from .text_sanitize import strip_memq_blocks
+from .timeline import detect_timeline_range
 
 
 def estimate_tokens(text: str) -> int:
@@ -186,7 +187,8 @@ def build_memctx(
         return True
 
     lines: List[str] = [f"budget_tokens={budget_tokens}", f"q={prompt[:120].replace(chr(10), ' ')}"]
-    time_scoped = bool(re.search(r"(今日|昨日|一昨日|明日|日付|today|yesterday|date)", prompt, re.IGNORECASE))
+    timeline_range = detect_timeline_range(prompt)
+    time_scoped = bool(timeline_range and timeline_range.explicit)
     query_memory_overview = bool(re.search(r"(記憶|覚えてる|これまで|要点|summary|what.*remember|memory overview)", prompt, re.IGNORECASE))
     need_meta = bool(re.search(r"(件数|count|pool|stats?)", prompt, re.IGNORECASE))
     # Tiny observability hints to avoid "memory is only 1-2 lines" misconceptions.
@@ -197,6 +199,59 @@ def build_memctx(
         _push_kv(lines, "meta.deep_pool", str(deep_pool), dedupe_by_value=False)
         deep_verified = len([x for x in deep if bool(x.get("verification_ok", True))])
         _push_kv(lines, "meta.deep_verified", str(deep_verified), dedupe_by_value=False)
+
+    # Timeline / episodic context for vague temporal prompts (yesterday/recent/etc).
+    if timeline_range:
+        _push_kv(lines, "t.range", f"{timeline_range.start_day}..{timeline_range.end_day}", dedupe_by_value=False)
+        _push_kv(lines, "t.label", timeline_range.label, dedupe_by_value=False)
+        dg_rows = db.list_daily_digests_range(
+            session_key=session_key,
+            start_day=timeline_range.start_day,
+            end_day=timeline_range.end_day,
+            scope="session",
+            limit=14,
+            include_global=True,
+        )
+        digest_parts: List[str] = []
+        seen_days = set()
+        for r in dg_rows:
+            day_key = str(r["day_key"] or "")
+            if not day_key or day_key in seen_days:
+                continue
+            seen_days.add(day_key)
+            compact = _clean_summary(str(r["compact_text"] or "").replace("\n", " | "), 180)
+            if not compact:
+                continue
+            digest_parts.append(f"{day_key}:{compact}")
+            if len(digest_parts) >= 4:
+                break
+        if digest_parts:
+            _push_kv(lines, "t.digest", " || ".join(digest_parts), dedupe_by_value=False)
+
+        ev_rows = db.list_events_range(
+            session_key=session_key,
+            start_day=timeline_range.start_day,
+            end_day=timeline_range.end_day,
+            limit=64,
+            include_global=True,
+        )
+        ev_count = 0
+        ev_seen = set()
+        for r in ev_rows:
+            if ev_count >= 4:
+                break
+            day_key = str(r["day_key"] or "")
+            actor = str(r["actor"] or "assistant")
+            kind = str(r["kind"] or "chat")
+            summary = _clean_summary(str(r["summary"] or ""), 120)
+            if not summary:
+                continue
+            sig = summary.lower()
+            if sig in ev_seen:
+                continue
+            ev_seen.add(sig)
+            ev_count += 1
+            _push_kv(lines, f"t.ev{ev_count}", f"{day_key} {actor}/{kind}: {summary}")
 
     # Stable profile hints (non-style/rule) for deterministic long-horizon behavior.
     profile = db.get_preference_profile()

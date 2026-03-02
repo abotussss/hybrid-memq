@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import timedelta
 from typing import Dict, List
 
 from .db import MemqDB
@@ -12,6 +13,7 @@ from .structured_facts import (
     plausible_fact_value,
     structured_fact_summary,
 )
+from .timeline import date_to_day_key, day_key_to_date, today_day_key
 
 
 def _promote_structured_from_conv(db: MemqDB, *, dim: int, bits_per_dim: int, max_rows: int = 200) -> int:
@@ -197,6 +199,66 @@ def _promote_profile_facts(db: MemqDB, *, dim: int, bits_per_dim: int) -> int:
     return wrote
 
 
+def _compact_digest_lines(rows: List[Dict[str, object]], max_lines: int = 6) -> str:
+    out: List[str] = []
+    seen = set()
+    for r in rows:
+        actor = str(r.get("actor") or "assistant")
+        kind = str(r.get("kind") or "chat")
+        summary = " ".join(str(r.get("summary") or "").split()).strip()
+        if not summary:
+            continue
+        sig = summary.lower()
+        if sig in seen:
+            continue
+        seen.add(sig)
+        line = f"- [{actor}/{kind}] {summary[:160]}"
+        out.append(line)
+        if len(out) >= max_lines:
+            break
+    return "\n".join(out)
+
+
+def _refresh_daily_digests(db: MemqDB, session_key: str, lookback_days: int = 14) -> int:
+    today = day_key_to_date(today_day_key())
+    start = today - timedelta(days=max(1, int(lookback_days)))
+    start_key = date_to_day_key(start)
+    end_key = date_to_day_key(today)
+
+    rows = db.conn.execute(
+        """
+        SELECT DISTINCT day_key
+        FROM events
+        WHERE day_key>=? AND day_key<=?
+          AND (session_key=? OR session_key='global')
+        ORDER BY day_key DESC
+        """,
+        (start_key, end_key, session_key),
+    ).fetchall()
+    updated = 0
+    for r in rows:
+        day_key = str(r["day_key"])
+        ev = db.list_events_range(
+            session_key=session_key,
+            start_day=day_key,
+            end_day=day_key,
+            limit=240,
+            include_global=True,
+        )
+        compact = _compact_digest_lines([dict(x) for x in ev], max_lines=6)
+        if not compact:
+            continue
+        db.upsert_daily_digest(
+            day_key=day_key,
+            scope="session",
+            session_key=session_key,
+            compact_text=compact,
+            updated_at=int(time.time()),
+        )
+        updated += 1
+    return updated
+
+
 def run_idle_consolidation(db: MemqDB, session_key: str | None = None, *, dim: int = 256, bits_per_dim: int = 8) -> Dict[str, object]:
     now = int(time.time())
     did: List[str] = []
@@ -205,6 +267,8 @@ def run_idle_consolidation(db: MemqDB, session_key: str | None = None, *, dim: i
     did.append("decay")
     ep = db.decay_and_prune_ephemeral()
     stats.update(ep)
+    did.append("prune_expired_events")
+    stats["expired_events_deleted"] = db.prune_expired_events()
 
     if session_key:
         did.append("dedup_surface")
@@ -241,5 +305,8 @@ def run_idle_consolidation(db: MemqDB, session_key: str | None = None, *, dim: i
 
     did.append("rule_override_prune")
     stats["stale_rule_overrides_disabled"] = prune_stale_rule_overrides(db, now)
+    if session_key:
+        did.append("daily_digest_refresh")
+        stats["daily_digests_updated"] = _refresh_daily_digests(db, session_key=session_key, lookback_days=21)
 
     return {"did": did, "stats": stats}

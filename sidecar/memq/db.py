@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .fact_keys import infer_text_fact_keys
+from .timeline import day_key_from_ts
 
 
 def now_ts() -> int:
@@ -190,6 +191,33 @@ class MemqDB:
               value TEXT NOT NULL,
               updated_at INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS events (
+              id TEXT PRIMARY KEY,
+              session_key TEXT NOT NULL,
+              ts INTEGER NOT NULL,
+              day_key TEXT NOT NULL,
+              actor TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              tags_json TEXT NOT NULL DEFAULT '{}',
+              importance REAL NOT NULL DEFAULT 0.5,
+              ttl_expires_at INTEGER NULL,
+              created_at INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_events_day_session_ts ON events(day_key, session_key, ts DESC);
+            CREATE INDEX IF NOT EXISTS idx_events_session_ts ON events(session_key, ts DESC);
+            CREATE INDEX IF NOT EXISTS idx_events_ttl ON events(ttl_expires_at);
+
+            CREATE TABLE IF NOT EXISTS daily_digests (
+              day_key TEXT NOT NULL,
+              scope TEXT NOT NULL,
+              session_key TEXT NOT NULL,
+              compact_text TEXT NOT NULL,
+              updated_at INTEGER NOT NULL,
+              PRIMARY KEY(day_key, scope, session_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_daily_digests_session_day ON daily_digests(session_key, day_key DESC);
             """
         )
         self.conn.commit()
@@ -232,6 +260,145 @@ class MemqDB:
         if not row:
             return default
         return str(row["value"])
+
+    def add_event(
+        self,
+        *,
+        session_key: str,
+        ts: int,
+        actor: str,
+        kind: str,
+        summary: str,
+        tags: Optional[Dict[str, Any]] = None,
+        importance: float = 0.5,
+        ttl_expires_at: Optional[int] = None,
+    ) -> str:
+        eid = str(uuid.uuid4())
+        evt_ts = int(ts or now_ts())
+        day_key = day_key_from_ts(evt_ts)
+        self.conn.execute(
+            """
+            INSERT INTO events(
+              id,session_key,ts,day_key,actor,kind,summary,tags_json,importance,ttl_expires_at,created_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                eid,
+                session_key,
+                evt_ts,
+                day_key,
+                (actor or "assistant")[:16],
+                (kind or "chat")[:32],
+                " ".join((summary or "").split())[:420],
+                json.dumps(tags or {}, ensure_ascii=False),
+                float(max(0.0, min(1.0, importance))),
+                ttl_expires_at,
+                now_ts(),
+            ),
+        )
+        self.conn.commit()
+        return eid
+
+    def list_events_range(
+        self,
+        *,
+        session_key: str,
+        start_day: str,
+        end_day: str,
+        limit: int = 200,
+        include_global: bool = True,
+    ) -> List[sqlite3.Row]:
+        now = now_ts()
+        if include_global:
+            rows = self.conn.execute(
+                """
+                SELECT * FROM events
+                WHERE day_key >= ? AND day_key <= ?
+                  AND (session_key=? OR session_key='global')
+                  AND (ttl_expires_at IS NULL OR ttl_expires_at > ?)
+                ORDER BY day_key DESC, importance DESC, ts DESC
+                LIMIT ?
+                """,
+                (start_day, end_day, session_key, now, int(limit)),
+            ).fetchall()
+            return rows
+        rows = self.conn.execute(
+            """
+            SELECT * FROM events
+            WHERE day_key >= ? AND day_key <= ?
+              AND session_key=?
+              AND (ttl_expires_at IS NULL OR ttl_expires_at > ?)
+            ORDER BY day_key DESC, importance DESC, ts DESC
+            LIMIT ?
+            """,
+            (start_day, end_day, session_key, now, int(limit)),
+        ).fetchall()
+        return rows
+
+    def prune_expired_events(self) -> int:
+        now = now_ts()
+        deleted = self.conn.execute(
+            "DELETE FROM events WHERE ttl_expires_at IS NOT NULL AND ttl_expires_at <= ?",
+            (now,),
+        ).rowcount
+        self.conn.commit()
+        return int(deleted)
+
+    def upsert_daily_digest(
+        self,
+        *,
+        day_key: str,
+        scope: str,
+        session_key: str,
+        compact_text: str,
+        updated_at: Optional[int] = None,
+    ) -> None:
+        ts = int(updated_at or now_ts())
+        self.conn.execute(
+            """
+            INSERT INTO daily_digests(day_key,scope,session_key,compact_text,updated_at)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(day_key,scope,session_key)
+            DO UPDATE SET compact_text=excluded.compact_text, updated_at=excluded.updated_at
+            """,
+            (day_key, scope, session_key, compact_text[:2200], ts),
+        )
+        self.conn.commit()
+
+    def list_daily_digests_range(
+        self,
+        *,
+        session_key: str,
+        start_day: str,
+        end_day: str,
+        scope: str = "session",
+        limit: int = 14,
+        include_global: bool = False,
+    ) -> List[sqlite3.Row]:
+        if include_global:
+            rows = self.conn.execute(
+                """
+                SELECT * FROM daily_digests
+                WHERE day_key >= ? AND day_key <= ?
+                  AND scope=?
+                  AND (session_key=? OR session_key='global')
+                ORDER BY day_key DESC, CASE WHEN session_key=? THEN 0 ELSE 1 END
+                LIMIT ?
+                """,
+                (start_day, end_day, scope, session_key, session_key, int(limit)),
+            ).fetchall()
+            return rows
+        rows = self.conn.execute(
+            """
+            SELECT * FROM daily_digests
+            WHERE day_key >= ? AND day_key <= ?
+              AND scope=? AND session_key=?
+            ORDER BY day_key DESC
+            LIMIT ?
+            """,
+            (start_day, end_day, scope, session_key, int(limit)),
+        ).fetchall()
+        return rows
 
     def add_memory_item(
         self,

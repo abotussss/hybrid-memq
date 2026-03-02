@@ -7,6 +7,7 @@ export interface IngestPayload {
   userText: string;
   assistantText: string;
   ts: number;
+  metadata?: Record<string, unknown>;
 }
 
 function queuePath(workspaceRoot: string): string {
@@ -44,6 +45,7 @@ export async function flushIngestQueue(
         userText: String(j.userText ?? ""),
         assistantText: String(j.assistantText ?? ""),
         ts: Number(j.ts ?? 0) || Math.floor(Date.now() / 1000),
+        metadata: j && typeof j.metadata === "object" ? (j.metadata as Record<string, unknown>) : undefined,
       };
       payloads.push(p);
     } catch {

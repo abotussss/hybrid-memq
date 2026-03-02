@@ -428,6 +428,60 @@ def _policy_ttl_days(db: MemqDB, default_days: int = 45) -> int:
     return max(1, min(3650, v))
 
 
+def _event_importance(
+    *,
+    explicit_memory_signal: bool,
+    deep_signal: bool,
+    auto_deep_signal: bool,
+    structured_fact_count: int,
+    is_user: bool,
+) -> float:
+    base = 0.45 if is_user else 0.35
+    if explicit_memory_signal:
+        base += 0.32
+    if deep_signal or auto_deep_signal:
+        base += 0.18
+    if structured_fact_count > 0:
+        base += 0.12
+    return max(0.05, min(1.0, base))
+
+
+def _event_ttl_from_importance(ts: int, importance: float) -> int | None:
+    # Keep important events indefinitely; low-value events age out.
+    if importance >= 0.62:
+        return None
+    days = 30 if importance >= 0.35 else 14
+    return int(ts + days * 86400)
+
+
+def _extract_action_summaries(metadata: Dict[str, Any] | None) -> List[str]:
+    if not isinstance(metadata, dict):
+        return []
+    out: List[str] = []
+    raw = metadata.get("actionSummaries")
+    if isinstance(raw, list):
+        for x in raw:
+            s = " ".join(str(x or "").split()).strip()
+            if s:
+                out.append(s[:240])
+    # backward-compatible alias
+    raw2 = metadata.get("actions")
+    if isinstance(raw2, list):
+        for x in raw2:
+            s = " ".join(str(x or "").split()).strip()
+            if s:
+                out.append(s[:240])
+    uniq: List[str] = []
+    seen = set()
+    for s in out:
+        k = s.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(s)
+    return uniq[:12]
+
+
 def ingest_turn(
     *,
     db: MemqDB,
@@ -437,6 +491,7 @@ def ingest_turn(
     ts: int,
     dim: int,
     bits_per_dim: int,
+    metadata: Dict[str, Any] | None = None,
 ) -> Dict[str, int]:
     _ = dim
     _ = bits_per_dim
@@ -658,6 +713,56 @@ def ingest_turn(
                         gid,
                     )
                     wrote["deep"] += 1
+
+    # Timeline/episodic events for time-scoped recall ("yesterday", "recently", etc).
+    structured_count = len(structured_facts)
+    user_imp = _event_importance(
+        explicit_memory_signal=explicit_memory_signal,
+        deep_signal=deep_signal,
+        auto_deep_signal=auto_deep_signal,
+        structured_fact_count=structured_count,
+        is_user=True,
+    )
+    asst_imp = _event_importance(
+        explicit_memory_signal=explicit_memory_signal,
+        deep_signal=deep_signal,
+        auto_deep_signal=auto_deep_signal,
+        structured_fact_count=structured_count,
+        is_user=False,
+    )
+    if user_text.strip():
+        db.add_event(
+            session_key=session_key,
+            ts=ts,
+            actor="user",
+            kind="chat",
+            summary=user_text[:320],
+            tags={"source": "ingest_turn", "role": "user"},
+            importance=user_imp,
+            ttl_expires_at=_event_ttl_from_importance(ts, user_imp),
+        )
+    if assistant_text.strip():
+        db.add_event(
+            session_key=session_key,
+            ts=ts,
+            actor="assistant",
+            kind="chat",
+            summary=assistant_text[:320],
+            tags={"source": "ingest_turn", "role": "assistant"},
+            importance=asst_imp,
+            ttl_expires_at=_event_ttl_from_importance(ts, asst_imp),
+        )
+    for a in _extract_action_summaries(metadata):
+        db.add_event(
+            session_key=session_key,
+            ts=ts,
+            actor="assistant",
+            kind="action",
+            summary=a,
+            tags={"source": "agent_end_meta", "role": "assistant"},
+            importance=0.68,
+            ttl_expires_at=ts + 45 * 86400,
+        )
 
     # Ephemeral for short low-value chatter.
     if len(user_text.strip()) <= 64 and not deep_signal:
