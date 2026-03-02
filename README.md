@@ -1,16 +1,16 @@
-# Hybrid MEMQ v2 (Mode A)
+# Hybrid MEMQ
 
-Hybrid MEMQ v2 is an OpenClaw memory plugin that keeps prompt growth bounded while preserving long-running memory behavior.
+Hybrid MEMQ is an OpenClaw memory plugin that keeps prompt growth bounded while preserving long-running memory behavior.
 
 Each turn injects three bounded channels in fixed order:
 
-- `MEMRULES v1` (strict rules / safety constraints)
-- `MEMSTYLE v1` (persona / tone consistency)
-- `MEMCTX v1` (Surface / Deep / Ephemeral memory context)
+- `MEMRULES` (strict rules / safety constraints)
+- `MEMSTYLE` (persona / tone consistency)
+- `MEMCTX` (Surface / Deep / Ephemeral memory context)
 
 ## Current Runtime Reality
 
-- Mode A only (API text injection).
+- API text injection architecture.
 - Retrieval is embedding-free at runtime (lexical + fact-key + recency/importance scoring).
 - Structured Deep facts are persisted in SQLite with conflict handling and TTL support.
 - Ephemeral is not fixed 1-day expiry anymore; it decays and is pruned by low value.
@@ -76,7 +76,7 @@ curl -sS http://127.0.0.1:7781/health
 | `scripts/memq-openclaw.sh setup` | install + reset-config + start-sidecar + enable + status |
 | `scripts/memq-openclaw.sh quickstart` | same as `setup` |
 | `scripts/memq-openclaw.sh install` | build and link/install plugin only |
-| `scripts/memq-openclaw.sh reset-config` | reset plugin config to MEMQ v2 defaults |
+| `scripts/memq-openclaw.sh reset-config` | reset plugin config to MEMQ defaults |
 | `scripts/memq-openclaw.sh enable` | switch memory slot to MEMQ (backs up previous plugins config) |
 | `scripts/memq-openclaw.sh disable` | restore previous plugins config / memory slot |
 | `scripts/memq-openclaw.sh start-sidecar` | start local sidecar supervisor |
@@ -152,24 +152,24 @@ pnpm -C plugin/openclaw-memory-memq build
 ## Notes
 
 - Runtime retrieval currently does not require external embedding APIs.
-- `sidecar/memq/quant.py` remains in the repository, but the current Mode A retrieval path is lexical/fact-key driven.
+- `sidecar/memq/quant.py` remains in the repository, while current retrieval is lexical/fact-key driven.
 
 ---
 
-# Hybrid MEMQ v2（Mode A）
+# Hybrid MEMQ
 
-Hybrid MEMQ v2 は、OpenClaw向けの記憶プラグインです。  
+Hybrid MEMQ は、OpenClaw向けの記憶プラグインです。  
 長い会話でも入力トークンの肥大を抑えながら、記憶の継続性を保つことを目的にしています。
 
 毎ターン、以下の3チャネルを固定順で注入します。
 
-- `MEMRULES v1`（厳格ルール / 安全制約）
-- `MEMSTYLE v1`（人格・口調の一貫性）
-- `MEMCTX v1`（Surface / Deep / Ephemeral 記憶文脈）
+- `MEMRULES`（厳格ルール / 安全制約）
+- `MEMSTYLE`（人格・口調の一貫性）
+- `MEMCTX`（Surface / Deep / Ephemeral 記憶文脈）
 
 ## 現在の実装実態
 
-- Mode A（API text injection）のみ対応。
+- API text injectionベースの構成です。
 - 実行時検索はEmbedding非依存（語彙一致 + fact-key + 新しさ/重要度スコア）。
 - Deepは構造化factをSQLiteに永続保存し、TTL・競合解決を適用。
 - Ephemeralは「固定1日削除」ではなく、価値減衰と低価値剪定で整理。
@@ -232,7 +232,7 @@ curl -sS http://127.0.0.1:7781/health
 | `scripts/memq-openclaw.sh setup` | install + reset-config + start-sidecar + enable + status |
 | `scripts/memq-openclaw.sh quickstart` | `setup`と同じ |
 | `scripts/memq-openclaw.sh install` | プラグインのみビルド/導入 |
-| `scripts/memq-openclaw.sh reset-config` | MEMQ v2既定設定に戻す |
+| `scripts/memq-openclaw.sh reset-config` | MEMQ既定設定に戻す |
 | `scripts/memq-openclaw.sh enable` | MEMQを有効化（既存plugins設定を退避） |
 | `scripts/memq-openclaw.sh disable` | 退避したplugins設定/slotを復元 |
 | `scripts/memq-openclaw.sh start-sidecar` | sidecar supervisor起動 |
@@ -307,5 +307,5 @@ pnpm -C plugin/openclaw-memory-memq build
 
 ## 備考
 
-- 現行Mode Aは外部Embedding APIに依存しません。
+- 現行実装は外部Embedding APIに依存しません。
 - `sidecar/memq/quant.py`はリポジトリに残っていますが、現行の実行経路は語彙/fact-key中心の検索です。
