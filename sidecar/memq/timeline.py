@@ -48,6 +48,25 @@ def iter_day_keys(start_day: str, end_day: str, max_days: int = 62) -> list[str]
     return out
 
 
+def _safe_date(year: int, month: int, day: int) -> date | None:
+    try:
+        return date(int(year), int(month), int(day))
+    except Exception:
+        return None
+
+
+def _resolve_month_day(today: date, month: int, day: int) -> date | None:
+    d = _safe_date(today.year, month, day)
+    if d is None:
+        return None
+    # If parsed month/day is in the future, assume previous year.
+    if d > today:
+        prev = _safe_date(today.year - 1, month, day)
+        if prev is not None:
+            d = prev
+    return d
+
+
 def detect_timeline_range(prompt: str, now_ts: int | None = None, tz: ZoneInfo = TOKYO_TZ) -> TimelineRange | None:
     p = str(prompt or "")
     if not p.strip():
@@ -60,12 +79,48 @@ def detect_timeline_range(prompt: str, now_ts: int | None = None, tz: ZoneInfo =
         k = date_to_day_key(target)
         return TimelineRange(start_day=k, end_day=k, label=label, explicit=explicit)
 
+    # Explicit date forms: YYYY-MM-DD / YYYY/MM/DD
+    m_ymd = re.search(r"(?<!\d)(20\d{2})[/-](\d{1,2})[/-](\d{1,2})(?!\d)", p)
+    if m_ymd:
+        y, mo, d = int(m_ymd.group(1)), int(m_ymd.group(2)), int(m_ymd.group(3))
+        dt = _safe_date(y, mo, d)
+        if dt is not None:
+            return one_day(dt, "explicit_date")
+
+    # Explicit date forms: M月D日, M/D
+    m_jp_md = re.search(r"(?<!\d)(\d{1,2})月(\d{1,2})日(?!\d)", p)
+    if m_jp_md:
+        mo, d = int(m_jp_md.group(1)), int(m_jp_md.group(2))
+        dt = _resolve_month_day(today, mo, d)
+        if dt is not None:
+            return one_day(dt, "explicit_month_day")
+    m_slash_md = re.search(r"(?<!\d)(\d{1,2})/(\d{1,2})(?!\d)", p)
+    if m_slash_md:
+        mo, d = int(m_slash_md.group(1)), int(m_slash_md.group(2))
+        dt = _resolve_month_day(today, mo, d)
+        if dt is not None:
+            return one_day(dt, "explicit_month_day")
+
+    # Relative date forms: N days ago / N日前
+    m_days_ago_jp = re.search(r"(?<!\d)(\d{1,3})\s*日前", p, re.IGNORECASE)
+    if m_days_ago_jp:
+        n = max(1, min(366, int(m_days_ago_jp.group(1))))
+        return one_day(today - timedelta(days=n), "n_days_ago")
+    m_days_ago_en = re.search(r"(?<!\d)(\d{1,3})\s*days?\s*ago", low, re.IGNORECASE)
+    if m_days_ago_en:
+        n = max(1, min(366, int(m_days_ago_en.group(1))))
+        return one_day(today - timedelta(days=n), "n_days_ago")
+
     if re.search(r"(一昨日|おととい|day before yesterday)", p, re.IGNORECASE):
         return one_day(today - timedelta(days=2), "day_before_yesterday")
     if re.search(r"(昨日|きのう|yesterday|昨晩|last night)", p, re.IGNORECASE):
         return one_day(today - timedelta(days=1), "yesterday")
     if re.search(r"(今日|きょう|today|今朝|this morning)", p, re.IGNORECASE):
         return one_day(today, "today")
+    if re.search(r"(先々週|week before last)", p, re.IGNORECASE):
+        end = today - timedelta(days=today.weekday() + 8)
+        start = end - timedelta(days=6)
+        return TimelineRange(date_to_day_key(start), date_to_day_key(end), "week_before_last", True)
     if re.search(r"(先週|last week)", p, re.IGNORECASE):
         end = today - timedelta(days=1)
         start = end - timedelta(days=6)
@@ -87,4 +142,3 @@ def detect_timeline_range(prompt: str, now_ts: int | None = None, tz: ZoneInfo =
         start = today - timedelta(days=2)
         return TimelineRange(date_to_day_key(start), date_to_day_key(today), "recent_fallback", False)
     return None
-

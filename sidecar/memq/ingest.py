@@ -500,11 +500,19 @@ def ingest_turn(
 
     wrote = {"surface": 0, "deep": 0, "ephemeral": 0, "quarantined": 0, "rules": 0, "style": 0, "events": 0}
 
-    high_risk, reason, risk = _is_high_risk_text(user_text)
-    if high_risk:
-        db.add_quarantine(None, user_text, reason, risk)
+    high_risk_user, reason_user, risk_user = _is_high_risk_text(user_text)
+    if high_risk_user:
+        db.add_quarantine(None, user_text, reason_user, risk_user)
         wrote["quarantined"] += 1
-        # Do not promote high-risk content into any memory/rule/style channel.
+        user_text = ""
+
+    high_risk_assistant, reason_assistant, risk_assistant = _is_high_risk_text(assistant_text)
+    if high_risk_assistant:
+        db.add_quarantine(None, assistant_text, reason_assistant, risk_assistant)
+        wrote["quarantined"] += 1
+        assistant_text = ""
+
+    if not user_text.strip() and not assistant_text.strip():
         return wrote
 
     # Rules and style extraction from user text.
@@ -574,7 +582,7 @@ def ingest_turn(
     if explicit_forget_signal or retention_default == "surface_only":
         durable_signal = False
 
-    if deep_signal and not high_risk:
+    if deep_signal:
         structured_written = 0
         for fact in structured_facts:
             fact_key = str(fact.get("fact_key") or "")
@@ -741,6 +749,7 @@ def ingest_turn(
             importance=user_imp,
             ttl_expires_at=_event_ttl_from_importance(ts, user_imp),
         )
+        wrote["events"] += 1
     if assistant_text.strip():
         db.add_event(
             session_key=session_key,
@@ -752,7 +761,13 @@ def ingest_turn(
             importance=asst_imp,
             ttl_expires_at=_event_ttl_from_importance(ts, asst_imp),
         )
+        wrote["events"] += 1
     for a in _extract_action_summaries(metadata):
+        action_risky, action_reason, action_risk = _is_high_risk_text(a)
+        if action_risky:
+            db.add_quarantine(None, a, action_reason, action_risk)
+            wrote["quarantined"] += 1
+            continue
         db.add_event(
             session_key=session_key,
             ts=ts,
@@ -763,6 +778,7 @@ def ingest_turn(
             importance=0.68,
             ttl_expires_at=ts + 45 * 86400,
         )
+        wrote["events"] += 1
 
     # Ephemeral for short low-value chatter.
     if len(user_text.strip()) <= 64 and not deep_signal:
