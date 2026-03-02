@@ -1,147 +1,206 @@
 # Hybrid MEMQ v2 (Mode A)
 
-Hybrid MEMQ v2 is an OpenClaw memory plugin focused on persistent memory with bounded prompt growth.
-It injects three fixed-budget blocks every turn:
+Hybrid MEMQ v2 is an OpenClaw memory plugin that keeps prompt growth bounded while preserving long-running memory behavior.
 
-- `MEMRULES v1` (strict rules / safety)
+Each turn injects three bounded channels in fixed order:
+
+- `MEMRULES v1` (strict rules / safety constraints)
 - `MEMSTYLE v1` (persona / tone consistency)
 - `MEMCTX v1` (Surface / Deep / Ephemeral memory context)
 
-## Key Capabilities
+## Current Runtime Reality
 
-- Persistent local memory in SQLite via sidecar.
-- Surface-first retrieval, deep fallback, ephemeral decay/prune.
-- Deep vector quantization (6/7/8-bit; default 8-bit).
-- Fixed token budgets per channel.
-- Conversation pruning + archive + reconstruction summary.
-- Local learning of preference/policy/style from user messages.
-- Quarantine of suspicious memory candidates.
-- Primary output audit (rule-based) and optional secondary LLM audit.
-- Degraded mode when sidecar is unavailable.
+- Mode A only (API text injection).
+- Retrieval is embedding-free at runtime (lexical + fact-key + recency/importance scoring).
+- Structured Deep facts are persisted in SQLite with conflict handling and TTL support.
+- Ephemeral is not fixed 1-day expiry anymore; it decays and is pruned by low value.
+- Output audit redaction is applied even when `block=false` (if `redactedText` is returned).
+- `MEMSTYLE` budget default is fixed to `120` tokens (`styleTokens=120`, `maxBudgetTokens=120`).
+
+## Why This Plugin Exists
+
+- Stop unbounded token growth from raw-history/memory-file injection.
+- Keep long-horizon continuity via compact structured recall.
+- Separate concerns into deterministic channels:
+  - rules (`MEMRULES`)
+  - style/persona (`MEMSTYLE`)
+  - memory/context (`MEMCTX`)
+
+## Core Features
+
+- Local sidecar (`FastAPI + SQLite`) with persistent memory state.
+- Surface-first retrieval with Deep fallback gating.
+- Deep fact indexing (`fact_key`) to improve long-lag recall beyond recent-item limits.
+- Conversation pruning by token budget, archive of pruned history, and sidecar reconstruction summaries.
+- Idle sleep-style consolidation (decay, dedup, promotion, profile refresh, cleanup).
+- Quarantine for suspicious memory candidates (prompt-injection-like inputs).
+- Primary rule-based output audit + optional secondary LLM audit.
+- Degraded mode if sidecar is unavailable.
 
 ## Repository Layout
 
 - `plugin/openclaw-memory-memq`: OpenClaw plugin (TypeScript)
-- `sidecar`: local API service (FastAPI + SQLite)
-- `scripts/memq-openclaw.sh`: setup/enable/disable/status CLI
-- `docs`: architecture/setup/security and latest runtime persistence proof
-- `examples/openclaw.json`: example OpenClaw config
+- `sidecar`: local sidecar service (FastAPI + SQLite)
+- `scripts/memq-openclaw.sh`: install/setup/enable/disable/status CLI
+- `bench/src`: regression scripts
+- `sidecar/tests`: unit/regression tests
+- `docs`: architecture, setup, security, benchmark/persistence notes
 
 ## Requirements
 
-- OpenClaw installed
+- OpenClaw
 - Node.js + pnpm
 - Python 3.10+
-- `openclaw`, `pnpm`, `python3`, `curl`, `lsof`
+- CLI tools: `openclaw`, `pnpm`, `python3`, `curl`, `lsof`
 
 ## Quick Start
 
 ```bash
-cd /path/to/hybrid-memq
+cd ~/hybrid-memq
 scripts/memq-openclaw.sh setup
 scripts/memq-openclaw.sh status
 curl -sS http://127.0.0.1:7781/health
 ```
 
-`setup` performs:
+`setup` runs:
 
-1. Plugin build + install/link
-2. MEMQ default config reset
-3. Sidecar startup
-4. Memory slot switch to `openclaw-memory-memq`
+1. build/install plugin
+2. reset MEMQ defaults
+3. start sidecar
+4. switch OpenClaw memory slot to `openclaw-memory-memq`
 
 ## CLI Commands
 
 | Command | Description |
 |---|---|
-| `scripts/memq-openclaw.sh setup` | Build/install plugin + start sidecar + enable MEMQ |
-| `scripts/memq-openclaw.sh quickstart` | Same as setup |
-| `scripts/memq-openclaw.sh install` | Build and install/link plugin only |
-| `scripts/memq-openclaw.sh reset-config` | Reset plugin config to MEMQ defaults |
-| `scripts/memq-openclaw.sh enable` | Switch OpenClaw memory slot to MEMQ (backup previous state) |
-| `scripts/memq-openclaw.sh disable` | Restore previous memory slot/config |
-| `scripts/memq-openclaw.sh start-sidecar` | Start sidecar |
-| `scripts/memq-openclaw.sh stop-sidecar` | Stop sidecar |
-| `scripts/memq-openclaw.sh restart-sidecar` | Restart sidecar |
-| `scripts/memq-openclaw.sh status` | Show plugin/slot/sidecar status |
-| `scripts/memq-openclaw.sh audit-on <url> <model> [risk] [block]` | Enable secondary LLM audit |
-| `scripts/memq-openclaw.sh audit-off` | Disable secondary LLM audit |
-| `scripts/memq-openclaw.sh audit-primary-on` | Enable primary rule-based audit |
-| `scripts/memq-openclaw.sh audit-primary-off` | Disable primary rule-based audit |
-| `scripts/memq-openclaw.sh audit-status` | Show audit settings |
-| `scripts/memq-openclaw.sh memstyle-on` | Enable MEMSTYLE injection |
-| `scripts/memq-openclaw.sh memstyle-off` | Disable MEMSTYLE injection |
-| `scripts/memq-openclaw.sh memstyle-status` | Show MEMSTYLE status |
+| `scripts/memq-openclaw.sh setup` | install + reset-config + start-sidecar + enable + status |
+| `scripts/memq-openclaw.sh quickstart` | same as `setup` |
+| `scripts/memq-openclaw.sh install` | build and link/install plugin only |
+| `scripts/memq-openclaw.sh reset-config` | reset plugin config to MEMQ v2 defaults |
+| `scripts/memq-openclaw.sh enable` | switch memory slot to MEMQ (backs up previous plugins config) |
+| `scripts/memq-openclaw.sh disable` | restore previous plugins config / memory slot |
+| `scripts/memq-openclaw.sh start-sidecar` | start local sidecar supervisor |
+| `scripts/memq-openclaw.sh stop-sidecar` | stop sidecar supervisor/app |
+| `scripts/memq-openclaw.sh restart-sidecar` | restart sidecar and clean stale listener on `127.0.0.1:7781` |
+| `scripts/memq-openclaw.sh status` | print plugin/slot/sidecar status |
+| `scripts/memq-openclaw.sh audit-on <url> <model> [risk] [block]` | enable secondary LLM audit path |
+| `scripts/memq-openclaw.sh audit-off` | disable secondary LLM audit path |
+| `scripts/memq-openclaw.sh audit-primary-on` | enable primary rule-based output audit |
+| `scripts/memq-openclaw.sh audit-primary-off` | disable primary rule-based output audit |
+| `scripts/memq-openclaw.sh audit-status` | show current audit settings |
+| `scripts/memq-openclaw.sh memstyle-on` | enable MEMSTYLE injection |
+| `scripts/memq-openclaw.sh memstyle-off` | disable MEMSTYLE injection |
+| `scripts/memq-openclaw.sh memstyle-status` | show MEMSTYLE enabled state |
+
+## Default Budgets
+
+- `MEMCTX`: `120`
+- `MEMRULES`: `80`
+- `MEMSTYLE`: `120`
+
+These are configured in:
+
+- `plugin/openclaw-memory-memq/src/config/schema.ts`
+- `scripts/memq-openclaw.sh` (`reset-config`)
+- `memq.yaml`
 
 ## Runtime Flow
 
 1. `before_prompt_build`
-- split keep/prune by `memq.recent.maxTokens`
-- archive pruned history
-- summarize pruned history in sidecar
+- split messages by `memq.recent.maxTokens`
+- archive pruned messages (`.memq/conversation_archive/*.jsonl`)
+- summarize pruned window into sidecar (`surface_only` + `deep`)
+- repair orphan tool-result integrity in kept window
 - query sidecar for `MEMRULES/MEMSTYLE/MEMCTX`
 - inject in fixed order: `MEMRULES -> MEMSTYLE -> MEMCTX`
 
 2. `agent_end`
-- ingest turn into sidecar and update memory/profile
+- ingest current turn into sidecar
+- update memory/profile/rule/style state
 
 3. `before_compaction`
-- request sidecar idle consolidation (best effort)
+- trigger sidecar idle consolidation (`best effort`)
 
 4. `gateway_start`
-- sidecar health check and markdown bootstrap import
+- sidecar health probe
+- bootstrap import from `MEMORY.md`, `IDENTITY.md`, `SOUL.md`, `HEARTBEAT.md`
+
+## Security and Audit
+
+- MEMQ never injects raw secrets into MEMCTX.
+- Suspicious inputs are quarantined and excluded from recall.
+- Primary output audit checks risk patterns locally.
+- Secondary LLM audit is called only when configured and high-risk threshold is reached.
+- If audit returns `redactedText`, plugin applies it even when `block=false`.
+
+## Persistence and Restart Behavior
+
+- Memory/rules/style/profiles are persisted in sidecar SQLite (`.memq/sidecar.sqlite3`).
+- OpenClaw gateway restart does not clear MEMQ DB.
+- Sidecar restart reloads the same DB and resumes from persisted state.
 
 ## Verification
 
 ```bash
 python3 -m py_compile sidecar/minisidecar.py sidecar/memq/*.py
 python3 -m unittest -v
+python3 -m unittest -v sidecar.tests.test_regressions
 python3 bench/src/text_sanitization_regression.py
+pnpm -C plugin/openclaw-memory-memq build
 ```
 
-## Persistence and Restart Behavior
+## Notes
 
-- Memory, style, rules, and profiles are persisted in sidecar SQLite.
-- Gateway restart does not reset MEMQ data.
-- Sidecar restart reloads the same SQLite state.
-- Latest local proof artifact: `docs/runtime_persistence_latest_20260226.json`
-
-## Security Notes
-
-- No secret values are injected into MEMCTX.
-- Suspected injection content is quarantined and excluded from recall.
-- Secondary audit is called only on high-risk outputs when enabled.
+- Runtime retrieval currently does not require external embedding APIs.
+- `sidecar/memq/quant.py` remains in the repository, but the current Mode A retrieval path is lexical/fact-key driven.
 
 ---
 
 # Hybrid MEMQ v2（Mode A）
 
-Hybrid MEMQ v2 は、OpenClaw向けの永続記憶プラグインです。
-毎ターン、以下の3ブロックを固定予算で注入します。
+Hybrid MEMQ v2 は、OpenClaw向けの記憶プラグインです。  
+長い会話でも入力トークンの肥大を抑えながら、記憶の継続性を保つことを目的にしています。
 
-- `MEMRULES v1`（厳格ルール/安全）
-- `MEMSTYLE v1`（口調/人格の一貫性）
-- `MEMCTX v1`（表層/深層/揮発 記憶文脈）
+毎ターン、以下の3チャネルを固定順で注入します。
+
+- `MEMRULES v1`（厳格ルール / 安全制約）
+- `MEMSTYLE v1`（人格・口調の一貫性）
+- `MEMCTX v1`（Surface / Deep / Ephemeral 記憶文脈）
+
+## 現在の実装実態
+
+- Mode A（API text injection）のみ対応。
+- 実行時検索はEmbedding非依存（語彙一致 + fact-key + 新しさ/重要度スコア）。
+- Deepは構造化factをSQLiteに永続保存し、TTL・競合解決を適用。
+- Ephemeralは「固定1日削除」ではなく、価値減衰と低価値剪定で整理。
+- 出力監査の`redactedText`は`block=false`でも反映。
+- `MEMSTYLE`予算は既定で`120`固定（`styleTokens=120`、`maxBudgetTokens=120`）。
+
+## このプラグインの狙い
+
+- 生ログや巨大なmemoryファイルの毎ターン注入を止める。
+- 文脈を短い構造化記憶として再構成して維持する。
+- ルール・スタイル・記憶を分離し、衝突や取りこぼしを減らす。
 
 ## 主な機能
 
-- sidecar(SQLite)によるローカル永続記憶。
-- 表層優先検索、必要時のみ深層検索、揮発記憶の減衰/剪定。
-- 深層ベクトル量子化（6/7/8bit、既定8bit）。
-- チャネル別固定トークン予算。
-- 会話の剪定・アーカイブ・再構成サマリ。
-- 会話からの嗜好/方針/スタイル学習（ローカル）。
-- 汚染疑いデータの隔離（quarantine）。
-- 一次出力監査（ルールベース）+ 任意の二次LLM監査。
+- `FastAPI + SQLite` sidecarによるローカル永続記憶。
+- Surface優先、必要時のみDeep検索のゲーティング。
+- `fact_key`索引による長期想起強化（古い重要記憶の取りこぼし抑制）。
+- 会話のトークン予算剪定、剪定履歴アーカイブ、要約再構成。
+- アイドル時の睡眠整理（減衰、重複統合、昇格、プロファイル更新、クリーンアップ）。
+- 汚染疑い入力の隔離（quarantine）。
+- 一次監査（ルールベース）+ 任意の二次LLM監査。
 - sidecar障害時のdegraded継続。
 
 ## リポジトリ構成
 
 - `plugin/openclaw-memory-memq`: OpenClawプラグイン（TypeScript）
-- `sidecar`: ローカルAPI（FastAPI + SQLite）
-- `scripts/memq-openclaw.sh`: 導入/切替/状態確認CLI
-- `docs`: 設計/導入/セキュリティ/最新永続性証跡
-- `examples/openclaw.json`: OpenClaw設定例
+- `sidecar`: ローカルsidecar（FastAPI + SQLite）
+- `scripts/memq-openclaw.sh`: 導入/切替/監査設定CLI
+- `bench/src`: 回帰スクリプト
+- `sidecar/tests`: ユニット/回帰テスト
+- `docs`: 設計、導入、セキュリティ、検証メモ
 
 ## 必要環境
 
@@ -153,77 +212,100 @@ Hybrid MEMQ v2 は、OpenClaw向けの永続記憶プラグインです。
 ## クイックスタート
 
 ```bash
-cd /path/to/hybrid-memq
+cd ~/hybrid-memq
 scripts/memq-openclaw.sh setup
 scripts/memq-openclaw.sh status
 curl -sS http://127.0.0.1:7781/health
 ```
 
-`setup` で実行される内容:
+`setup`で実行される内容:
 
-1. プラグインのビルド + インストール/リンク
-2. MEMQ既定設定の反映
+1. プラグインをビルド/導入
+2. MEMQ既定設定にリセット
 3. sidecar起動
-4. memory slotを `openclaw-memory-memq` に切替
+4. OpenClawのmemory slotを`openclaw-memory-memq`へ切替
 
 ## CLIコマンド
 
 | コマンド | 説明 |
 |---|---|
-| `scripts/memq-openclaw.sh setup` | ビルド/導入 + sidecar起動 + MEMQ有効化 |
-| `scripts/memq-openclaw.sh quickstart` | setupと同じ |
+| `scripts/memq-openclaw.sh setup` | install + reset-config + start-sidecar + enable + status |
+| `scripts/memq-openclaw.sh quickstart` | `setup`と同じ |
 | `scripts/memq-openclaw.sh install` | プラグインのみビルド/導入 |
-| `scripts/memq-openclaw.sh reset-config` | MEMQ既定設定に戻す |
-| `scripts/memq-openclaw.sh enable` | memory slotをMEMQへ切替（元設定退避） |
-| `scripts/memq-openclaw.sh disable` | 元のmemory slot/configへ復元 |
-| `scripts/memq-openclaw.sh start-sidecar` | sidecar起動 |
+| `scripts/memq-openclaw.sh reset-config` | MEMQ v2既定設定に戻す |
+| `scripts/memq-openclaw.sh enable` | MEMQを有効化（既存plugins設定を退避） |
+| `scripts/memq-openclaw.sh disable` | 退避したplugins設定/slotを復元 |
+| `scripts/memq-openclaw.sh start-sidecar` | sidecar supervisor起動 |
 | `scripts/memq-openclaw.sh stop-sidecar` | sidecar停止 |
-| `scripts/memq-openclaw.sh restart-sidecar` | sidecar再起動 |
-| `scripts/memq-openclaw.sh status` | plugin/slot/sidecar状態確認 |
+| `scripts/memq-openclaw.sh restart-sidecar` | sidecar再起動（`127.0.0.1:7781`残留リスナー掃除込み） |
+| `scripts/memq-openclaw.sh status` | plugin/slot/sidecar状態表示 |
 | `scripts/memq-openclaw.sh audit-on <url> <model> [risk] [block]` | 二次LLM監査を有効化 |
 | `scripts/memq-openclaw.sh audit-off` | 二次LLM監査を無効化 |
 | `scripts/memq-openclaw.sh audit-primary-on` | 一次監査を有効化 |
 | `scripts/memq-openclaw.sh audit-primary-off` | 一次監査を無効化 |
-| `scripts/memq-openclaw.sh audit-status` | 監査設定を表示 |
+| `scripts/memq-openclaw.sh audit-status` | 監査設定表示 |
 | `scripts/memq-openclaw.sh memstyle-on` | MEMSTYLE注入を有効化 |
 | `scripts/memq-openclaw.sh memstyle-off` | MEMSTYLE注入を無効化 |
-| `scripts/memq-openclaw.sh memstyle-status` | MEMSTYLE状態を表示 |
+| `scripts/memq-openclaw.sh memstyle-status` | MEMSTYLE有効状態を表示 |
+
+## 既定予算
+
+- `MEMCTX`: `120`
+- `MEMRULES`: `80`
+- `MEMSTYLE`: `120`
+
+定義場所:
+
+- `plugin/openclaw-memory-memq/src/config/schema.ts`
+- `scripts/memq-openclaw.sh`（`reset-config`）
+- `memq.yaml`
 
 ## 実行フロー
 
 1. `before_prompt_build`
-- `memq.recent.maxTokens` で keep/prune 分割
-- prune会話をアーカイブ
-- prune会話をsidecarで要約
-- `MEMRULES/MEMSTYLE/MEMCTX` を取得
-- `MEMRULES -> MEMSTYLE -> MEMCTX` の順で注入
+- `memq.recent.maxTokens`で会話をkeep/prune分割
+- pruneした履歴を`.memq/conversation_archive/*.jsonl`へ保存
+- prune履歴をsidecarへ要約投入（`surface_only` + `deep`）
+- kept側のtool-result整合を修復
+- sidecarから`MEMRULES/MEMSTYLE/MEMCTX`を取得
+- `MEMRULES -> MEMSTYLE -> MEMCTX`の順で注入
 
 2. `agent_end`
-- ターンをsidecarへ取り込み、記憶/プロファイル更新
+- 現在ターンをsidecarへingest
+- 記憶/ルール/スタイル/プロファイルを更新
 
 3. `before_compaction`
 - sidecarへ睡眠整理を要求（best effort）
 
 4. `gateway_start`
-- sidecarヘルス確認 + Markdown初期取り込み
+- sidecarヘルス確認
+- `MEMORY.md`/`IDENTITY.md`/`SOUL.md`/`HEARTBEAT.md`を初期取り込み
+
+## セキュリティと監査
+
+- MEMCTXへ秘密値を生注入しません。
+- 汚染疑い入力はquarantineへ隔離し、想起対象から除外。
+- 一次監査はローカルでリスク判定。
+- 二次監査LLMは有効化時かつ閾値超過時のみ呼び出し。
+- `redactedText`が返った場合、`block=false`でも出力へ反映。
+
+## 永続性と再起動
+
+- 記憶/ルール/スタイル/プロファイルは`.memq/sidecar.sqlite3`に永続化。
+- OpenClaw Gateway再起動でMEMQデータは消えません。
+- sidecar再起動後も同一DBを再読込して継続します。
 
 ## 検証コマンド
 
 ```bash
 python3 -m py_compile sidecar/minisidecar.py sidecar/memq/*.py
 python3 -m unittest -v
+python3 -m unittest -v sidecar.tests.test_regressions
 python3 bench/src/text_sanitization_regression.py
+pnpm -C plugin/openclaw-memory-memq build
 ```
 
-## 永続性と再起動
+## 備考
 
-- 記憶/スタイル/ルール/プロファイルはsidecar SQLiteに永続化。
-- Gateway再起動ではMEMQデータは消えません。
-- sidecar再起動でも同じSQLiteを再読込します。
-- 最新のローカル証跡: `docs/runtime_persistence_latest_20260226.json`
-
-## セキュリティ
-
-- 秘密情報をMEMCTXへ注入しません。
-- 汚染疑いはquarantineへ隔離し、想起対象から除外。
-- 二次監査は有効時かつ高リスク出力時のみ実行。
+- 現行Mode Aは外部Embedding APIに依存しません。
+- `sidecar/memq/quant.py`はリポジトリに残っていますが、現行の実行経路は語彙/fact-key中心の検索です。
