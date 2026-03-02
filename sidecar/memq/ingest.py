@@ -89,6 +89,10 @@ EXPLICIT_REMEMBER_RE = re.compile(
     r"(remember\s+(this|that)|please\s+remember|must|always|ルール|方針|制約|覚えて(?:おいて|ください|くれ|ね|。|！|$|:))",
     re.IGNORECASE,
 )
+EXPLICIT_FORGET_RE = re.compile(
+    r"(do\s*not\s*remember|don't\s*remember|forget\s*this|覚えなくていい|記憶しない|忘れていい)",
+    re.IGNORECASE,
+)
 
 
 def _split_sentences(text: str) -> List[str]:
@@ -410,6 +414,21 @@ def _structured_fact_summary(f: Dict[str, Any]) -> str:
     return f"{core} | subject={subj} | conf={conf:.2f} | src={src} | ttl={ttl_days}d"[:220]
 
 
+def _policy_ttl_days(db: MemqDB, default_days: int = 45) -> int:
+    profile = db.get_memory_policy_profile()
+    try:
+        raw = str((profile.get("ttl.default_days") or {}).get("value") or "").strip()
+    except Exception:
+        raw = ""
+    if not raw:
+        return int(default_days)
+    try:
+        v = int(float(raw))
+    except Exception:
+        return int(default_days)
+    return max(1, min(3650, v))
+
+
 def ingest_turn(
     *,
     db: MemqDB,
@@ -439,6 +458,7 @@ def ingest_turn(
     wrote["style"] += apply_style_updates(db, styles)
     style_update_intent = len(styles) > 0
     explicit_memory_signal = bool(EXPLICIT_REMEMBER_RE.search(user_text))
+    explicit_forget_signal = bool(EXPLICIT_FORGET_RE.search(user_text))
     structured_facts = _extract_structured_facts(user_text, styles, rules, explicit_memory_signal)
     fact_keys = _extract_fact_keys(user_text, styles, rules)
     for f in structured_facts:
@@ -458,6 +478,10 @@ def ingest_turn(
             created_at=ts,
         )
         wrote["events"] += 1
+
+    policy_profile = db.get_memory_policy_profile()
+    retention_default = str((policy_profile.get("retention.default") or {}).get("value") or "").strip().lower()
+    policy_ttl_days = _policy_ttl_days(db, default_days=45)
 
     # Surface memory for every turn (unless text totally empty).
     summary = _surface_summary(user_text, assistant_text)
@@ -481,6 +505,8 @@ def ingest_turn(
     # Promote structured user facts even without explicit "remember".
     auto_deep_signal = _contains_stable_fact_signal(user_text) and len(user_text.strip()) >= 24
     deep_signal = deep_signal or (auto_deep_signal and not style_update_intent)
+    if explicit_forget_signal or retention_default == "surface_only":
+        deep_signal = False
 
     durable_signal = bool(
         EXPLICIT_REMEMBER_RE.search(user_text)
@@ -490,6 +516,8 @@ def ingest_turn(
         durable_signal = True
     if structured_facts:
         durable_signal = True
+    if explicit_forget_signal or retention_default == "surface_only":
+        durable_signal = False
 
     if deep_signal and not high_risk:
         structured_written = 0
@@ -507,6 +535,10 @@ def ingest_turn(
 
             fact = dict(fact)
             fact["ts"] = int(ts)
+            fact_ttl_days = int(fact.get("ttl_days") or policy_ttl_days)
+            if not explicit_memory_signal:
+                fact_ttl_days = max(1, min(fact_ttl_days, policy_ttl_days))
+            ttl_expires_at = ts + (fact_ttl_days * 86400)
             deep_text = _structured_fact_summary(fact)
             emb = embed_text(deep_text, dim)
             deep_id = db.add_memory_item(
@@ -531,6 +563,7 @@ def ingest_turn(
                 emb_f16=f16_blob(emb),
                 emb_q=quantize(emb, bits_per_dim),
                 emb_dim=dim,
+                ttl_expires_at=ttl_expires_at,
                 source="turn",
             )
             if fact_key:
@@ -559,7 +592,6 @@ def ingest_turn(
                             "global",
                             [fact_key],
                             gid,
-                            include_all_sessions=True,
                         )
                     wrote["deep"] += 1
 
@@ -582,6 +614,10 @@ def ingest_turn(
                 deep_text = _structured_fact_summary(note_fact)
                 emb = embed_text(deep_text, dim)
                 session_sig = deep_text[:220].strip().lower()
+                note_ttl_days = int(note_fact.get("ttl_days") or policy_ttl_days)
+                if not explicit_memory_signal:
+                    note_ttl_days = max(1, min(note_ttl_days, policy_ttl_days))
+                note_ttl = ts + (note_ttl_days * 86400)
                 deep_id = db.add_memory_item(
                     session_key=session_key,
                     layer="deep",
@@ -597,6 +633,7 @@ def ingest_turn(
                     emb_f16=f16_blob(emb),
                     emb_q=quantize(emb, bits_per_dim),
                     emb_dim=dim,
+                    ttl_expires_at=note_ttl,
                     source="turn",
                 )
                 wrote["deep"] += db.expire_conflicting_fact_keys("deep", session_key, ["memory.note"], deep_id)
@@ -621,7 +658,6 @@ def ingest_turn(
                         "global",
                         ["memory.note"],
                         gid,
-                        include_all_sessions=True,
                     )
                     wrote["deep"] += 1
 
@@ -640,7 +676,8 @@ def ingest_turn(
                 emb_f16=f16_blob(emb),
                 emb_q=None,
                 emb_dim=dim,
-                ttl_expires_at=ts + 86400,
+                # Ephemeral expires by low-value decay/prune, not fixed wall-clock TTL.
+                ttl_expires_at=None,
                 source="turn",
             )
             wrote["ephemeral"] += 1

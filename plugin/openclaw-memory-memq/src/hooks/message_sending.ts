@@ -99,9 +99,18 @@ export function createMessageSending(api: any, sidecar: SidecarClient, rt: Runti
           blockThreshold: getCfg(api, "memq.security.blockThreshold", defaults["memq.security.blockThreshold"]),
         },
       });
-      if (res.block && typeof res.redactedText === "string") {
-        t.obj[t.key] = res.redactedText;
-        logInfo(api, `[memq-v2] message_sending session=${sessionKey} redacted=1 risk=${res.risk.toFixed(2)}`);
+      const beforeText = String(t.obj[t.key] ?? "");
+      const redacted = typeof res.redactedText === "string" ? res.redactedText : "";
+      if (redacted.trim()) {
+        t.obj[t.key] = redacted;
+        const changed = redacted !== beforeText ? 1 : 0;
+        logInfo(
+          api,
+          `[memq-v2] message_sending session=${sessionKey} redacted=1 changed=${changed} blocked=${res.block ? 1 : 0} risk=${res.risk.toFixed(2)}`
+        );
+      } else if (res.block) {
+        t.obj[t.key] = "[BLOCKED_BY_MEMRULES]";
+        logInfo(api, `[memq-v2] message_sending session=${sessionKey} blocked=1 fallback=1 risk=${res.risk.toFixed(2)}`);
       }
     } catch (err) {
       logInfo(api, `[memq-v2] message_sending session=${sessionKey} audit_failed=${(err as Error).message}`);

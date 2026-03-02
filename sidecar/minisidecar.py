@@ -61,6 +61,16 @@ def _has_fact(session_key: str, fact_key: str, value: str, limit: int = 6000) ->
     value_l = normalize_fact_value(value).lower()
     if not fact_key or not value_l:
         return False
+    indexed = db.fetch_deep_items_by_fact_keys(
+        session_key=session_key,
+        fact_keys=[fact_key],
+        limit=max(256, min(2000, limit)),
+        include_global=True,
+    )
+    for r in indexed:
+        fk, fv = parse_fact_signature_from_row(dict(r))
+        if fk == fact_key and fv == value_l:
+            return True
     for r in db.list_memory_items("deep", session_key, limit=limit):
         fk, fv = parse_fact_signature_from_row(dict(r))
         if fk == fact_key and fv == value_l:
@@ -117,7 +127,6 @@ def _promote_deep_candidates(session_key: str, candidates: List[str]) -> int:
                         "global",
                         [fk],
                         gid,
-                        include_all_sessions=True,
                     )
                 wrote += 1
     return wrote

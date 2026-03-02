@@ -207,13 +207,35 @@ def _session_scope_bonus(session_key: str, row_session: str) -> float:
 
 
 def search_deep(db: MemqDB, session_key: str, query_text: str, qvec: np.ndarray, top_k: int, bits: int, top_m: int = 200) -> List[Dict[str, Any]]:
+    q_fact_keys = infer_query_fact_keys(query_text)
     rows = db.list_memory_items("deep", session_key, limit=5000)
+    if q_fact_keys:
+        indexed = db.fetch_deep_items_by_fact_keys(
+            session_key=session_key,
+            fact_keys=sorted(q_fact_keys),
+            limit=max(512, top_k * 80),
+            include_global=True,
+        )
+        if indexed:
+            preferred: List[Any] = []
+            preferred_ids = set()
+            for r in indexed:
+                rid = str(r["id"])
+                if rid in preferred_ids:
+                    continue
+                preferred_ids.add(rid)
+                preferred.append(r)
+            for r in rows:
+                rid = str(r["id"])
+                if rid in preferred_ids:
+                    continue
+                preferred.append(r)
+            rows = preferred
     if len(rows) < max(48, top_k * 6):
         extra = db.list_memory_items_any("deep", limit=5000)
         have = {str(r["id"]) for r in rows}
         rows.extend([r for r in extra if str(r["id"]) not in have])
     q_tokens = _tokenize(query_text)
-    q_fact_keys = infer_query_fact_keys(query_text)
     is_recent_query = "memory.recent" in q_fact_keys
     now = __import__("time").time()
     scored: List[Dict[str, Any]] = []

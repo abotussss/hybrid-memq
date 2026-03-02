@@ -83,7 +83,7 @@ def _promote_structured_from_conv(db: MemqDB, *, dim: int, bits_per_dim: int, ma
                         emb_dim=dim,
                         source="idle_consolidation",
                     )
-                    wrote += db.expire_conflicting_fact_keys("deep", "global", [fk], gid, include_all_sessions=True)
+                    wrote += db.expire_conflicting_fact_keys("deep", "global", [fk], gid)
                     wrote += 1
                     existing.add(("global", fk, fv))
     return wrote
@@ -176,7 +176,7 @@ def _promote_profile_facts(db: MemqDB, *, dim: int, bits_per_dim: int) -> int:
             "explicit": False,
             "ts": now,
         }
-        summary = _fact_summary(fact)
+        summary = structured_fact_summary(fact)
         emb = embed_text(summary, dim)
         gid = db.add_memory_item(
             session_key="global",
@@ -190,7 +190,7 @@ def _promote_profile_facts(db: MemqDB, *, dim: int, bits_per_dim: int) -> int:
             emb_dim=dim,
             source="idle_consolidation",
         )
-        wrote += db.expire_conflicting_fact_keys("deep", "global", [fk], gid, include_all_sessions=True)
+        wrote += db.expire_conflicting_fact_keys("deep", "global", [fk], gid)
         wrote += 1
         existing.add((fk, fv))
     return wrote
@@ -229,6 +229,10 @@ def run_idle_consolidation(db: MemqDB, session_key: str | None = None, *, dim: i
 
     did.append("backfill_fact_keys")
     stats["fact_keys_backfilled"] = db.backfill_fact_keys(layer="deep", limit=10000)
+    did.append("backfill_fact_index")
+    stats["fact_index_backfilled"] = db.backfill_fact_index(layer="deep", limit=20000)
+    did.append("cleanup_stale_fact_index")
+    stats["fact_index_stale_removed"] = db.cleanup_stale_fact_index()
 
     did.append("profile_refresh")
     updated = refresh_preference_profiles(db, now)

@@ -164,6 +164,16 @@ class MemqDB:
               updated_at INTEGER NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS fact_index (
+              session_key TEXT NOT NULL,
+              fact_key TEXT NOT NULL,
+              item_id TEXT NOT NULL,
+              updated_at INTEGER NOT NULL,
+              PRIMARY KEY(session_key, fact_key, item_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_fact_index_key ON fact_index(fact_key, session_key, updated_at);
+            CREATE INDEX IF NOT EXISTS idx_fact_index_item ON fact_index(item_id);
+
             CREATE TABLE IF NOT EXISTS audit_events (
               id TEXT PRIMARY KEY,
               sessionKey TEXT NOT NULL,
@@ -267,6 +277,13 @@ class MemqDB:
                 source,
             ),
         )
+        self._sync_fact_index_for_item(
+            item_id=item_id,
+            session_key=session_key,
+            layer=layer,
+            tags=tags,
+            updated_at=ts,
+        )
         self.conn.commit()
         return item_id
 
@@ -348,6 +365,13 @@ class MemqDB:
                     rid,
                 ),
             )
+            self._sync_fact_index_for_item(
+                item_id=rid,
+                session_key=session_key,
+                layer=layer,
+                tags=merged_tags,
+                updated_at=ts,
+            )
             self.conn.commit()
             return rid, True
 
@@ -365,6 +389,140 @@ class MemqDB:
             source=source,
         )
         return item_id, False
+
+    def _extract_fact_keys_from_tags(self, tags: Dict[str, Any]) -> List[str]:
+        keys: List[str] = []
+        if not isinstance(tags, dict):
+            return keys
+        raw_keys = tags.get("fact_keys")
+        if isinstance(raw_keys, list):
+            for x in raw_keys:
+                k = str(x or "").strip()
+                if k:
+                    keys.append(k)
+        fact = tags.get("fact")
+        if isinstance(fact, dict):
+            fk = str(fact.get("fact_key") or "").strip()
+            if fk:
+                keys.append(fk)
+        out: List[str] = []
+        seen = set()
+        for k in keys:
+            if not k or k in seen or len(k) > 128:
+                continue
+            seen.add(k)
+            out.append(k)
+        return out
+
+    def _sync_fact_index_for_item(
+        self,
+        *,
+        item_id: str,
+        session_key: str,
+        layer: str,
+        tags: Dict[str, Any],
+        updated_at: Optional[int] = None,
+    ) -> int:
+        self.conn.execute("DELETE FROM fact_index WHERE item_id=?", (item_id,))
+        if layer != "deep":
+            return 0
+        keys = self._extract_fact_keys_from_tags(tags)
+        if not keys:
+            return 0
+        ts = int(updated_at or now_ts())
+        wrote = 0
+        for fk in keys:
+            self.conn.execute(
+                """
+                INSERT INTO fact_index(session_key,fact_key,item_id,updated_at)
+                VALUES(?,?,?,?)
+                ON CONFLICT(session_key,fact_key,item_id) DO UPDATE SET updated_at=excluded.updated_at
+                """,
+                (session_key, fk, item_id, ts),
+            )
+            wrote += 1
+        return wrote
+
+    def fetch_deep_items_by_fact_keys(
+        self,
+        *,
+        session_key: str,
+        fact_keys: Sequence[str],
+        limit: int = 1500,
+        include_global: bool = True,
+    ) -> List[sqlite3.Row]:
+        keys = [str(k or "").strip() for k in fact_keys if str(k or "").strip()]
+        if not keys:
+            return []
+        uniq_keys = list(dict.fromkeys(keys))[:128]
+        now = now_ts()
+        in_clause = ",".join("?" for _ in uniq_keys)
+        if include_global:
+            session_clause = "(fi.session_key=? OR fi.session_key='global')"
+        else:
+            session_clause = "fi.session_key=?"
+        params: List[Any] = []
+        params.extend(uniq_keys)
+        params.append(session_key)
+        params.append(now)
+        params.append(session_key)
+        params.append(int(limit))
+        rows = self.conn.execute(
+            f"""
+            SELECT fi.session_key AS idx_session, fi.fact_key AS idx_fact_key, mi.*
+            FROM fact_index fi
+            JOIN memory_items mi ON mi.id=fi.item_id
+            WHERE fi.fact_key IN ({in_clause})
+              AND {session_clause}
+              AND mi.layer='deep'
+              AND (mi.ttl_expires_at IS NULL OR mi.ttl_expires_at > ?)
+            ORDER BY CASE WHEN fi.session_key=? THEN 0 ELSE 1 END, fi.updated_at DESC, mi.updated_at DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+        out: List[sqlite3.Row] = []
+        seen = set()
+        for r in rows:
+            rid = str(r["id"])
+            if rid in seen:
+                continue
+            seen.add(rid)
+            out.append(r)
+        return out
+
+    def cleanup_stale_fact_index(self) -> int:
+        removed = self.conn.execute(
+            "DELETE FROM fact_index WHERE item_id NOT IN (SELECT id FROM memory_items)"
+        ).rowcount
+        self.conn.commit()
+        return int(removed)
+
+    def backfill_fact_index(self, layer: str = "deep", limit: int = 10000) -> int:
+        rows = self.conn.execute(
+            "SELECT id,session_key,layer,tags,updated_at FROM memory_items WHERE layer=? ORDER BY updated_at DESC LIMIT ?",
+            (layer, int(limit)),
+        ).fetchall()
+        synced = 0
+        for r in rows:
+            rid = str(r["id"])
+            s_key = str(r["session_key"])
+            lyr = str(r["layer"])
+            try:
+                tags = json.loads(str(r["tags"] or "{}"))
+            except Exception:
+                tags = {}
+            wrote = self._sync_fact_index_for_item(
+                item_id=rid,
+                session_key=s_key,
+                layer=lyr,
+                tags=tags if isinstance(tags, dict) else {},
+                updated_at=int(r["updated_at"]),
+            )
+            if wrote > 0:
+                synced += 1
+        self.conn.commit()
+        return synced
 
     def list_memory_items(self, layer: str, session_key: str, limit: int = 5000) -> List[sqlite3.Row]:
         now = now_ts()
@@ -970,12 +1128,14 @@ class MemqDB:
 
     def backfill_fact_keys(self, layer: str = "deep", limit: int = 5000) -> int:
         rows = self.conn.execute(
-            "SELECT id,summary,tags FROM memory_items WHERE layer=? ORDER BY updated_at DESC LIMIT ?",
+            "SELECT id,session_key,layer,summary,tags,updated_at FROM memory_items WHERE layer=? ORDER BY updated_at DESC LIMIT ?",
             (layer, int(limit)),
         ).fetchall()
         updated = 0
         for r in rows:
             rid = str(r["id"])
+            row_session_key = str(r["session_key"])
+            row_layer = str(r["layer"])
             summary = str(r["summary"] or "")
             try:
                 tags = json.loads(str(r["tags"] or "{}"))
@@ -1005,11 +1165,26 @@ class MemqDB:
             else:
                 merged = sorted([x for x in (cur | add) if x])
             if merged == sorted([x for x in cur if x]):
+                self._sync_fact_index_for_item(
+                    item_id=rid,
+                    session_key=row_session_key,
+                    layer=row_layer,
+                    tags=tags if isinstance(tags, dict) else {},
+                    updated_at=int(r["updated_at"]),
+                )
                 continue
             tags["fact_keys"] = merged
+            ts = now_ts()
             self.conn.execute(
                 "UPDATE memory_items SET tags=?, updated_at=? WHERE id=?",
-                (json.dumps(tags, ensure_ascii=False), now_ts(), rid),
+                (json.dumps(tags, ensure_ascii=False), ts, rid),
+            )
+            self._sync_fact_index_for_item(
+                item_id=rid,
+                session_key=row_session_key,
+                layer=row_layer,
+                tags=tags,
+                updated_at=ts,
             )
             updated += 1
         self.conn.commit()
