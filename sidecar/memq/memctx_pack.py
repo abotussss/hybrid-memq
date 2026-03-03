@@ -4,6 +4,7 @@ import json
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 import re
 import time
+from collections import defaultdict
 
 from .db import MemqDB
 from .fact_keys import infer_query_fact_keys
@@ -32,6 +33,198 @@ def fit_budget(lines: Sequence[str], budget: int) -> List[str]:
         out.append(ln)
         used += cost
     return out
+
+
+def _split_kv(line: str) -> Tuple[str, str]:
+    if "=" not in line:
+        return line.strip(), ""
+    k, v = line.split("=", 1)
+    return k.strip(), v.strip()
+
+
+def _line_group(key: str) -> str:
+    if key.startswith("wm.") or key in {"convsurf", "convdeep"}:
+        return "anchor"
+    if key == "p.snapshot" or re.fullmatch(r"p\d+", key):
+        return "profile"
+    if key.startswith("t."):
+        return "timeline"
+    if re.fullmatch(r"s\d+", key):
+        return "surface"
+    if re.fullmatch(r"(d|g)\d+", key):
+        return "deep"
+    if re.fullmatch(r"e\d+", key):
+        return "ephemeral"
+    if key.startswith("meta.") or key.startswith("memory.fact_"):
+        return "meta"
+    return "misc"
+
+
+def _pack_memctx_payload(
+    *,
+    base_lines: Sequence[str],
+    payload_lines: Sequence[str],
+    budget_tokens: int,
+    intent: Dict[str, float],
+    time_scoped: bool,
+    query_memory_overview: bool,
+) -> List[str]:
+    out: List[str] = [ln for ln in base_lines if ln.strip()]
+    used = sum(estimate_tokens(ln) for ln in out)
+    budget = max(8, int(budget_tokens))
+    remain = max(0, budget - used)
+    if remain <= 0 or not payload_lines:
+        return fit_budget(out, budget)
+
+    weights = {
+        "anchor": 0.55 + 0.28 * float(intent.get("state", 0.0)) + 0.24 * float(intent.get("overview", 0.0)),
+        "profile": 0.35 + 1.10 * float(intent.get("profile", 0.0)),
+        "timeline": 0.30 + 1.12 * float(intent.get("timeline", 0.0)),
+        "surface": 0.42 + 0.72 * float(intent.get("state", 0.0)) + 0.35 * float(intent.get("overview", 0.0)),
+        "deep": 0.50
+        + 0.95 * float(intent.get("fact_lookup", 0.0))
+        + 0.55 * float(intent.get("profile", 0.0))
+        + 0.30 * float(intent.get("overview", 0.0)),
+        "ephemeral": 0.12 + 0.25 * float(intent.get("state", 0.0)),
+        "meta": 0.15 + 0.80 * float(intent.get("meta", 0.0)),
+        "misc": 0.22,
+    }
+    if time_scoped:
+        weights["timeline"] *= 1.45
+        weights["anchor"] *= 0.78
+    if float(intent.get("profile", 0.0)) >= 0.45:
+        weights["profile"] *= 1.30
+    if float(intent.get("fact_lookup", 0.0)) >= 0.45:
+        weights["deep"] *= 1.25
+    if query_memory_overview:
+        weights["surface"] *= 1.18
+        weights["deep"] *= 1.18
+        weights["timeline"] *= 1.12
+
+    sum_w = sum(max(0.01, float(v)) for v in weights.values())
+    token_targets: Dict[str, int] = {
+        g: max(0, int(remain * (max(0.01, float(w)) / sum_w))) for g, w in weights.items()
+    }
+    if time_scoped:
+        token_targets["timeline"] = max(token_targets["timeline"], int(remain * 0.35))
+    if float(intent.get("profile", 0.0)) >= 0.55:
+        token_targets["profile"] = max(token_targets["profile"], int(remain * 0.24))
+    if float(intent.get("meta", 0.0)) >= 0.60:
+        token_targets["meta"] = max(token_targets["meta"], int(remain * 0.12))
+
+    candidates: List[Dict[str, Any]] = []
+    for idx, line in enumerate(payload_lines):
+        ln = (line or "").strip()
+        if not ln:
+            continue
+        key, value = _split_kv(ln)
+        if not key:
+            continue
+        group = _line_group(key)
+        cost = estimate_tokens(ln)
+        val_toks = tokenize_lexical(value)
+        utility = float(weights.get(group, 0.2))
+        if key in {"wm.surf", "p.snapshot", "t.recent"}:
+            utility += 0.20
+        if key.startswith("t.digest"):
+            utility += 0.35
+        elif key.startswith("t.ev"):
+            utility += 0.20
+        elif key.startswith("d"):
+            utility += 0.16
+        elif key.startswith("s"):
+            utility += 0.08
+        candidates.append(
+            {
+                "idx": idx,
+                "line": ln,
+                "key": key,
+                "group": group,
+                "cost": max(1, int(cost)),
+                "utility": max(0.05, utility),
+                "tokens": val_toks,
+            }
+        )
+
+    selected: List[Dict[str, Any]] = []
+    selected_ids: set[int] = set()
+    selected_token_sets: List[set[str]] = []
+    used_by_group = defaultdict(int)
+
+    def _can_fit(cost: int) -> bool:
+        nonlocal remain
+        return cost <= remain
+
+    def _select(c: Dict[str, Any]) -> bool:
+        nonlocal remain
+        if c["idx"] in selected_ids:
+            return False
+        if not _can_fit(int(c["cost"])):
+            return False
+        selected_ids.add(int(c["idx"]))
+        selected.append(c)
+        remain -= int(c["cost"])
+        used_by_group[str(c["group"])] += int(c["cost"])
+        if c["tokens"]:
+            selected_token_sets.append(set(c["tokens"]))
+        return True
+
+    must_keys = {"wm.surf", "p.snapshot", "t.recent"}
+    if time_scoped:
+        must_keys.add("t.range")
+    for c in sorted(candidates, key=lambda x: x["idx"]):
+        if c["key"] in must_keys:
+            _select(c)
+
+    while remain > 0:
+        best = None
+        best_score = -1.0
+        for c in candidates:
+            if c["idx"] in selected_ids:
+                continue
+            cost = int(c["cost"])
+            if cost > remain:
+                continue
+            group = str(c["group"])
+            target = max(1, int(token_targets.get(group, 0)))
+            scarcity = 1.15 if used_by_group[group] < target else 0.88
+            novelty = 1.0
+            tks = c["tokens"]
+            if tks and selected_token_sets:
+                max_j = 0.0
+                for prev in selected_token_sets:
+                    inter = len(tks & prev)
+                    union = max(1, len(tks | prev))
+                    max_j = max(max_j, float(inter) / float(union))
+                if max_j >= 0.88:
+                    novelty = 0.38
+                elif max_j >= 0.76:
+                    novelty = 0.62
+            score = (float(c["utility"]) / float(cost)) * scarcity * novelty
+            if score > best_score:
+                best = c
+                best_score = score
+        if best is None or best_score <= 0.0:
+            break
+        _select(best)
+
+    selected_groups = {str(c["group"]) for c in selected}
+    if not ({"surface", "deep", "timeline"} & selected_groups):
+        for pref_group in ("timeline", "deep", "surface"):
+            chosen = None
+            for c in candidates:
+                if c["idx"] in selected_ids or str(c["group"]) != pref_group:
+                    continue
+                if _can_fit(int(c["cost"])):
+                    chosen = c
+                    break
+            if chosen is not None:
+                _select(chosen)
+                break
+
+    selected.sort(key=lambda x: x["idx"])
+    out.extend([str(c["line"]) for c in selected])
+    return fit_budget(out, budget)
 
 
 def build_memrules(db: MemqDB, budget_tokens: int) -> str:
@@ -487,5 +680,14 @@ def build_memctx(
             if _lex_rel(summary) > 0.0:
                 _push_kv(lines, f"e{idx+1}", summary)
 
-    lines = fit_budget(lines, budget_tokens)
-    return "\n".join(lines)
+    base_lines = lines[:2]
+    payload_lines = lines[2:]
+    packed = _pack_memctx_payload(
+        base_lines=base_lines,
+        payload_lines=payload_lines,
+        budget_tokens=budget_tokens,
+        intent=intent,
+        time_scoped=time_scoped,
+        query_memory_overview=query_memory_overview,
+    )
+    return "\n".join(packed)

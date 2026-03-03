@@ -35,6 +35,7 @@ Each turn injects three bounded channels in fixed order:
 - Deep fact indexing (`fact_key`) to improve long-lag recall beyond recent-item limits.
 - Conversation pruning by token budget, archive of pruned history, and sidecar reconstruction summaries.
 - Episodic timeline pipeline: turn/action events -> idle daily digest -> compact `t.*` MEMCTX injection.
+- Utility-based MEMCTX packing under fixed budget (intent-weighted, redundancy-penalized, hierarchical fallback).
 - Idle sleep-style consolidation (decay, dedup, promotion, profile refresh, cleanup).
 - Quarantine for suspicious memory candidates (prompt-injection-like inputs).
 - Primary rule-based output audit + optional secondary LLM audit.
@@ -120,6 +121,7 @@ These are configured in:
 - query sidecar for `MEMRULES/MEMSTYLE/MEMCTX`
 - inject in fixed order: `MEMRULES -> MEMSTYLE -> MEMCTX`
 - for time-scoped prompts (`昨日/先週/recent`), timeline route is prioritized and injects `t.range/t.digest/t.ev*`
+- MEMCTX payload is packed by utility-per-token (intent-weighted with redundancy penalty), not static first-N ordering
 
 2. `agent_end`
 - ingest current turn into sidecar
@@ -202,6 +204,7 @@ Hybrid MEMQ は、OpenClaw向けの記憶プラグインです。
 - `fact_key`索引による長期想起強化（古い重要記憶の取りこぼし抑制）。
 - 会話のトークン予算剪定、剪定履歴アーカイブ、要約再構成。
 - エピソード時系列パイプライン（turn/actionイベント -> アイドル時の日次ダイジェスト -> `t.*`としてMEMCTX注入）。
+- 固定予算下での効用ベースMEMCTXパッキング（意図重み + 冗長性ペナルティ + 階層フォールバック）。
 - アイドル時の睡眠整理（減衰、重複統合、昇格、プロファイル更新、クリーンアップ）。
 - 汚染疑い入力の隔離（quarantine）。
 - 一次監査（ルールベース）+ 任意の二次LLM監査。
@@ -287,6 +290,7 @@ curl -sS http://127.0.0.1:7781/health
 - sidecarから`MEMRULES/MEMSTYLE/MEMCTX`を取得
 - `MEMRULES -> MEMSTYLE -> MEMCTX`の順で注入
 - `昨日/先週/recent`などの時間表現は時系列ルートを優先し、`t.range/t.digest/t.ev*`を注入
+- MEMCTXは固定順序ではなく、トークン効率（utility/token）と冗長性抑制で詰める
 
 2. `agent_end`
 - 現在ターンをsidecarへingest

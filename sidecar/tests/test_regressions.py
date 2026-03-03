@@ -351,6 +351,53 @@ class RegressionGuardsTest(unittest.TestCase):
         self.assertIn("t.range=", ctx)
         self.assertTrue(("t.digest=" in ctx) or ("t.ev1=" in ctx))
 
+    def test_memctx_time_scoped_keeps_timeline_under_tight_budget(self) -> None:
+        now = int(time.time())
+        y = now - 86400
+        y_day = day_key_from_ts(y)
+        self.db.upsert_conv_summary(
+            "s1",
+            "surface_only",
+            "長い会話要約 " * 40,
+        )
+        self.db.upsert_conv_summary(
+            "s1",
+            "deep",
+            "長期要約 " * 40,
+        )
+        self.db.upsert_style("callUser", "ヒロ")
+        self.db.upsert_style("firstPerson", "僕")
+        self.db.add_event(
+            session_key="s1",
+            ts=y,
+            actor="assistant",
+            kind="progress",
+            summary="昨日はMEMQの予算制御と時系列想起を改善した",
+            tags={"source": "test"},
+            importance=0.9,
+            ttl_expires_at=None,
+        )
+        self.db.upsert_daily_digest(
+            day_key=y_day,
+            scope="session",
+            session_key="s1",
+            compact_text="- [assistant/progress] 昨日はMEMQの予算制御と時系列想起を改善した",
+            updated_at=now,
+        )
+        ctx = build_memctx(
+            db=self.db,
+            session_key="s1",
+            prompt="昨日何した？",
+            surface=[],
+            deep=[],
+            budget_tokens=120,
+        )
+        self.assertIn("t.range=", ctx)
+        self.assertTrue(("t.digest=" in ctx) or ("t.ev1=" in ctx))
+        # utility pack keeps at least one continuity anchor but does not let it
+        # starve explicit timeline recall.
+        self.assertIn("wm.surf=", ctx)
+
     def test_ingest_turn_writes_action_events_from_metadata(self) -> None:
         now = int(time.time())
         ingest_turn(
