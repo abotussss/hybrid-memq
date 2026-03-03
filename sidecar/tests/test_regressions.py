@@ -11,7 +11,7 @@ from sidecar.memq.ingest_md import import_markdown_memory
 from sidecar.memq.ingest import _sanitize_turn_text, ingest_turn
 from sidecar.memq.intent import infer_intent
 from sidecar.memq.idle_consolidation import run_idle_consolidation
-from sidecar.memq.memctx_pack import build_memctx
+from sidecar.memq.memctx_pack import build_memctx, build_memrules, build_memstyle
 from sidecar.memq.retrieval import retrieve_candidates
 from sidecar.memq.retrieval_deep import search_deep
 from sidecar.memq.retrieval_deep import NOISE_SUMMARY_RE as DEEP_NOISE_RE
@@ -92,6 +92,25 @@ class RegressionGuardsTest(unittest.TestCase):
             "at least one secondary anchor should be present",
         )
 
+    def test_memctx_is_compact_and_fragment_free(self) -> None:
+        self.db.upsert_conv_summary("s1", "surface_only", "task: fix parser and validate budget")
+        self.db.upsert_conv_summary("s1", "deep", 'thinkingSignature=abc {"k":"v"')
+        out = build_memctx(
+            db=self.db,
+            session_key="s1",
+            prompt="最近の要点まとめて",
+            surface=[],
+            deep=[],
+            budget_tokens=120,
+        )
+        lines = [ln for ln in out.splitlines() if ln.strip()]
+        payload = [ln for ln in lines if not ln.startswith("budget_tokens=")]
+        self.assertGreaterEqual(len(payload), 3)
+        self.assertLessEqual(len(payload), 6)
+        self.assertNotIn("thinkingSignature", out)
+        self.assertNotIn('"k":"v"', out)
+        self.assertNotIn("q=", out)
+
     def test_intent_router_profile_timeline(self) -> None:
         i1 = infer_intent("君は誰？")
         self.assertGreaterEqual(float(i1.get("profile", 0.0)), 0.8)
@@ -124,6 +143,60 @@ class RegressionGuardsTest(unittest.TestCase):
         self.assertEqual([], surface)
         self.assertEqual([], deep)
         self.assertFalse(bool(meta.get("deepCalled")))
+
+    def test_memrules_memstyle_compact_and_non_overlapping(self) -> None:
+        self.db.upsert_rule("r_lang", 90, True, "language", "language.allowed=ja,en")
+        self.db.upsert_rule("r_sec", 90, True, "security", "security.never_output_secrets=true")
+        # style-like rule should be dropped from MEMRULES
+        self.db.upsert_rule("r_bad", 90, True, "procedure", "persona=<MEMRULES v1>bad</MEMRULES>")
+        self.db.upsert_style("firstPerson", "僕")
+        self.db.upsert_style("callUser", "ヒロ")
+        self.db.upsert_style("persona", "<MEMRULES v1>bad</MEMRULES> calm helper")
+        self.db.upsert_style("tone", "polite")
+        self.db.upsert_style("verbosity", "low")
+
+        rules = build_memrules(self.db, 80)
+        style = build_memstyle(self.db, 120)
+        r_lines = [ln for ln in rules.splitlines() if ln.strip()]
+        s_lines = [ln for ln in style.splitlines() if ln.strip()]
+        self.assertLessEqual(len(r_lines), 7)
+        self.assertLessEqual(len(s_lines), 6)
+        self.assertNotIn("persona=", rules)
+        self.assertIn("firstPerson=僕", style)
+        self.assertIn("callUser=ヒロ", style)
+        self.assertNotIn("<MEMRULES", style)
+
+    def test_explicit_memory_note_is_not_collapsed_to_single_slot(self) -> None:
+        now = int(time.time())
+        ingest_turn(
+            db=self.db,
+            session_key="s1",
+            user_text="これを覚えて。来週は登壇準備をする。",
+            assistant_text="了解。",
+            ts=now,
+            dim=64,
+            bits_per_dim=8,
+        )
+        ingest_turn(
+            db=self.db,
+            session_key="s1",
+            user_text="これも覚えて。再来週は資料レビューをする。",
+            assistant_text="了解。",
+            ts=now + 1,
+            dim=64,
+            bits_per_dim=8,
+        )
+        rows = self.db.list_memory_items("deep", "s1", limit=200)
+        note_rows = 0
+        for r in rows:
+            try:
+                tags = json.loads(str(r["tags"] or "{}"))
+            except Exception:
+                tags = {}
+            fact = tags.get("fact") if isinstance(tags, dict) else {}
+            if isinstance(fact, dict) and str(fact.get("relation") or "") == "memory.note":
+                note_rows += 1
+        self.assertGreaterEqual(note_rows, 2)
 
     def test_cjk_token_overlap_handles_paraphrase(self) -> None:
         q = tokenize_lexical("家族構成は？")

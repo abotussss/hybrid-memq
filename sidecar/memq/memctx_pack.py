@@ -229,44 +229,195 @@ def _pack_memctx_payload(
     return fit_budget(out, budget)
 
 
+def _looks_fragmented_payload(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return True
+    low = t.lower()
+    if "thinkingsignature" in low:
+        return True
+    if re.search(r"\b(call_id|tool_call_id|function_call_output|tool_result)\b", low):
+        return True
+    if re.search(r'"\w+"\s*:\s*', t):
+        # likely raw JSON/object fragment; keep only short balanced snippets
+        if t.count("{") != t.count("}") or t.count("[") != t.count("]"):
+            return True
+        if len(t) > 120:
+            return True
+    if re.search(r"[:,]\s*$", t):
+        return True
+    return False
+
+
+def _compact_ctx_value(value: str, limit: int = 160) -> str:
+    v = strip_memq_blocks(value or "")
+    v = re.sub(r"```[^`]*```", " ", v)
+    v = re.sub(r"\bthinkingSignature\b[^,\s]*", " ", v, flags=re.IGNORECASE)
+    v = re.sub(r"\s+", " ", v).strip()
+    return v[:limit]
+
+
+def _finalize_memctx_lines(
+    *,
+    packed_lines: Sequence[str],
+    budget_tokens: int,
+    intent: Dict[str, float],
+    time_scoped: bool,
+    q_fact_keys: set[str],
+) -> List[str]:
+    base = [ln for ln in packed_lines if ln.strip()]
+    if not base:
+        return []
+    budget_line = base[0] if base[0].startswith("budget_tokens=") else f"budget_tokens={budget_tokens}"
+
+    kv_map: Dict[str, str] = {}
+    order: List[str] = []
+    for ln in base[1:]:
+        if "=" not in ln:
+            continue
+        k, v = _split_kv(ln)
+        if not k:
+            continue
+        if k.startswith("meta.") or k.startswith("memory.fact_"):
+            continue
+        if k in {"wm.deep"}:
+            continue
+        if k == "p.snapshot" and float(intent.get("profile", 0.0)) < 0.65:
+            continue
+        vv = _compact_ctx_value(v, 180)
+        if not vv or _looks_fragmented_payload(vv):
+            continue
+        if k not in kv_map:
+            order.append(k)
+        kv_map[k] = vv
+
+    if time_scoped:
+        priority = ["t.range", "t.digest", "t.ev1", "t.ev2", "wm.surf", "t.recent", "d1", "g1", "s1"]
+    elif float(intent.get("profile", 0.0)) >= 0.45 or bool(q_fact_keys):
+        priority = ["d1", "g1", "s1", "p.snapshot", "wm.surf", "t.recent", "t.digest", "t.ev1"]
+    else:
+        priority = ["wm.surf", "s1", "d1", "t.recent", "t.digest", "t.ev1", "g1"]
+
+    chosen: List[str] = []
+    picked = set()
+    for k in priority:
+        v = kv_map.get(k)
+        if not v:
+            continue
+        chosen.append(f"{k}={v}")
+        picked.add(k)
+        if len(chosen) >= 6:
+            break
+    if len(chosen) < 3:
+        for k in order:
+            if k in picked:
+                continue
+            v = kv_map.get(k)
+            if not v:
+                continue
+            chosen.append(f"{k}={v}")
+            picked.add(k)
+            if len(chosen) >= 3:
+                break
+    if len(chosen) < 3:
+        fallback_defaults = [
+            "wm.surf=none",
+            "t.recent=none",
+            "ctx.task=none",
+        ]
+        for ln in fallback_defaults:
+            k, _ = _split_kv(ln)
+            if k in picked:
+                continue
+            chosen.append(ln)
+            picked.add(k)
+            if len(chosen) >= 3:
+                break
+    if len(chosen) > 6:
+        chosen = chosen[:6]
+
+    return fit_budget([budget_line, *chosen], budget_tokens)
+
+
 def build_memrules(db: MemqDB, budget_tokens: int) -> str:
     lines: List[str] = [f"budget_tokens={budget_tokens}"]
-    # Reserve precedence hints early so they survive budget trimming.
-    style = db.get_style_profile()
-    if style.get("persona"):
-        lines.append("identity.precedence=memstyle")
-        lines.append("identity.no_generic_assistant_label=true")
+    fixed = [
+        "identity.precedence=memstyle",
+        "identity.no_generic_assistant_label=true",
+        "security.never_output_secrets=true",
+    ]
+    allowed_prefixes = ("language.", "security.", "procedure.", "compliance.", "output.")
+    style_keys = {
+        "tone",
+        "persona",
+        "verbosity",
+        "firstPerson",
+        "callUser",
+        "prefix",
+        "speakingStyle",
+        "avoid",
+    }
 
-    rules = db.list_rules()
-    for row in rules:
-        body = str(row["body"])
-        lines.append(body)
+    selected_by_key: Dict[str, str] = {}
+    for row in db.list_rules():
+        body = _compact_ctx_value(str(row["body"] or ""), 220)
+        if not body or _looks_fragmented_payload(body):
+            continue
+        if "=" not in body:
+            continue
+        key, value = _split_kv(body)
+        if not key or not value:
+            continue
+        low_key = key.lower()
+        if low_key in {k.lower() for k in style_keys} or low_key.startswith("style."):
+            continue
+        if not low_key.startswith(allowed_prefixes):
+            continue
+        if low_key not in selected_by_key:
+            selected_by_key[low_key] = f"{key}={value}"
 
-    # derive language allowlist if rule missing
-    has_lang = any(x.startswith("language.allowed=") for x in lines)
-    if not has_lang:
+    if "language.allowed" not in selected_by_key:
         langs = extract_allowed_languages_from_rules(db)
-        lines.append(f"language.allowed={','.join(langs)}")
+        selected_by_key["language.allowed"] = f"language.allowed={','.join(langs)}"
 
-    # de-duplicate while preserving order
+    payload: List[str] = []
     seen = set()
-    deduped: List[str] = []
-    for ln in lines:
-        key = ln.strip()
-        if not key:
+    for ln in [*fixed, *selected_by_key.values()]:
+        if not ln or ln in seen:
             continue
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(key)
+        seen.add(ln)
+        payload.append(ln)
+        if len(payload) >= 6:  # target: 5-7 lines incl. budget
+            break
 
-    lines = fit_budget(deduped, budget_tokens)
+    lines = fit_budget([lines[0], *payload], budget_tokens)
     return "\n".join(lines)
 
 
 def build_memstyle(db: MemqDB, budget_tokens: int) -> str:
     lines = [f"budget_tokens={budget_tokens}"]
-    lines.extend(style_profile_lines(db))
+    style_lines = style_profile_lines(db)
+    rule_has_avoid = any(str(r["body"] or "").startswith("procedure.avoid_extra_suggestions=") for r in db.list_rules())
+    selected: List[str] = []
+    seen_keys = set()
+    for ln in style_lines:
+        if "=" not in ln:
+            continue
+        k, v = _split_kv(ln)
+        if not k or not v:
+            continue
+        if rule_has_avoid and k == "avoid":
+            continue
+        if k in seen_keys:
+            continue
+        vv = _compact_ctx_value(v, 120)
+        if not vv or _looks_fragmented_payload(vv):
+            continue
+        selected.append(f"{k}={vv}")
+        seen_keys.add(k)
+        if len(selected) >= 5:  # target: around 5 lines
+            break
+    lines.extend(selected)
     lines = fit_budget(lines, budget_tokens)
     return "\n".join(lines)
 
@@ -705,4 +856,11 @@ def build_memctx(
         time_scoped=time_scoped,
         query_memory_overview=query_memory_overview,
     )
-    return "\n".join(packed)
+    finalized = _finalize_memctx_lines(
+        packed_lines=packed,
+        budget_tokens=budget_tokens,
+        intent=intent,
+        time_scoped=time_scoped,
+        q_fact_keys=q_fact_keys,
+    )
+    return "\n".join(finalized)

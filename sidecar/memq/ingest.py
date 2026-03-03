@@ -5,6 +5,7 @@ import re
 from typing import Any, Dict, List, Tuple
 
 from .db import MemqDB
+from .fact_keys import infer_text_fact_keys
 from .rules import apply_rule_updates, extract_preference_events, extract_rule_updates
 from .style import apply_style_updates, extract_style_updates
 from .text_sanitize import strip_memq_blocks
@@ -699,11 +700,15 @@ def ingest_turn(
         if structured_written == 0 and explicit_memory_signal and not structured_facts:
             deep_text = _deep_candidate(user_text, assistant_text)
             if deep_text:
+                note_keys = infer_text_fact_keys(deep_text)
+                if not note_keys:
+                    note_keys = ["memory.note.generic"]
+                primary_note_key = str(note_keys[0])
                 note_fact = {
                     "subject": "user",
                     "relation": "memory.note",
                     "value": deep_text[:120],
-                    "fact_key": "memory.note",
+                    "fact_key": primary_note_key,
                     "confidence": 0.62,
                     "source": "user_msg",
                     "stable": True,
@@ -726,7 +731,7 @@ def ingest_turn(
                     tags={
                         "kind": "structured_fact",
                         "ts": ts,
-                        "fact_keys": ["memory.note"],
+                        "fact_keys": sorted(list(set(["memory.note", *note_keys]))),
                         "fact": note_fact,
                     },
                     emb_f16=None,
@@ -735,7 +740,8 @@ def ingest_turn(
                     ttl_expires_at=note_ttl,
                     source="turn",
                 )
-                wrote["deep"] += db.expire_conflicting_fact_keys("deep", session_key, ["memory.note"], deep_id)
+                if primary_note_key and not primary_note_key.startswith("memory.note"):
+                    wrote["deep"] += db.expire_conflicting_fact_keys("deep", session_key, [primary_note_key], deep_id)
                 wrote["deep"] += 1
 
                 # Mirror selective deep facts to global so memory survives session-key churn.
@@ -746,18 +752,24 @@ def ingest_turn(
                         text=deep_text,
                         summary=deep_text[:220],
                         importance=0.78,
-                        tags={"kind": "durable_global_fact", "ts": ts, "fact_keys": ["memory.note"], "fact": note_fact},
+                        tags={
+                            "kind": "durable_global_fact",
+                            "ts": ts,
+                            "fact_keys": sorted(list(set(["memory.note", *note_keys]))),
+                            "fact": note_fact,
+                        },
                         emb_f16=None,
                         emb_q=None,
                         emb_dim=0,
                         source="turn",
                     )
-                    wrote["deep"] += db.expire_conflicting_fact_keys(
-                        "deep",
-                        "global",
-                        ["memory.note"],
-                        gid,
-                    )
+                    if primary_note_key and not primary_note_key.startswith("memory.note"):
+                        wrote["deep"] += db.expire_conflicting_fact_keys(
+                            "deep",
+                            "global",
+                            [primary_note_key],
+                            gid,
+                        )
                     wrote["deep"] += 1
 
     # Timeline/episodic events for time-scoped recall ("yesterday", "recently", etc).

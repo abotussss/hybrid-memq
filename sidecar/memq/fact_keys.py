@@ -31,6 +31,15 @@ _PATTERNS: Sequence[Tuple[re.Pattern[str], Sequence[str]]] = [
     (re.compile(r"(検索|search).*(brave|google|bing|duckduckgo)", re.IGNORECASE), ("pref.search.engine",)),
     (re.compile(r"(ルール|rule|policy|方針|制約|constraint)", re.IGNORECASE), ("memory.policy",)),
     (re.compile(r"(10分前|直近|recent|さっき|minutes? ago)", re.IGNORECASE), ("memory.recent",)),
+    (
+        re.compile(r"(覚えてる|記憶|これまで|要点|まとめ|recap|summary|what do you remember|memory)", re.IGNORECASE),
+        ("memory.recent", "memory.note"),
+    ),
+    (
+        re.compile(r"(タスク|task|todo|進捗|status|project|案件|計画|plan|deadline|期限)", re.IGNORECASE),
+        ("project.task", "project.status", "memory.note"),
+    ),
+    (re.compile(r"(趣味|hobby|好き|好み|preference)", re.IGNORECASE), ("profile.preference",)),
 ]
 
 

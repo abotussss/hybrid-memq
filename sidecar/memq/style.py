@@ -4,6 +4,7 @@ import re
 from typing import Dict, List, Tuple
 
 from .db import MemqDB
+from .text_sanitize import strip_memq_blocks
 
 
 STYLE_PATTERNS: List[Tuple[re.Pattern[str], Tuple[str, str]]] = [
@@ -16,6 +17,19 @@ STYLE_PATTERNS: List[Tuple[re.Pattern[str], Tuple[str, str]]] = [
 
 def _compact(text: str, limit: int = 260) -> str:
     return " ".join((text or "").split())[:limit]
+
+
+def _clean_style_value(raw: str, limit: int = 120) -> str:
+    v = strip_memq_blocks(raw or "")
+    v = re.sub(r"```[^`]*```", " ", v)
+    v = re.sub(r"\bthinkingSignature\b[^,\s]*", " ", v, flags=re.IGNORECASE)
+    v = re.sub(r"\{[^{}]{0,240}\}\s*$", " ", v)
+    v = re.sub(r"\s+", " ", v).strip()
+    if re.search(r"(<MEM(?:RULES|STYLE|CTX)\b|\[MEM(?:RULES|STYLE|CTX)\b)", v, re.IGNORECASE):
+        return ""
+    if re.search(r'"\w+"\s*:\s*', v) and (v.count("{") != v.count("}") or len(v) > 140):
+        return ""
+    return v[:limit]
 
 
 def _extract_quoted(text: str, anchor_pat: str, max_len: int = 24) -> str | None:
@@ -38,7 +52,7 @@ def _normalize_call_user(raw: str) -> str:
 
 
 def _normalize_persona(raw: str) -> str:
-    v = " ".join((raw or "").split()).strip()
+    v = _clean_style_value(raw, 120)
     if not v:
         return ""
     return v[:120]
@@ -130,21 +144,17 @@ def apply_style_updates(db: MemqDB, updates: Dict[str, str]) -> int:
 
 def style_profile_lines(db: MemqDB) -> List[str]:
     prof = db.get_style_profile()
+    for k in list(prof.keys()):
+        prof[k] = _clean_style_value(str(prof.get(k) or ""), 160)
     persona = _normalize_persona(prof.get("persona", ""))
     if persona:
         prof["persona"] = persona
 
-    order = ["tone", "verbosity", "firstPerson", "callUser", "prefix", "persona", "speakingStyle", "avoid"]
+    # Keep style compact and stable: fixed identity first, then expression.
+    order = ["firstPerson", "callUser", "tone", "persona", "speakingStyle", "verbosity", "prefix", "avoid"]
     lines: List[str] = []
     for key in order:
         v = prof.get(key)
         if v:
             lines.append(f"{key}={v}")
-    # Strong-style hints for model consistency in long sessions.
-    if prof.get("firstPerson"):
-        lines.append(f"mustFirstPerson={prof['firstPerson']}")
-    if prof.get("callUser"):
-        lines.append(f"mustCallUser={prof['callUser']}")
-    if prof.get("prefix"):
-        lines.append(f"mustPrefix={prof['prefix']}")
     return lines

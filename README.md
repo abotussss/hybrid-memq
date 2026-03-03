@@ -105,6 +105,12 @@ curl -sS http://127.0.0.1:7781/health
 - `TOTAL RESERVE` (system/tools margin): `1800`
 - `CAP SAFETY RATIO`: `0.72`
 
+## Channel Shape Targets
+
+- `MEMRULES`: `5-7` lines total (strict constraints only; no style/persona lines)
+- `MEMSTYLE`: around `5` payload lines (firstPerson/callUser/tone/persona/speakingStyle or verbosity)
+- `MEMCTX`: `3-6` payload lines (task/timeline/fact recall only, no JSON/tool fragments)
+
 These are configured in:
 
 - `plugin/openclaw-memory-memq/src/config/schema.ts`
@@ -275,6 +281,12 @@ curl -sS http://127.0.0.1:7781/health
 - `TOTAL INPUT CAP`（推定）: `4200`
 - `TOTAL RESERVE`（system/tool余白）: `1800`
 - `CAP SAFETY RATIO`: `0.72`
+
+## チャネル行数目安
+
+- `MEMRULES`: 全体 `5-7` 行（厳格制約のみ。style/personaは含めない）
+- `MEMSTYLE`: ペイロード約 `5` 行（一人称/呼称/tone/persona/speakingStyle または verbosity）
+- `MEMCTX`: ペイロード `3-6` 行（タスク/時系列/必要factのみ。JSON断片やtool断片を含めない）
 
 定義場所:
 
