@@ -41,7 +41,13 @@ function parseKvLines(memstyle: string): Map<string, string> {
   return out;
 }
 
-function enforceIdentityStyle(text: string, memstyle: string): { text: string; changed: boolean } {
+function isIdentityQuestion(text: string): boolean {
+  const s = String(text || "");
+  if (!s.trim()) return false;
+  return /(?:君は誰|あなたは誰|何者|who are you|what are you|introduce yourself)/i.test(s);
+}
+
+function enforceIdentityStyle(text: string, memstyle: string, lastUserPrompt: string): { text: string; changed: boolean } {
   let out = String(text || "");
   if (!out.trim() || !memstyle.trim()) return { text: out, changed: false };
 
@@ -64,6 +70,8 @@ function enforceIdentityStyle(text: string, memstyle: string): { text: string; c
     /I\s*am[^.\n]{0,120}\b(?:assistant|ai assistant)\b[^.\n]{0,80}[.!?]?/giu;
   const hadClaim = out.search(jpAssistantClaim) >= 0 || out.search(enAssistantClaim) >= 0;
   if (!hadClaim) return { text: out, changed };
+  // Do not strip self-introduction when user explicitly asks identity.
+  if (isIdentityQuestion(lastUserPrompt)) return { text: out, changed };
 
   out = out.replace(jpAssistantClaim, "").replace(enAssistantClaim, "").trim();
   out = out
@@ -117,8 +125,9 @@ export function createMessageSending(api: any, sidecar: SidecarClient, rt: Runti
     }
 
     const memstyle = String(rt.lastMemstyleBySession.get(sessionKey) || "");
+    const lastUserPrompt = String(rt.lastUserBySession.get(sessionKey) || rt.lastPromptBySession.get(sessionKey) || "");
     if (memstyle) {
-      const fixed = enforceIdentityStyle(String(t.obj[t.key] || ""), memstyle);
+      const fixed = enforceIdentityStyle(String(t.obj[t.key] || ""), memstyle, lastUserPrompt);
       if (fixed.changed) {
         t.obj[t.key] = fixed.text;
         logInfo(api, `[memq-v2] message_sending session=${sessionKey} style_identity_repair=1`);

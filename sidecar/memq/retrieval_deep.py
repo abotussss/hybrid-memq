@@ -292,11 +292,12 @@ def search_deep(db: MemqDB, session_key: str, query_text: str, top_k: int, top_m
                 continue
         if q_fact_keys and tag_overlap == 0:
             # For factual prompts, require tag-backed key match.
-            if not (is_structured_kind and key_overlap > 0):
+            if not ((is_structured_kind and key_overlap > 0) or (kind == "md_import" and key_overlap > 0)):
                 continue
         if q_fact_keys and key_overlap > 0 and tag_overlap == 0 and not is_structured_kind:
             # Heuristic text matches are weak evidence on factual prompts.
-            if lex < 0.20:
+            # md_import rows may not have historical fact tags; keep them if semantic key overlap exists.
+            if kind != "md_import" and lex < 0.20:
                 continue
         if q_fact_keys and key_overlap == 0 and source == "conv_summarize" and lex < 0.25:
             continue

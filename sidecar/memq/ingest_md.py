@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Dict, List
 
 from .db import MemqDB
+from .fact_keys import infer_text_fact_keys
 
 
 def _read_text(path: Path) -> str:
@@ -35,13 +36,14 @@ def import_markdown_memory(db: MemqDB, workspace_root: Path, dim: int, bits_per_
         for ch in chunks[:200]:
             summary = " ".join(ch.split())[:220]
             layer = "deep" if path.name in {"MEMORY.md", "IDENTITY.md", "SOUL.md", "HEARTBEAT.md"} else "surface"
+            fact_keys = infer_text_fact_keys(ch if layer == "deep" else summary)
             db.add_memory_item(
                 session_key=session_key,
                 layer=layer,
                 text=ch[:1200],
                 summary=summary,
                 importance=0.68 if layer == "deep" else 0.55,
-                tags={"source": str(path.name), "kind": "md_import"},
+                tags={"source": str(path.name), "kind": "md_import", "fact_keys": fact_keys},
                 emb_f16=None,
                 emb_q=None,
                 emb_dim=0,

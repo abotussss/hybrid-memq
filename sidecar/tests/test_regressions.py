@@ -6,9 +6,11 @@ import unittest
 from pathlib import Path
 
 from sidecar.memq.db import MemqDB
+from sidecar.memq.ingest_md import import_markdown_memory
 from sidecar.memq.ingest import _sanitize_turn_text, ingest_turn
 from sidecar.memq.idle_consolidation import run_idle_consolidation
 from sidecar.memq.memctx_pack import build_memctx
+from sidecar.memq.retrieval_deep import search_deep
 from sidecar.memq.retrieval_deep import NOISE_SUMMARY_RE as DEEP_NOISE_RE
 from sidecar.memq.retrieval_surface import NOISE_SUMMARY_RE as SURFACE_NOISE_RE
 from sidecar.memq.timeline import day_key_from_ts, detect_timeline_range
@@ -310,6 +312,36 @@ class RegressionGuardsTest(unittest.TestCase):
         ).fetchall()
         joined = " ".join(str(r["summary"]) for r in ev).lower()
         self.assertNotIn("sk-abc123", joined)
+
+    def test_markdown_import_attaches_fact_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as wd:
+            root = Path(wd)
+            (root / "IDENTITY.md").write_text("家族: 妻はミナ。ペットはタロ。", encoding="utf-8")
+            wrote = import_markdown_memory(self.db, root, dim=64, bits_per_dim=8)
+            self.assertGreaterEqual(int(wrote.get("deep", 0)), 1)
+            rows = self.db.list_memory_items("deep", "global", limit=20)
+            self.assertGreaterEqual(len(rows), 1)
+            tags = str(rows[0]["tags"] or "")
+            self.assertIn("fact_keys", tags)
+            self.assertTrue(("profile.family" in tags) or ("profile.family.spouse" in tags))
+
+    def test_deep_retrieval_keeps_md_import_with_key_overlap(self) -> None:
+        # Simulate legacy/import row without fact_keys tags.
+        self.db.add_memory_item(
+            session_key="global",
+            layer="deep",
+            text="妻はミナです",
+            summary="妻はミナです",
+            importance=0.72,
+            tags={"kind": "md_import"},
+            emb_f16=None,
+            emb_q=None,
+            emb_dim=0,
+            source="md_import",
+        )
+        out = search_deep(self.db, "s1", "家族構成は？", top_k=5)
+        self.assertGreaterEqual(len(out), 1)
+        self.assertTrue(any("妻はミナです" in str(x.get("summary", "")) for x in out))
 
     def test_idle_consolidation_updates_daily_digest(self) -> None:
         now = int(time.time())
