@@ -14,11 +14,12 @@
       "memq.budgets.memctxTokens": { "type": "number", "default": 120 },
       "memq.budgets.rulesTokens": { "type": "number", "default": 80 },
       "memq.budgets.styleTokens": { "type": "number", "default": 120 },
-      "memq.total.maxInputTokens": { "type": "number", "default": 5200 },
-      "memq.total.reserveTokens": { "type": "number", "default": 1100 },
+      "memq.total.maxInputTokens": { "type": "number", "default": 4200 },
+      "memq.total.reserveTokens": { "type": "number", "default": 1800 },
+      "memq.total.capSafetyRatio": { "type": "number", "default": 0.72 },
 
-      "memq.recent.maxTokens": { "type": "number", "default": 5000 },
-      "memq.recent.minKeepMessages": { "type": "number", "default": 6 },
+      "memq.recent.maxTokens": { "type": "number", "default": 2600 },
+      "memq.recent.minKeepMessages": { "type": "number", "default": 4 },
 
       "memq.retrieval.topK": { "type": "number", "default": 5 },
       "memq.retrieval.surfaceFirst": { "type": "boolean", "default": true },

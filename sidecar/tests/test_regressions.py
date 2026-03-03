@@ -17,7 +17,7 @@ from sidecar.memq.retrieval_deep import search_deep
 from sidecar.memq.retrieval_deep import NOISE_SUMMARY_RE as DEEP_NOISE_RE
 from sidecar.memq.retrieval_surface import NOISE_SUMMARY_RE as SURFACE_NOISE_RE
 from sidecar.memq.fact_keys import infer_query_fact_keys
-from sidecar.memq.rules import extract_preference_events, refresh_preference_profiles
+from sidecar.memq.rules import extract_allowed_languages_from_rules, extract_preference_events, refresh_preference_profiles
 from sidecar.memq.style import sanitize_style_profile
 from sidecar.memq.structured_facts import plausible_fact_value
 from sidecar.memq.timeline import day_key_from_ts, detect_timeline_range
@@ -412,6 +412,45 @@ class RegressionGuardsTest(unittest.TestCase):
             self.assertGreaterEqual(len(base), 1)
         else:
             self.assertGreaterEqual(len(rows), 1)
+
+    def test_memory_fts_japanese_ngram_recall(self) -> None:
+        self.db.add_memory_item(
+            session_key="s1",
+            layer="deep",
+            text="昨日は設定ファイルを整理してテストを実行",
+            summary="昨日は設定ファイルを整理してテストを実行",
+            importance=0.8,
+            tags={"kind": "structured_fact", "fact_keys": ["project.progress"]},
+            emb_f16=None,
+            emb_q=None,
+            emb_dim=0,
+            source="turn",
+        )
+        rows = self.db.search_memory_fts(
+            layer="deep",
+            session_key="s1",
+            match_query='"昨日" OR "設定" OR "テスト"',
+            limit=20,
+            include_global=True,
+        )
+        if len(rows) == 0:
+            # sqlite build without FTS5 support: fallback path is list/search by recency.
+            base = self.db.list_memory_items("deep", "s1", limit=20)
+            self.assertGreaterEqual(len(base), 1)
+        else:
+            hit = " ".join(str(rows[0]["summary"]).split())
+            self.assertIn("昨日", hit)
+
+    def test_allowed_languages_default_ja_en(self) -> None:
+        langs = extract_allowed_languages_from_rules(self.db)
+        self.assertIn("ja", langs)
+        self.assertIn("en", langs)
+
+    def test_allowed_languages_respects_primary_preference(self) -> None:
+        self.db.upsert_preference_profile("language.primary", "zh", 0.9)
+        langs = extract_allowed_languages_from_rules(self.db)
+        self.assertEqual("zh", langs[0])
+        self.assertIn("en", langs)
 
     def test_profile_snapshot_has_style_and_fact(self) -> None:
         self.db.upsert_style("callUser", "ヒロ")

@@ -3,7 +3,7 @@
     "total_cases": 8,
     "success_rate": 1.0,
     "empty_material_rate": 0.0,
-    "avg_memctx_tokens": 57.25,
+    "avg_memctx_tokens": 55.375,
     "by_category": {
       "fact": {
         "n": 1,
@@ -21,7 +21,7 @@
         "n": 1,
         "success_rate": 1.0,
         "empty_material_rate": 0.0,
-        "avg_memctx_tokens": 87.0
+        "avg_memctx_tokens": 76.0
       },
       "profile": {
         "n": 2,
@@ -39,7 +39,7 @@
         "n": 2,
         "success_rate": 1.0,
         "empty_material_rate": 0.0,
-        "avg_memctx_tokens": 53.5
+        "avg_memctx_tokens": 51.5
       }
     }
   },
@@ -59,7 +59,7 @@
       "success": true,
       "empty_material": false,
       "memctx_tokens": 49,
-      "surface_count": 5,
+      "surface_count": 1,
       "deep_count": 4
     },
     {
@@ -77,7 +77,7 @@
       "success": true,
       "empty_material": false,
       "memctx_tokens": 45,
-      "surface_count": 5,
+      "surface_count": 4,
       "deep_count": 5
     },
     {
@@ -85,7 +85,7 @@
       "prompt": "最近の要点まとめて",
       "success": true,
       "empty_material": false,
-      "memctx_tokens": 62,
+      "memctx_tokens": 58,
       "surface_count": 5,
       "deep_count": 0
     },
@@ -94,7 +94,7 @@
       "prompt": "これまでの記憶を要約して",
       "success": true,
       "empty_material": false,
-      "memctx_tokens": 87,
+      "memctx_tokens": 76,
       "surface_count": 5,
       "deep_count": 0
     },
@@ -104,7 +104,7 @@
       "success": true,
       "empty_material": false,
       "memctx_tokens": 36,
-      "surface_count": 5,
+      "surface_count": 1,
       "deep_count": 0
     },
     {

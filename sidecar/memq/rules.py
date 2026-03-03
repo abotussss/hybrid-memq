@@ -321,7 +321,8 @@ def prune_stale_rule_overrides(db: MemqDB, now_sec: int) -> int:
 
 
 def extract_allowed_languages_from_rules(db: MemqDB) -> List[str]:
-    langs: List[str] = ["en"]
+    # Safe default for mixed Japanese/English workflows.
+    langs: List[str] = ["ja", "en"]
     for row in db.list_rules():
         body = str(row["body"])
         if body.startswith("language.allowed="):
@@ -330,4 +331,14 @@ def extract_allowed_languages_from_rules(db: MemqDB) -> List[str]:
                 c = code.strip().lower()
                 if c and c not in langs:
                     langs.append(c)
+    # Preference fallback can bias defaults when explicit rule is absent.
+    try:
+        prof = db.get_preference_profile()
+        lp = prof.get("language.primary") or {}
+        val = str(lp.get("value") or "").strip().lower()
+        conf = float(lp.get("confidence", 0.0) or 0.0)
+        if val in {"ja", "en", "zh", "ko", "ru", "ar"} and conf >= 0.55 and val not in langs:
+            langs.insert(0, val)
+    except Exception:
+        pass
     return langs

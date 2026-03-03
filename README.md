@@ -12,10 +12,12 @@ Each turn injects three bounded channels in fixed order:
 
 - API text injection architecture.
 - Retrieval is embedding-free at runtime (lexical + fact-key + recency/importance scoring).
+- Japanese retrieval is strengthened with lexical n-gram terms stored in FTS content (embedding-free).
 - Structured Deep facts are persisted in SQLite with conflict handling and TTL support.
 - Ephemeral is not fixed 1-day expiry anymore; it decays and is pruned by low value.
 - Output audit redaction is applied even when `block=false` (if `redactedText` is returned).
 - `MEMSTYLE` budget default is fixed to `120` tokens (`styleTokens=120`, `maxBudgetTokens=120`).
+- Output language audit default is `ja,en` when no explicit language rule exists.
 - Timeline memory is persisted as `events` + `daily_digests` for time-scoped prompts like “yesterday/recent”.
 - Optional local Brain path (`Ollama`, default model `gpt-oss:20b`) can generate schema-validated ingest/recall plans.
 - If Brain is unavailable or times out, sidecar falls back to deterministic heuristics without stopping the turn.
@@ -196,10 +198,12 @@ Hybrid MEMQ は、OpenClaw向けの記憶プラグインです。
 
 - API text injectionベースの構成です。
 - 実行時検索はEmbedding非依存（語彙一致 + fact-key + 新しさ/重要度スコア）。
+- 日本語検索は FTS 内に語彙 n-gram を保持して補強（Embeddingなし）。
 - Deepは構造化factをSQLiteに永続保存し、TTL・競合解決を適用。
 - Ephemeralは「固定1日削除」ではなく、価値減衰と低価値剪定で整理。
 - 出力監査の`redactedText`は`block=false`でも反映。
 - `MEMSTYLE`予算は既定で`120`固定（`styleTokens=120`、`maxBudgetTokens=120`）。
+- 言語監査ルール未設定時の既定許可言語は `ja,en`。
 - 「昨日/最近」系の問い合わせ向けに、`events`と`daily_digests`の時系列記憶を保持。
 
 ## このプラグインの狙い

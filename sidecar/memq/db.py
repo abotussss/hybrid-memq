@@ -12,6 +12,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from .fact_keys import infer_text_fact_keys
 from .timeline import day_key_from_ts
 from .text_sanitize import contains_runtime_noise, strip_memq_blocks, strip_runtime_noise
+from .tokens import tokenize_lexical
 
 
 def now_ts() -> int:
@@ -29,6 +30,38 @@ def token_set(text: str) -> set[str]:
     out = set(re.findall(r"[a-z0-9_]{2,}", s))
     out.update(re.findall(r"[ぁ-んァ-ヶ一-龠]{1,8}", text or ""))
     return out
+
+
+_CJK_RE = re.compile(r"[ぁ-んァ-ヶ一-龠]")
+
+
+def _contains_cjk(text: str) -> bool:
+    return bool(_CJK_RE.search(text or ""))
+
+
+def _fts_terms(text: str, *, max_terms: int = 300) -> List[str]:
+    toks = tokenize_lexical(text or "")
+    out: List[str] = []
+    seen = set()
+    for t in sorted(toks, key=lambda x: (-len(x), x)):
+        tt = str(t or "").strip()
+        if len(tt) < 2 or tt in seen:
+            continue
+        seen.add(tt)
+        out.append(tt)
+        if len(out) >= max_terms:
+            break
+    return out
+
+
+def _fts_content(summary: str, fact_keys: Sequence[str] | None = None, *, max_len: int = 2600) -> str:
+    base = " ".join((summary or "").split()).strip()
+    keys = [str(k or "").strip() for k in (fact_keys or []) if str(k or "").strip()]
+    # Embed lexical n-gram terms into indexed content so unicode61 builds can still
+    # retrieve Japanese spans reliably without embeddings.
+    terms = _fts_terms(" ".join([base, " ".join(keys)]), max_terms=360 if _contains_cjk(base) else 220)
+    merged = " ".join(x for x in [base, " ".join(keys), " ".join(terms)] if x).strip()
+    return merged[:max_len]
 
 
 def jaccard(a: set[str], b: set[str]) -> float:
@@ -285,6 +318,7 @@ class MemqDB:
                 row,
             )
         self.conn.commit()
+        self._maybe_rebuild_fts_terms()
 
     def close(self) -> None:
         self.conn.close()
@@ -686,8 +720,9 @@ class MemqDB:
     ) -> None:
         try:
             self.conn.execute("DELETE FROM memory_fts WHERE item_id=?", (item_id,))
-            keys = " ".join(self._extract_fact_keys_from_tags(tags))
-            content = " ".join((summary or "").split())[:1200]
+            keys_list = self._extract_fact_keys_from_tags(tags)
+            keys = " ".join(keys_list)
+            content = _fts_content(summary, keys_list, max_len=2600)
             self.conn.execute(
                 "INSERT INTO memory_fts(item_id,session_key,layer,fact_keys,content) VALUES(?,?,?,?,?)",
                 (item_id, session_key, layer, keys, content),
@@ -708,13 +743,53 @@ class MemqDB:
     ) -> None:
         try:
             self.conn.execute("DELETE FROM events_fts WHERE event_id=?", (event_id,))
-            content = " ".join((summary or "").split())[:1200]
+            content = _fts_content(summary, [], max_len=2200)
             self.conn.execute(
                 "INSERT INTO events_fts(event_id,session_key,day_key,actor,kind,content) VALUES(?,?,?,?,?,?)",
                 (event_id, session_key, day_key, actor, kind, content),
             )
         except sqlite3.OperationalError:
             return
+
+    def _search_memory_fts_once(
+        self,
+        *,
+        layer: str,
+        session_key: str,
+        match_query: str,
+        limit: int,
+        include_global: bool,
+        now: int,
+    ) -> List[sqlite3.Row]:
+        if include_global:
+            return self.conn.execute(
+                """
+                SELECT mi.*, bm25(memory_fts) AS fts_rank
+                FROM memory_fts
+                JOIN memory_items mi ON mi.id = memory_fts.item_id
+                WHERE memory_fts MATCH ?
+                  AND mi.layer=?
+                  AND (mi.session_key=? OR mi.session_key='global')
+                  AND (mi.ttl_expires_at IS NULL OR mi.ttl_expires_at > ?)
+                ORDER BY fts_rank ASC, mi.updated_at DESC
+                LIMIT ?
+                """,
+                (match_query, layer, session_key, now, int(limit)),
+            ).fetchall()
+        return self.conn.execute(
+            """
+            SELECT mi.*, bm25(memory_fts) AS fts_rank
+            FROM memory_fts
+            JOIN memory_items mi ON mi.id = memory_fts.item_id
+            WHERE memory_fts MATCH ?
+              AND mi.layer=?
+              AND mi.session_key=?
+              AND (mi.ttl_expires_at IS NULL OR mi.ttl_expires_at > ?)
+            ORDER BY fts_rank ASC, mi.updated_at DESC
+            LIMIT ?
+            """,
+            (match_query, layer, session_key, now, int(limit)),
+        ).fetchall()
 
     def search_memory_fts(
         self,
@@ -730,39 +805,90 @@ class MemqDB:
             return []
         now = now_ts()
         try:
-            if include_global:
-                rows = self.conn.execute(
-                    """
-                    SELECT mi.*, bm25(memory_fts) AS fts_rank
-                    FROM memory_fts
-                    JOIN memory_items mi ON mi.id = memory_fts.item_id
-                    WHERE memory_fts MATCH ?
-                      AND mi.layer=?
-                      AND (mi.session_key=? OR mi.session_key='global')
-                      AND (mi.ttl_expires_at IS NULL OR mi.ttl_expires_at > ?)
-                    ORDER BY fts_rank ASC, mi.updated_at DESC
-                    LIMIT ?
-                    """,
-                    (q, layer, session_key, now, int(limit)),
-                ).fetchall()
-                return rows
-            rows = self.conn.execute(
-                """
-                SELECT mi.*, bm25(memory_fts) AS fts_rank
-                FROM memory_fts
-                JOIN memory_items mi ON mi.id = memory_fts.item_id
-                WHERE memory_fts MATCH ?
-                  AND mi.layer=?
-                  AND mi.session_key=?
-                  AND (mi.ttl_expires_at IS NULL OR mi.ttl_expires_at > ?)
-                ORDER BY fts_rank ASC, mi.updated_at DESC
-                LIMIT ?
-                """,
-                (q, layer, session_key, now, int(limit)),
-            ).fetchall()
+            rows = self._search_memory_fts_once(
+                layer=layer,
+                session_key=session_key,
+                match_query=q,
+                limit=limit,
+                include_global=include_global,
+                now=now,
+            )
+            # Fallback to n-gram query form for CJK prompts when raw MATCH is sparse.
+            if len(rows) < min(6, int(limit)) and _contains_cjk(q):
+                ng_terms = _fts_terms(q, max_terms=18)
+                if ng_terms:
+                    q2 = " OR ".join(f'"{t.replace(chr(34), chr(34) * 2)}"' for t in ng_terms if len(t) >= 2)
+                    if q2:
+                        rows2 = self._search_memory_fts_once(
+                            layer=layer,
+                            session_key=session_key,
+                            match_query=q2,
+                            limit=limit,
+                            include_global=include_global,
+                            now=now,
+                        )
+                        merged: List[sqlite3.Row] = []
+                        seen = set()
+                        for r in rows + rows2:
+                            rid = str(r["id"])
+                            if rid in seen:
+                                continue
+                            seen.add(rid)
+                            merged.append(r)
+                            if len(merged) >= int(limit):
+                                break
+                        rows = merged
             return rows
         except sqlite3.OperationalError:
             return []
+
+    def _maybe_rebuild_fts_terms(self) -> None:
+        state_key = "fts_terms_version"
+        target = "v2"
+        cur = self.get_state(state_key, "")
+        if cur == target:
+            return
+        try:
+            self.conn.execute("DELETE FROM memory_fts")
+            self.conn.execute("DELETE FROM events_fts")
+            mem_rows = self.conn.execute(
+                "SELECT id,session_key,layer,summary,tags FROM memory_items ORDER BY updated_at DESC LIMIT 50000"
+            ).fetchall()
+            for r in mem_rows:
+                rid = str(r["id"])
+                s_key = str(r["session_key"] or "")
+                layer = str(r["layer"] or "")
+                summary = str(r["summary"] or "")
+                try:
+                    tags = json.loads(str(r["tags"] or "{}"))
+                except Exception:
+                    tags = {}
+                if not isinstance(tags, dict):
+                    tags = {}
+                self._sync_memory_fts_item(
+                    item_id=rid,
+                    session_key=s_key,
+                    layer=layer,
+                    summary=summary,
+                    tags=tags,
+                )
+            evt_rows = self.conn.execute(
+                "SELECT id,session_key,day_key,actor,kind,summary FROM events ORDER BY ts DESC LIMIT 50000"
+            ).fetchall()
+            for r in evt_rows:
+                self._sync_event_fts_item(
+                    event_id=str(r["id"]),
+                    session_key=str(r["session_key"] or ""),
+                    day_key=str(r["day_key"] or ""),
+                    actor=str(r["actor"] or "assistant"),
+                    kind=str(r["kind"] or "chat"),
+                    summary=str(r["summary"] or ""),
+                )
+            self.conn.commit()
+            self.set_state(state_key, target)
+        except sqlite3.OperationalError:
+            # FTS not available on this sqlite build.
+            return
 
     def fetch_deep_items_by_fact_keys(
         self,

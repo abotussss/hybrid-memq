@@ -180,7 +180,7 @@ def audit_output(
 
     allowed_langs = extract_allowed_languages_from_rules(db)
     if not allowed_langs:
-        allowed_langs = ["en"]
+        allowed_langs = ["ja", "en"]
     policy_ok, policy_reason = _language_policy_check(out, allowed_langs)
     if not policy_ok:
         risk += 0.35
