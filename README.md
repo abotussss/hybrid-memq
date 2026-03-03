@@ -154,6 +154,7 @@ python3 -m unittest -v
 python3 -m unittest -v sidecar.tests.test_regressions
 python3 bench/src/text_sanitization_regression.py
 python3 bench/src/timeline_scale_check.py
+node bench/src/plugin_token_budget_regression.mjs
 pnpm -C plugin/openclaw-memory-memq build
 ```
 
@@ -321,6 +322,7 @@ python3 -m unittest -v
 python3 -m unittest -v sidecar.tests.test_regressions
 python3 bench/src/text_sanitization_regression.py
 python3 bench/src/timeline_scale_check.py
+node bench/src/plugin_token_budget_regression.mjs
 pnpm -C plugin/openclaw-memory-memq build
 ```
 

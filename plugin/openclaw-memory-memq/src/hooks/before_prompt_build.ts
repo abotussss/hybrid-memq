@@ -244,19 +244,19 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
     const totalMaxInput = Math.max(1200, getCfg(api, "memq.total.maxInputTokens", defaults["memq.total.maxInputTokens"]));
     const totalReserve = Math.max(0, getCfg(api, "memq.total.reserveTokens", defaults["memq.total.reserveTokens"]));
     const promptTokens = estimateTokens(prompt);
+    const styleEnabled = Boolean(getCfg(api, "memq.style.enabled", defaults["memq.style.enabled"]));
     const recallLikePrompt = /(覚えて|記憶|これまで|君は誰|あなたは誰|家族|呼称|一人称|最近|昨日|一昨日|先週|先月|summary|recap|who are you|yesterday|recent)/i.test(
       prompt
     );
     const codingLikePrompt = /(コード|code|bug|error|stack|trace|diff|patch|test|build|compile|実装|修正)/i.test(prompt);
     let recentBudget = recallLikePrompt && !codingLikePrompt ? Math.max(1200, Math.min(recentMax, Math.floor(recentMax * 0.45))) : recentMax;
-    const fixedEstimate = promptTokens + budgets.memctx + budgets.rules + budgets.style + totalReserve;
+    const fixedEstimate = promptTokens + budgets.memctx + budgets.rules + (styleEnabled ? budgets.style : 0) + totalReserve;
     const recentCapByTotal = Math.max(220, totalMaxInput - fixedEstimate);
     recentBudget = Math.max(220, Math.min(recentBudget, recentCapByTotal));
 
     const topK = Math.max(1, getCfg(api, "memq.retrieval.topK", defaults["memq.retrieval.topK"]));
     const surfaceThreshold = Number(getCfg(api, "memq.retrieval.surfaceThreshold", defaults["memq.retrieval.surfaceThreshold"]));
     const deepEnabled = Boolean(getCfg(api, "memq.retrieval.deepEnabled", defaults["memq.retrieval.deepEnabled"]));
-    const styleEnabled = Boolean(getCfg(api, "memq.style.enabled", defaults["memq.style.enabled"]));
 
     const ensured = await sidecar.ensureUp(workspaceRoot);
     if (!ensured) {
@@ -308,7 +308,10 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
     const keptForPrompt = repaired.kept;
 
     // in-place rewrite for latest OpenClaw runtime behavior
-    if (Array.isArray(event?.messages) && (sliced.keepStart > 0 || repaired.removed > 0)) {
+    if (
+      Array.isArray(event?.messages) &&
+      (sliced.pruned.length > 0 || repaired.removed > 0 || keptForPrompt.length !== messages.length)
+    ) {
       event.messages.splice(0, event.messages.length, ...keptForPrompt);
     }
 

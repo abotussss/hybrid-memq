@@ -252,18 +252,9 @@ def build_memctx(
         deep_verified = len([x for x in deep if bool(x.get("verification_ok", True))])
         _push_kv(lines, "meta.deep_verified", str(deep_verified), dedupe_by_value=False)
 
-    # Always-on anchors keep conversational continuity even when query routing misses.
-    convsurf_anchor = _clean_summary((db.get_conv_summary(session_key, "surface_only") or "").replace(chr(10), " | "), 110)
-    convdeep_anchor = _clean_summary((db.get_conv_summary(session_key, "deep") or "").replace(chr(10), " | "), 110)
-    profile_anchor = _clean_summary(_profile_snapshot_line(), 120)
-    recent_anchor = _clean_summary(_recent_timeline_line(), 120)
-    _push_kv(lines, "wm.surf", convsurf_anchor or "none", dedupe_by_value=False)
-    _push_kv(lines, "wm.deep", convdeep_anchor or "none", dedupe_by_value=False)
-    _push_kv(lines, "p.snapshot", profile_anchor or "unknown", dedupe_by_value=False)
-    _push_kv(lines, "t.recent", recent_anchor or "none", dedupe_by_value=False)
-
-    # Timeline / episodic context for vague temporal prompts (yesterday/recent/etc).
-    if timeline_range:
+    def _push_timeline_block() -> None:
+        if not timeline_range:
+            return
         _push_kv(lines, "t.range", f"{timeline_range.start_day}..{timeline_range.end_day}", dedupe_by_value=False)
         _push_kv(lines, "t.label", timeline_range.label, dedupe_by_value=False)
         dg_rows = db.list_daily_digests_range(
@@ -314,6 +305,26 @@ def build_memctx(
             ev_seen.add(sig)
             ev_count += 1
             _push_kv(lines, f"t.ev{ev_count}", f"{day_key} {actor}/{kind}: {summary}")
+
+    # For explicit time-scoped queries, prioritize timeline recall before anchors.
+    if time_scoped:
+        _push_timeline_block()
+
+    # Always-on anchors keep conversational continuity even when query routing misses.
+    # In explicit time-scoped mode keep anchors shorter so t.* survives budget trimming.
+    anchor_limit = 80 if time_scoped else 120
+    convsurf_anchor = _clean_summary((db.get_conv_summary(session_key, "surface_only") or "").replace(chr(10), " | "), 90 if time_scoped else 110)
+    convdeep_anchor = _clean_summary((db.get_conv_summary(session_key, "deep") or "").replace(chr(10), " | "), 90 if time_scoped else 110)
+    profile_anchor = _clean_summary(_profile_snapshot_line(), anchor_limit)
+    recent_anchor = _clean_summary(_recent_timeline_line(), anchor_limit)
+    _push_kv(lines, "wm.surf", convsurf_anchor or "none", dedupe_by_value=False)
+    _push_kv(lines, "wm.deep", convdeep_anchor or "none", dedupe_by_value=False)
+    _push_kv(lines, "p.snapshot", profile_anchor or "unknown", dedupe_by_value=False)
+    _push_kv(lines, "t.recent", recent_anchor or "none", dedupe_by_value=False)
+
+    # Non-explicit timeline prompts can still attach compact t.* context after anchors.
+    if timeline_range and not time_scoped:
+        _push_timeline_block()
 
     # Stable profile hints (non-style/rule) for deterministic long-horizon behavior.
     profile = db.get_preference_profile()
