@@ -187,63 +187,7 @@ def build_memctx(
         return True
 
     def _profile_snapshot_line() -> str:
-        parts: List[str] = []
-        style = db.get_style_profile()
-        for k in ("callUser", "firstPerson", "persona", "tone", "verbosity"):
-            v = str(style.get(k) or "").strip()
-            if not v:
-                continue
-            parts.append(f"{k}:{v}")
-            if len(parts) >= 3:
-                break
-
-        pref = db.get_preference_profile()
-        for k in ("language.primary", "policy.retention.default"):
-            pv = pref.get(k) or {}
-            v = str(pv.get("value") or "").strip()
-            conf = float(pv.get("confidence", 0.0) or 0.0)
-            if not v or conf < 0.55:
-                continue
-            parts.append(f"{k}:{v}")
-            if len(parts) >= 4:
-                break
-
-        key_label = {
-            "profile.family": "family",
-            "profile.family.spouse": "spouse",
-            "profile.family.pet": "pet",
-            "profile.identity.call_user": "callUser",
-            "profile.identity.first_person": "firstPerson",
-            "profile.persona.role": "persona",
-            "profile.persona.tone": "tone",
-        }
-        fact_rows = db.fetch_deep_items_by_fact_keys(
-            session_key=session_key,
-            fact_keys=list(key_label.keys()),
-            limit=20,
-            include_global=True,
-        )
-        seen_labels = set()
-        for row in fact_rows:
-            try:
-                tags = json.loads(str(row["tags"] or "{}"))
-            except Exception:
-                tags = {}
-            fact = tags.get("fact") if isinstance(tags, dict) else {}
-            if not isinstance(fact, dict):
-                continue
-            fk = str(fact.get("fact_key") or "")
-            label = key_label.get(fk)
-            if not label or label in seen_labels:
-                continue
-            val = str(fact.get("value") or "").strip()
-            if not val:
-                continue
-            seen_labels.add(label)
-            parts.append(f"{label}:{val[:40]}")
-            if len(parts) >= 6:
-                break
-        return " | ".join(parts)[:220]
+        return str(db.get_profile_snapshot(session_key, max_parts=8) or "")[:220]
 
     def _recent_timeline_line() -> str:
         now_ts = int(time.time())

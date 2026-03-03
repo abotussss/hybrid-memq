@@ -5,6 +5,10 @@ budgets:
   rulesTokens: 80
   styleTokens: 120
 
+total:
+  maxInputTokens: 5200
+  reserveTokens: 1100
+
 recent:
   maxTokens: 5000
   minKeepMessages: 6

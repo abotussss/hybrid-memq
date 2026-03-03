@@ -241,11 +241,17 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
 
     const recentMax = Math.max(800, getCfg(api, "memq.recent.maxTokens", defaults["memq.recent.maxTokens"]));
     const minKeep = Math.max(2, getCfg(api, "memq.recent.minKeepMessages", defaults["memq.recent.minKeepMessages"]));
+    const totalMaxInput = Math.max(1200, getCfg(api, "memq.total.maxInputTokens", defaults["memq.total.maxInputTokens"]));
+    const totalReserve = Math.max(0, getCfg(api, "memq.total.reserveTokens", defaults["memq.total.reserveTokens"]));
+    const promptTokens = estimateTokens(prompt);
     const recallLikePrompt = /(覚えて|記憶|これまで|君は誰|あなたは誰|家族|呼称|一人称|最近|昨日|一昨日|先週|先月|summary|recap|who are you|yesterday|recent)/i.test(
       prompt
     );
     const codingLikePrompt = /(コード|code|bug|error|stack|trace|diff|patch|test|build|compile|実装|修正)/i.test(prompt);
-    const recentBudget = recallLikePrompt && !codingLikePrompt ? Math.max(1200, Math.min(recentMax, Math.floor(recentMax * 0.45))) : recentMax;
+    let recentBudget = recallLikePrompt && !codingLikePrompt ? Math.max(1200, Math.min(recentMax, Math.floor(recentMax * 0.45))) : recentMax;
+    const fixedEstimate = promptTokens + budgets.memctx + budgets.rules + budgets.style + totalReserve;
+    const recentCapByTotal = Math.max(220, totalMaxInput - fixedEstimate);
+    recentBudget = Math.max(220, Math.min(recentBudget, recentCapByTotal));
 
     const topK = Math.max(1, getCfg(api, "memq.retrieval.topK", defaults["memq.retrieval.topK"]));
     const surfaceThreshold = Number(getCfg(api, "memq.retrieval.surfaceThreshold", defaults["memq.retrieval.surfaceThreshold"]));
@@ -360,10 +366,12 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
 
     const prependContext = composeInjectedBlocks(memrules, memstyle, memctx);
     const injectedTokens = estimateTokens(prependContext);
+    const totalEstimatedInput = sliced.keptTokens + injectedTokens + promptTokens + totalReserve;
+    const overCap = totalEstimatedInput > totalMaxInput ? 1 : 0;
 
     logInfo(
       api,
-      `[memq-v2] before_prompt_build session=${sessionKey} kept_msgs=${keptForPrompt.length} pruned_msgs=${sliced.pruned.length} kept_tokens=${sliced.keptTokens} recent_budget=${recentBudget} recent_cfg=${recentMax} injected_tokens=${injectedTokens} surface_hit=${surfaceHit ? 1 : 0} deep_called=${deepCalled ? 1 : 0} latency_ms=${Date.now() - t0}`
+      `[memq-v2] before_prompt_build session=${sessionKey} kept_msgs=${keptForPrompt.length} pruned_msgs=${sliced.pruned.length} kept_tokens=${sliced.keptTokens} recent_budget=${recentBudget} recent_cfg=${recentMax} injected_tokens=${injectedTokens} total_est=${totalEstimatedInput} total_cap=${totalMaxInput} total_over=${overCap} surface_hit=${surfaceHit ? 1 : 0} deep_called=${deepCalled ? 1 : 0} latency_ms=${Date.now() - t0}`
     );
 
     return { prependContext };

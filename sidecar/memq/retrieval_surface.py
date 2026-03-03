@@ -5,7 +5,7 @@ import re
 from typing import Any, Dict, List
 
 from .db import MemqDB
-from .tokens import lexical_overlap, tokenize_lexical
+from .tokens import build_fts_or_query, lexical_overlap, tokenize_lexical
 
 NOISE_SUMMARY_RE = re.compile(
     r"(<MEM(?:RULES|STYLE|CTX)\s+v1>|\[MEM(?:RULES|STYLE|CTX)\s+v1\]|\[\[reply_to_current\]\]|read\s+(?:agents|soul|identity|heartbeat)\.md|workspace context)",
@@ -33,7 +33,16 @@ def _lex_overlap(q_tokens: set[str], text: str) -> float:
 
 
 def search_surface(db: MemqDB, session_key: str, query_text: str, top_k: int) -> List[Dict[str, Any]]:
-    rows = db.list_memory_items("surface", session_key, limit=2000)
+    fts_q = build_fts_or_query(query_text, max_terms=16)
+    rows = db.search_memory_fts(
+        layer="surface",
+        session_key=session_key,
+        match_query=fts_q,
+        limit=2200,
+        include_global=True,
+    ) if fts_q else []
+    if not rows:
+        rows = db.list_memory_items("surface", session_key, limit=2000)
     q_tokens = tokenize_lexical(query_text)
     now = __import__("time").time()
     scored: List[Dict[str, Any]] = []

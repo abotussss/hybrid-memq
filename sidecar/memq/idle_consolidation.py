@@ -245,14 +245,16 @@ def _refresh_daily_digests(db: MemqDB, session_key: str, lookback_days: int = 14
             limit=240,
             include_global=True,
         )
-        compact = _compact_digest_lines([dict(x) for x in ev], max_lines=6)
-        if not compact:
+        compact_micro = _compact_digest_lines([dict(x) for x in ev], max_lines=4)
+        compact_meso = _compact_digest_lines([dict(x) for x in ev], max_lines=10)
+        if not compact_micro and not compact_meso:
             continue
         db.upsert_daily_digest(
             day_key=day_key,
             scope="session",
             session_key=session_key,
-            compact_text=compact,
+            compact_text=compact_micro or compact_meso,
+            meso_text=compact_meso,
             updated_at=int(time.time()),
         )
         updated += 1

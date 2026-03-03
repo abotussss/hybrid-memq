@@ -31,6 +31,7 @@ Each turn injects three bounded channels in fixed order:
 
 - Local sidecar (`FastAPI + SQLite`) with persistent memory state.
 - Surface-first retrieval with Deep fallback gating.
+- Embedding-free scalable candidate generation via SQLite FTS5/BM25 (with lexical/fact-key reranking).
 - Deep fact indexing (`fact_key`) to improve long-lag recall beyond recent-item limits.
 - Conversation pruning by token budget, archive of pruned history, and sidecar reconstruction summaries.
 - Episodic timeline pipeline: turn/action events -> idle daily digest -> compact `t.*` MEMCTX injection.
@@ -99,6 +100,8 @@ curl -sS http://127.0.0.1:7781/health
 - `MEMCTX`: `120`
 - `MEMRULES`: `80`
 - `MEMSTYLE`: `120`
+- `TOTAL INPUT CAP` (estimated): `5200`
+- `TOTAL RESERVE` (system/tools margin): `1100`
 
 These are configured in:
 
@@ -109,7 +112,8 @@ These are configured in:
 ## Runtime Flow
 
 1. `before_prompt_build`
-- split messages by `memq.recent.maxTokens`
+- compute dynamic recent budget from total cap (`memq.total.maxInputTokens`) and reserve
+- split messages by dynamic recent budget (bounded by `memq.recent.maxTokens`)
 - archive pruned messages (`.memq/conversation_archive/*.jsonl`)
 - summarize pruned window into sidecar (`surface_only` + `deep`)
 - repair orphan tool-result integrity in kept window
@@ -156,6 +160,7 @@ pnpm -C plugin/openclaw-memory-memq build
 ## Notes
 
 - Runtime retrieval currently does not require external embedding APIs.
+- Retrieval uses FTS5/BM25 candidates + lexical/fact-key/recency reranking (no embedding runtime dependency).
 - `sidecar/memq/quant.py` remains in the repository, while current retrieval is lexical/fact-key driven.
 - timeline range parsing is based on `Asia/Tokyo` day boundaries.
 
@@ -192,6 +197,7 @@ Hybrid MEMQ は、OpenClaw向けの記憶プラグインです。
 
 - `FastAPI + SQLite` sidecarによるローカル永続記憶。
 - Surface優先、必要時のみDeep検索のゲーティング。
+- SQLite FTS5/BM25 を使った embedding 非依存の候補生成（その後に語彙/fact_key/新しさで再ランク）。
 - `fact_key`索引による長期想起強化（古い重要記憶の取りこぼし抑制）。
 - 会話のトークン予算剪定、剪定履歴アーカイブ、要約再構成。
 - エピソード時系列パイプライン（turn/actionイベント -> アイドル時の日次ダイジェスト -> `t.*`としてMEMCTX注入）。
@@ -260,6 +266,8 @@ curl -sS http://127.0.0.1:7781/health
 - `MEMCTX`: `120`
 - `MEMRULES`: `80`
 - `MEMSTYLE`: `120`
+- `TOTAL INPUT CAP`（推定）: `5200`
+- `TOTAL RESERVE`（system/tool余白）: `1100`
 
 定義場所:
 
@@ -270,7 +278,8 @@ curl -sS http://127.0.0.1:7781/health
 ## 実行フロー
 
 1. `before_prompt_build`
-- `memq.recent.maxTokens`で会話をkeep/prune分割
+- `memq.total.maxInputTokens` と reserve から、ターンごとの動的 recent 予算を計算
+- 動的 recent 予算（上限は `memq.recent.maxTokens`）で会話をkeep/prune分割
 - pruneした履歴を`.memq/conversation_archive/*.jsonl`へ保存
 - prune履歴をsidecarへ要約投入（`surface_only` + `deep`）
 - kept側のtool-result整合を修復
@@ -296,6 +305,7 @@ curl -sS http://127.0.0.1:7781/health
 - 一次監査はローカルでリスク判定。
 - 二次監査LLMは有効化時かつ閾値超過時のみ呼び出し。
 - `redactedText`が返った場合、`block=false`でも出力へ反映。
+- 検索は FTS5/BM25 候補生成 + 語彙/fact_key/recency 再ランク（実行時 embedding 依存なし）。
 
 ## 永続性と再起動
 

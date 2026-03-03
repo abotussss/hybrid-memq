@@ -36,3 +36,17 @@ def lexical_overlap(query_tokens: Set[str], text: str) -> float:
         return 0.0
     return float(len(query_tokens & t)) / float(max(1, len(query_tokens)))
 
+
+def build_fts_or_query(text: str, max_terms: int = 18) -> str:
+    toks = sorted(tokenize_lexical(text), key=lambda x: (-len(x), x))
+    if not toks:
+        return ""
+    out = []
+    for t in toks:
+        if len(t) < 2:
+            continue
+        tt = t.replace('"', '""')
+        out.append(f'"{tt}"')
+        if len(out) >= max_terms:
+            break
+    return " OR ".join(out)

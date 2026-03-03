@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 
 from .db import MemqDB
 from .fact_keys import infer_query_fact_keys
-from .tokens import lexical_overlap, tokenize_lexical
+from .tokens import build_fts_or_query, lexical_overlap, tokenize_lexical
 
 NOISE_SUMMARY_RE = re.compile(
     r"(<MEM(?:RULES|STYLE|CTX)\s+v1>|\[MEM(?:RULES|STYLE|CTX)\s+v1\]|\[\[reply_to_current\]\]|read\s+(?:agents|soul|identity|heartbeat)\.md|workspace context)",
@@ -194,7 +194,16 @@ def _session_scope_bonus(session_key: str, row_session: str) -> float:
 
 def search_deep(db: MemqDB, session_key: str, query_text: str, top_k: int, top_m: int = 200) -> List[Dict[str, Any]]:
     q_fact_keys = infer_query_fact_keys(query_text)
-    rows = db.list_memory_items("deep", session_key, limit=5000)
+    fts_q = build_fts_or_query(query_text, max_terms=20)
+    rows = db.search_memory_fts(
+        layer="deep",
+        session_key=session_key,
+        match_query=fts_q,
+        limit=5000,
+        include_global=True,
+    ) if fts_q else []
+    if not rows:
+        rows = db.list_memory_items("deep", session_key, limit=5000)
     if q_fact_keys:
         indexed = db.fetch_deep_items_by_fact_keys(
             session_key=session_key,

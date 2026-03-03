@@ -214,13 +214,54 @@ class MemqDB:
               scope TEXT NOT NULL,
               session_key TEXT NOT NULL,
               compact_text TEXT NOT NULL,
+              meso_text TEXT NOT NULL DEFAULT '',
               updated_at INTEGER NOT NULL,
               PRIMARY KEY(day_key, scope, session_key)
             );
             CREATE INDEX IF NOT EXISTS idx_daily_digests_session_day ON daily_digests(session_key, day_key DESC);
             """
         )
+        # FTS indices for embedding-free scalable retrieval.
+        try:
+            c.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts
+                USING fts5(
+                  item_id UNINDEXED,
+                  session_key UNINDEXED,
+                  layer UNINDEXED,
+                  fact_keys,
+                  content,
+                  tokenize='unicode61'
+                );
+                """
+            )
+            c.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS events_fts
+                USING fts5(
+                  event_id UNINDEXED,
+                  session_key UNINDEXED,
+                  day_key UNINDEXED,
+                  actor UNINDEXED,
+                  kind UNINDEXED,
+                  content,
+                  tokenize='unicode61'
+                );
+                """
+            )
+        except sqlite3.OperationalError:
+            # Some sqlite builds may not include FTS5; retrieval falls back to normal paths.
+            pass
         self.conn.commit()
+        # Backward-compatible migration for existing DBs.
+        try:
+            cols = {str(r["name"]) for r in self.conn.execute("PRAGMA table_info(daily_digests)").fetchall()}
+            if "meso_text" not in cols:
+                self.conn.execute("ALTER TABLE daily_digests ADD COLUMN meso_text TEXT NOT NULL DEFAULT ''")
+                self.conn.commit()
+        except Exception:
+            pass
 
         # migrate away from over-restrictive legacy key-refusal rules
         ts = now_ts()
@@ -296,6 +337,14 @@ class MemqDB:
                 now_ts(),
             ),
         )
+        self._sync_event_fts_item(
+            event_id=eid,
+            session_key=session_key,
+            day_key=day_key,
+            actor=(actor or "assistant")[:16],
+            kind=(kind or "chat")[:32],
+            summary=" ".join((summary or "").split())[:420],
+        )
         self.conn.commit()
         return eid
 
@@ -351,17 +400,18 @@ class MemqDB:
         scope: str,
         session_key: str,
         compact_text: str,
+        meso_text: str = "",
         updated_at: Optional[int] = None,
     ) -> None:
         ts = int(updated_at or now_ts())
         self.conn.execute(
             """
-            INSERT INTO daily_digests(day_key,scope,session_key,compact_text,updated_at)
-            VALUES(?,?,?,?,?)
+            INSERT INTO daily_digests(day_key,scope,session_key,compact_text,meso_text,updated_at)
+            VALUES(?,?,?,?,?,?)
             ON CONFLICT(day_key,scope,session_key)
-            DO UPDATE SET compact_text=excluded.compact_text, updated_at=excluded.updated_at
+            DO UPDATE SET compact_text=excluded.compact_text, meso_text=excluded.meso_text, updated_at=excluded.updated_at
             """,
-            (day_key, scope, session_key, compact_text[:2200], ts),
+            (day_key, scope, session_key, compact_text[:2200], meso_text[:4200], ts),
         )
         self.conn.commit()
 
@@ -451,6 +501,13 @@ class MemqDB:
             tags=tags,
             updated_at=ts,
         )
+        self._sync_memory_fts_item(
+            item_id=item_id,
+            session_key=session_key,
+            layer=layer,
+            summary=summary,
+            tags=tags,
+        )
         self.conn.commit()
         return item_id
 
@@ -539,6 +596,13 @@ class MemqDB:
                 tags=merged_tags,
                 updated_at=ts,
             )
+            self._sync_memory_fts_item(
+                item_id=rid,
+                session_key=session_key,
+                layer=layer,
+                summary=summary,
+                tags=merged_tags,
+            )
             self.conn.commit()
             return rid, True
 
@@ -609,6 +673,95 @@ class MemqDB:
             )
             wrote += 1
         return wrote
+
+    def _sync_memory_fts_item(
+        self,
+        *,
+        item_id: str,
+        session_key: str,
+        layer: str,
+        summary: str,
+        tags: Dict[str, Any],
+    ) -> None:
+        try:
+            self.conn.execute("DELETE FROM memory_fts WHERE item_id=?", (item_id,))
+            keys = " ".join(self._extract_fact_keys_from_tags(tags))
+            content = " ".join((summary or "").split())[:1200]
+            self.conn.execute(
+                "INSERT INTO memory_fts(item_id,session_key,layer,fact_keys,content) VALUES(?,?,?,?,?)",
+                (item_id, session_key, layer, keys, content),
+            )
+        except sqlite3.OperationalError:
+            # FTS unavailable; ignore.
+            return
+
+    def _sync_event_fts_item(
+        self,
+        *,
+        event_id: str,
+        session_key: str,
+        day_key: str,
+        actor: str,
+        kind: str,
+        summary: str,
+    ) -> None:
+        try:
+            self.conn.execute("DELETE FROM events_fts WHERE event_id=?", (event_id,))
+            content = " ".join((summary or "").split())[:1200]
+            self.conn.execute(
+                "INSERT INTO events_fts(event_id,session_key,day_key,actor,kind,content) VALUES(?,?,?,?,?,?)",
+                (event_id, session_key, day_key, actor, kind, content),
+            )
+        except sqlite3.OperationalError:
+            return
+
+    def search_memory_fts(
+        self,
+        *,
+        layer: str,
+        session_key: str,
+        match_query: str,
+        limit: int = 1200,
+        include_global: bool = True,
+    ) -> List[sqlite3.Row]:
+        q = str(match_query or "").strip()
+        if not q:
+            return []
+        now = now_ts()
+        try:
+            if include_global:
+                rows = self.conn.execute(
+                    """
+                    SELECT mi.*, bm25(memory_fts) AS fts_rank
+                    FROM memory_fts
+                    JOIN memory_items mi ON mi.id = memory_fts.item_id
+                    WHERE memory_fts MATCH ?
+                      AND mi.layer=?
+                      AND (mi.session_key=? OR mi.session_key='global')
+                      AND (mi.ttl_expires_at IS NULL OR mi.ttl_expires_at > ?)
+                    ORDER BY fts_rank ASC, mi.updated_at DESC
+                    LIMIT ?
+                    """,
+                    (q, layer, session_key, now, int(limit)),
+                ).fetchall()
+                return rows
+            rows = self.conn.execute(
+                """
+                SELECT mi.*, bm25(memory_fts) AS fts_rank
+                FROM memory_fts
+                JOIN memory_items mi ON mi.id = memory_fts.item_id
+                WHERE memory_fts MATCH ?
+                  AND mi.layer=?
+                  AND mi.session_key=?
+                  AND (mi.ttl_expires_at IS NULL OR mi.ttl_expires_at > ?)
+                ORDER BY fts_rank ASC, mi.updated_at DESC
+                LIMIT ?
+                """,
+                (q, layer, session_key, now, int(limit)),
+            ).fetchall()
+            return rows
+        except sqlite3.OperationalError:
+            return []
 
     def fetch_deep_items_by_fact_keys(
         self,
@@ -805,6 +958,65 @@ class MemqDB:
     def get_style_profile(self) -> Dict[str, str]:
         rows = self.conn.execute("SELECT key,value FROM style_profile ORDER BY key").fetchall()
         return {str(r["key"]): str(r["value"]) for r in rows}
+
+    def get_profile_snapshot(self, session_key: str, max_parts: int = 8) -> str:
+        parts: List[str] = []
+        style = self.get_style_profile()
+        for k in ("callUser", "firstPerson", "persona", "tone", "verbosity"):
+            v = str(style.get(k) or "").strip()
+            if not v:
+                continue
+            parts.append(f"{k}:{v[:40]}")
+            if len(parts) >= max_parts:
+                return " | ".join(parts)
+
+        pref = self.get_preference_profile()
+        for k in ("language.primary", "policy.retention.default", "policy.ttl.default_days"):
+            pv = pref.get(k) or {}
+            v = str(pv.get("value") or "").strip()
+            conf = float(pv.get("confidence", 0.0) or 0.0)
+            if not v or conf < 0.55:
+                continue
+            parts.append(f"{k}:{v[:40]}")
+            if len(parts) >= max_parts:
+                return " | ".join(parts)
+
+        rows = self.fetch_deep_items_by_fact_keys(
+            session_key=session_key,
+            fact_keys=[
+                "profile.family",
+                "profile.family.spouse",
+                "profile.family.pet",
+                "profile.family.child",
+                "profile.identity.call_user",
+                "profile.identity.first_person",
+                "profile.persona.role",
+                "profile.persona.tone",
+            ],
+            limit=32,
+            include_global=True,
+        )
+        seen = set()
+        for r in rows:
+            try:
+                tags = json.loads(str(r["tags"] or "{}"))
+            except Exception:
+                tags = {}
+            fact = tags.get("fact") if isinstance(tags, dict) else {}
+            if not isinstance(fact, dict):
+                continue
+            fk = str(fact.get("fact_key") or "")
+            val = str(fact.get("value") or "").strip()
+            if not fk or not val:
+                continue
+            if fk in seen:
+                continue
+            seen.add(fk)
+            short_k = fk.replace("profile.", "")
+            parts.append(f"{short_k}:{val[:40]}")
+            if len(parts) >= max_parts:
+                break
+        return " | ".join(parts)
 
     def add_preference_event(
         self,

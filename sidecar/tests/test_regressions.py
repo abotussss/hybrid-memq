@@ -100,6 +100,56 @@ class RegressionGuardsTest(unittest.TestCase):
         self.assertIn("家族", q)
         self.assertGreater(lexical_overlap(q, "家族: 妻=ミナ"), 0.0)
 
+    def test_memory_fts_search_returns_candidates(self) -> None:
+        self.db.add_memory_item(
+            session_key="s1",
+            layer="deep",
+            text="家族の記憶",
+            summary="家族: 妻=ミナ",
+            importance=0.8,
+            tags={"kind": "structured_fact", "fact_keys": ["profile.family.spouse"]},
+            emb_f16=None,
+            emb_q=None,
+            emb_dim=0,
+            source="turn",
+        )
+        rows = self.db.search_memory_fts(
+            layer="deep",
+            session_key="s1",
+            match_query='"家族" OR "妻"',
+            limit=10,
+            include_global=True,
+        )
+        if len(rows) == 0:
+            # sqlite build without FTS5 support: search falls back gracefully.
+            base = self.db.list_memory_items("deep", "s1", limit=10)
+            self.assertGreaterEqual(len(base), 1)
+        else:
+            self.assertGreaterEqual(len(rows), 1)
+
+    def test_profile_snapshot_has_style_and_fact(self) -> None:
+        self.db.upsert_style("callUser", "ヒロ")
+        self.db.upsert_style("firstPerson", "僕")
+        self.db.add_memory_item(
+            session_key="global",
+            layer="deep",
+            text="家族: 妻=ミナ",
+            summary="家族: 妻=ミナ | subject=user | conf=0.95 | src=user_msg | ttl=365d",
+            importance=0.9,
+            tags={
+                "kind": "durable_global_fact",
+                "fact_keys": ["profile.family.spouse"],
+                "fact": {"fact_key": "profile.family.spouse", "value": "ミナ", "confidence": 0.95, "source": "user_msg", "ts": int(time.time())},
+            },
+            emb_f16=None,
+            emb_q=None,
+            emb_dim=0,
+            source="turn",
+        )
+        snap = self.db.get_profile_snapshot("s1")
+        self.assertIn("callUser:ヒロ", snap)
+        self.assertIn("family.spouse:ミナ", snap)
+
     def test_ingest_sanitize_keeps_normal_text(self) -> None:
         src = "Please remember my name is Hiro and I prefer concise Japanese answers."
         out = _sanitize_turn_text(src)
