@@ -101,8 +101,9 @@ curl -sS http://127.0.0.1:7781/health
 - `MEMCTX`: `120`
 - `MEMRULES`: `80`
 - `MEMSTYLE`: `120`
-- `TOTAL INPUT CAP` (estimated): `5200`
-- `TOTAL RESERVE` (system/tools margin): `1100`
+- `TOTAL INPUT CAP` (estimated): `4200`
+- `TOTAL RESERVE` (system/tools margin): `1800`
+- `CAP SAFETY RATIO`: `0.72`
 
 These are configured in:
 
@@ -271,8 +272,9 @@ curl -sS http://127.0.0.1:7781/health
 - `MEMCTX`: `120`
 - `MEMRULES`: `80`
 - `MEMSTYLE`: `120`
-- `TOTAL INPUT CAP`（推定）: `5200`
-- `TOTAL RESERVE`（system/tool余白）: `1100`
+- `TOTAL INPUT CAP`（推定）: `4200`
+- `TOTAL RESERVE`（system/tool余白）: `1800`
+- `CAP SAFETY RATIO`: `0.72`
 
 定義場所:
 

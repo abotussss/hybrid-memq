@@ -3,43 +3,43 @@
     "total_cases": 8,
     "success_rate": 1.0,
     "empty_material_rate": 0.0,
-    "avg_memctx_tokens": 110.375,
+    "avg_memctx_tokens": 86.875,
     "by_category": {
       "fact": {
         "n": 1,
         "success_rate": 1.0,
         "empty_material_rate": 0.0,
-        "avg_memctx_tokens": 104.0
+        "avg_memctx_tokens": 69.0
       },
       "identity": {
         "n": 1,
         "success_rate": 1.0,
         "empty_material_rate": 0.0,
-        "avg_memctx_tokens": 108.0
+        "avg_memctx_tokens": 73.0
       },
       "overview": {
         "n": 1,
         "success_rate": 1.0,
         "empty_material_rate": 0.0,
-        "avg_memctx_tokens": 116.0
+        "avg_memctx_tokens": 111.0
       },
       "profile": {
         "n": 2,
         "success_rate": 1.0,
         "empty_material_rate": 0.0,
-        "avg_memctx_tokens": 109.5
+        "avg_memctx_tokens": 93.5
       },
       "state": {
         "n": 1,
         "success_rate": 1.0,
         "empty_material_rate": 0.0,
-        "avg_memctx_tokens": 108.0
+        "avg_memctx_tokens": 37.0
       },
       "timeline": {
         "n": 2,
         "success_rate": 1.0,
         "empty_material_rate": 0.0,
-        "avg_memctx_tokens": 114.0
+        "avg_memctx_tokens": 109.0
       }
     }
   },
@@ -49,7 +49,7 @@
       "prompt": "俺の名前覚えてる？",
       "success": true,
       "empty_material": false,
-      "memctx_tokens": 116,
+      "memctx_tokens": 119,
       "surface_count": 1,
       "deep_count": 2
     },
@@ -58,7 +58,7 @@
       "prompt": "家族構成は？",
       "success": true,
       "empty_material": false,
-      "memctx_tokens": 103,
+      "memctx_tokens": 68,
       "surface_count": 5,
       "deep_count": 4
     },
@@ -67,7 +67,7 @@
       "prompt": "君は誰？",
       "success": true,
       "empty_material": false,
-      "memctx_tokens": 108,
+      "memctx_tokens": 73,
       "surface_count": 5,
       "deep_count": 2
     },
@@ -76,7 +76,7 @@
       "prompt": "昨日何した？",
       "success": true,
       "empty_material": false,
-      "memctx_tokens": 115,
+      "memctx_tokens": 107,
       "surface_count": 5,
       "deep_count": 5
     },
@@ -85,7 +85,7 @@
       "prompt": "最近の要点まとめて",
       "success": true,
       "empty_material": false,
-      "memctx_tokens": 113,
+      "memctx_tokens": 111,
       "surface_count": 5,
       "deep_count": 5
     },
@@ -94,7 +94,7 @@
       "prompt": "これまでの記憶を要約して",
       "success": true,
       "empty_material": false,
-      "memctx_tokens": 116,
+      "memctx_tokens": 111,
       "surface_count": 5,
       "deep_count": 5
     },
@@ -103,7 +103,7 @@
       "prompt": "今の進捗は？",
       "success": true,
       "empty_material": false,
-      "memctx_tokens": 108,
+      "memctx_tokens": 37,
       "surface_count": 5,
       "deep_count": 5
     },
@@ -112,7 +112,7 @@
       "prompt": "呼び方の設定は？",
       "success": true,
       "empty_material": false,
-      "memctx_tokens": 104,
+      "memctx_tokens": 69,
       "surface_count": 5,
       "deep_count": 2
     }

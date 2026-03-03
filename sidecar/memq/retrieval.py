@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Tuple
 
 from .db import MemqDB
@@ -34,6 +35,20 @@ def retrieve_candidates(
         best_surface_sim = float(surface[0].get("sim", -1.0)) if surface else -1.0
         best_surface_lex = float(surface[0].get("lex", 0.0)) if surface else 0.0
         coverage_gap = (not surface) or (best_surface_sim < float(surface_threshold)) or (best_surface_lex < 0.12)
+        coding_like = bool(
+            re.search(
+                r"(コード|code|bug|error|stack|trace|diff|patch|test|build|compile|実装|修正)",
+                prompt,
+                re.IGNORECASE,
+            )
+        )
+        memory_intent = bool(
+            intent["profile"] >= 0.25
+            or intent["timeline"] >= 0.25
+            or intent["overview"] >= 0.55
+            or intent["fact_lookup"] >= 0.45
+            or bool(q_fact_keys)
+        )
         intent_deep = bool(
             intent["profile"] >= 0.35
             or intent["timeline"] >= 0.40
@@ -41,6 +56,9 @@ def retrieve_candidates(
             or intent["fact_lookup"] >= 0.45
             or bool(q_fact_keys)
         )
+        if coding_like and not memory_intent:
+            intent_deep = False
+            coverage_gap = False
         if coverage_gap or intent_deep:
             deep_called = True
             deep = search_deep(db, session_key, prompt, top_k=max(1, top_k))

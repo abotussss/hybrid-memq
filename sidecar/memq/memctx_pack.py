@@ -430,7 +430,7 @@ def build_memctx(
                 break
         return " || ".join(ev_parts)[:220]
 
-    lines: List[str] = [f"budget_tokens={budget_tokens}", f"q={prompt[:96].replace(chr(10), ' ')}"]
+    lines: List[str] = [f"budget_tokens={budget_tokens}"]
     timeline_range = detect_timeline_range(prompt)
     time_scoped = bool(timeline_range and timeline_range.explicit)
     query_memory_overview = bool(
@@ -509,17 +509,26 @@ def build_memctx(
     if time_scoped:
         _push_timeline_block()
 
-    # Always-on anchors keep conversational continuity even when query routing misses.
+    # Anchor lines: always keep minimum continuity, but avoid over-injecting
+    # when query intent does not require heavy memory context.
     # In explicit time-scoped mode keep anchors shorter so t.* survives budget trimming.
     anchor_limit = 80 if time_scoped else 120
     convsurf_anchor = _clean_summary((db.get_conv_summary(session_key, "surface_only") or "").replace(chr(10), " | "), 90 if time_scoped else 110)
     convdeep_anchor = _clean_summary((db.get_conv_summary(session_key, "deep") or "").replace(chr(10), " | "), 90 if time_scoped else 110)
     profile_anchor = _clean_summary(_profile_snapshot_line(), anchor_limit)
     recent_anchor = _clean_summary(_recent_timeline_line(), anchor_limit)
+
+    need_profile_anchor = bool(intent["profile"] >= 0.30 or bool(q_fact_keys))
+    need_timeline_anchor = bool(time_scoped or intent["timeline"] >= 0.25 or query_memory_overview)
+    need_deep_anchor = bool(intent["overview"] >= 0.55 or intent["fact_lookup"] >= 0.45 or bool(q_fact_keys))
+
     _push_kv(lines, "wm.surf", convsurf_anchor or "none", dedupe_by_value=False)
-    _push_kv(lines, "wm.deep", convdeep_anchor or "none", dedupe_by_value=False)
-    _push_kv(lines, "p.snapshot", profile_anchor or "unknown", dedupe_by_value=False)
-    _push_kv(lines, "t.recent", recent_anchor or "none", dedupe_by_value=False)
+    if need_deep_anchor:
+        _push_kv(lines, "wm.deep", convdeep_anchor or "none", dedupe_by_value=False)
+    if need_profile_anchor:
+        _push_kv(lines, "p.snapshot", profile_anchor or "unknown", dedupe_by_value=False)
+    if need_timeline_anchor:
+        _push_kv(lines, "t.recent", recent_anchor or "none", dedupe_by_value=False)
 
     # Non-explicit timeline prompts can still attach compact t.* context after anchors.
     if timeline_range and not time_scoped:

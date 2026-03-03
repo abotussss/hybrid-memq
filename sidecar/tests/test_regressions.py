@@ -77,7 +77,7 @@ class RegressionGuardsTest(unittest.TestCase):
         self.assertNotIn("h e l l o", out)
         self.assertIn("hello world", out)
 
-    def test_memctx_has_always_on_anchors(self) -> None:
+    def test_memctx_has_minimum_continuity_anchors(self) -> None:
         out = build_memctx(
             db=self.db,
             session_key="s1",
@@ -87,15 +87,43 @@ class RegressionGuardsTest(unittest.TestCase):
             budget_tokens=140,
         )
         self.assertIn("wm.surf=", out)
-        self.assertIn("wm.deep=", out)
-        self.assertIn("p.snapshot=", out)
-        self.assertIn("t.recent=", out)
+        self.assertTrue(
+            ("wm.deep=" in out) or ("p.snapshot=" in out) or ("t.recent=" in out),
+            "at least one secondary anchor should be present",
+        )
 
     def test_intent_router_profile_timeline(self) -> None:
         i1 = infer_intent("君は誰？")
         self.assertGreaterEqual(float(i1.get("profile", 0.0)), 0.8)
         i2 = infer_intent("昨日何した？")
         self.assertGreaterEqual(float(i2.get("timeline", 0.0)), 0.8)
+
+    def test_retrieval_lean_mode_skips_deep_for_plain_coding_turn(self) -> None:
+        self.db.add_memory_item(
+            session_key="s1",
+            layer="deep",
+            text="家族構成: 妻ミナ 子ども2人",
+            summary="家族構成: 妻ミナ 子ども2人",
+            importance=0.9,
+            tags={"kind": "structured_fact", "fact_keys": ["profile.family.summary"]},
+            emb_f16=None,
+            emb_q=None,
+            emb_dim=0,
+            source="turn",
+        )
+        surface, deep, meta = retrieve_candidates(
+            db=self.db,
+            session_key="s1",
+            prompt="このコードのバグを直して",
+            dim=128,
+            bits_per_dim=8,
+            top_k=5,
+            surface_threshold=0.85,
+            deep_enabled=True,
+        )
+        self.assertEqual([], surface)
+        self.assertEqual([], deep)
+        self.assertFalse(bool(meta.get("deepCalled")))
 
     def test_cjk_token_overlap_handles_paraphrase(self) -> None:
         q = tokenize_lexical("家族構成は？")

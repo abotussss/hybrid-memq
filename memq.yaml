@@ -6,12 +6,13 @@ budgets:
   styleTokens: 120
 
 total:
-  maxInputTokens: 5200
-  reserveTokens: 1100
+  maxInputTokens: 4200
+  reserveTokens: 1800
+  capSafetyRatio: 0.72
 
 recent:
-  maxTokens: 5000
-  minKeepMessages: 6
+  maxTokens: 2600
+  minKeepMessages: 4
 
 retrieval:
   topK: 5

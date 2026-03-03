@@ -243,18 +243,27 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
     const minKeep = Math.max(2, getCfg(api, "memq.recent.minKeepMessages", defaults["memq.recent.minKeepMessages"]));
     const totalMaxInput = Math.max(1200, getCfg(api, "memq.total.maxInputTokens", defaults["memq.total.maxInputTokens"]));
     const totalReserve = Math.max(0, getCfg(api, "memq.total.reserveTokens", defaults["memq.total.reserveTokens"]));
+    const capSafetyRatio = Math.max(
+      0.55,
+      Math.min(0.95, Number(getCfg(api, "memq.total.capSafetyRatio", defaults["memq.total.capSafetyRatio"])))
+    );
     const promptTokens = estimateTokens(prompt);
     const styleEnabled = Boolean(getCfg(api, "memq.style.enabled", defaults["memq.style.enabled"]));
     const recallLikePrompt = /(覚えて|記憶|これまで|君は誰|あなたは誰|家族|呼称|一人称|最近|昨日|一昨日|先週|先月|summary|recap|who are you|yesterday|recent)/i.test(
       prompt
     );
     const codingLikePrompt = /(コード|code|bug|error|stack|trace|diff|patch|test|build|compile|実装|修正)/i.test(prompt);
+    const leanMode = codingLikePrompt && !recallLikePrompt;
+    if (leanMode) {
+      budgets.memctx = Math.max(48, Math.min(72, budgets.memctx));
+    }
     let recentBudget = recallLikePrompt && !codingLikePrompt ? Math.max(1200, Math.min(recentMax, Math.floor(recentMax * 0.45))) : recentMax;
     const fixedEstimate = promptTokens + budgets.memctx + budgets.rules + (styleEnabled ? budgets.style : 0) + totalReserve;
-    const recentCapByTotal = Math.max(220, totalMaxInput - fixedEstimate);
+    const recentCapByTotal = Math.max(220, Math.floor((totalMaxInput - fixedEstimate) * capSafetyRatio));
     recentBudget = Math.max(220, Math.min(recentBudget, recentCapByTotal));
 
-    const topK = Math.max(1, getCfg(api, "memq.retrieval.topK", defaults["memq.retrieval.topK"]));
+    let topK = Math.max(1, getCfg(api, "memq.retrieval.topK", defaults["memq.retrieval.topK"]));
+    if (leanMode) topK = Math.min(topK, 3);
     const surfaceThreshold = Number(getCfg(api, "memq.retrieval.surfaceThreshold", defaults["memq.retrieval.surfaceThreshold"]));
     const deepEnabled = Boolean(getCfg(api, "memq.retrieval.deepEnabled", defaults["memq.retrieval.deepEnabled"]));
 
@@ -279,7 +288,15 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
     }
 
     const messages = Array.isArray(event?.messages) ? event.messages : [];
-    const sliced = splitRecentByTokenBudget(messages, recentBudget, minKeep);
+    let sliced = splitRecentByTokenBudget(messages, recentBudget, minKeep);
+    // Enforce total-cap pre-trim with pessimistic fixed estimate.
+    let trimLoops = 0;
+    while (sliced.keptTokens + fixedEstimate > totalMaxInput && trimLoops < 4) {
+      recentBudget = Math.max(180, Math.floor(recentBudget * 0.78));
+      const minKeepNow = recentBudget < 700 ? 2 : minKeep;
+      sliced = splitRecentByTokenBudget(messages, recentBudget, minKeepNow);
+      trimLoops += 1;
+    }
 
     if (sliced.pruned.length > 0) {
       if (getCfg(api, "memq.archive.enabled", defaults["memq.archive.enabled"])) {
@@ -305,7 +322,7 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
     if (repaired.removed > 0) {
       logInfo(api, `[memq-v2] before_prompt_build session=${sessionKey} tool_orphan_removed=${repaired.removed}`);
     }
-    const keptForPrompt = repaired.kept;
+    let keptForPrompt = repaired.kept;
 
     // in-place rewrite for latest OpenClaw runtime behavior
     if (
@@ -315,7 +332,7 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
       event.messages.splice(0, event.messages.length, ...keptForPrompt);
     }
 
-    const recentMessages = normalizeMessages(keptForPrompt).filter((m) => m.role === "user" || m.role === "assistant");
+    let recentMessages = normalizeMessages(keptForPrompt).filter((m) => m.role === "user" || m.role === "assistant");
     rt.lastKeptBySession.set(sessionKey, recentMessages);
     const lastUser = [...recentMessages].reverse().find((m) => m.role === "user")?.text ?? prompt;
     rt.lastUserBySession.set(sessionKey, lastUser);
@@ -367,14 +384,51 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
       rt.lastMemstyleBySession.set(sessionKey, memstyle);
     }
 
-    const prependContext = composeInjectedBlocks(memrules, memstyle, memctx);
-    const injectedTokens = estimateTokens(prependContext);
-    const totalEstimatedInput = sliced.keptTokens + injectedTokens + promptTokens + totalReserve;
+    let prependContext = composeInjectedBlocks(memrules, memstyle, memctx);
+    let injectedTokens = estimateTokens(prependContext);
+    let keptEstimated = splitRecentByTokenBudget(keptForPrompt, Number.MAX_SAFE_INTEGER, 1).keptTokens;
+    let totalEstimatedInput = keptEstimated + injectedTokens + promptTokens + totalReserve;
+    // Enforce total-cap post-trim as final safety net.
+    if (totalEstimatedInput > totalMaxInput) {
+      const emergencyRecentBudget = Math.max(140, totalMaxInput - (injectedTokens + promptTokens + totalReserve));
+      const emergencyMinKeep = emergencyRecentBudget < 700 ? 2 : minKeep;
+      const emergencySlice = splitRecentByTokenBudget(keptForPrompt, emergencyRecentBudget, emergencyMinKeep);
+      if (emergencySlice.pruned.length > 0) {
+        if (getCfg(api, "memq.archive.enabled", defaults["memq.archive.enabled"])) {
+          archivePrunedMessages({
+            workspaceRoot,
+            sessionKey,
+            pruned: emergencySlice.pruned,
+            maxFileBytes: Math.max(2048, getCfg(api, "memq.archive.maxFileBytes", defaults["memq.archive.maxFileBytes"])),
+            maxFiles: Math.max(1, getCfg(api, "memq.archive.maxFiles", defaults["memq.archive.maxFiles"])),
+          });
+        }
+        try {
+          const prunedNorm = normalizeMessages(emergencySlice.pruned).filter((m) => m.role === "user" || m.role === "assistant");
+          await sidecar.summarizeConversation(sessionKey, prunedNorm, "surface_only");
+          await sidecar.summarizeConversation(sessionKey, prunedNorm, "deep");
+        } catch {
+          // best effort
+        }
+      }
+      const emergencyRepair = repairToolIntegrity(emergencySlice.kept);
+      keptForPrompt = emergencyRepair.kept;
+      if (Array.isArray(event?.messages)) {
+        event.messages.splice(0, event.messages.length, ...keptForPrompt);
+      }
+      recentMessages = normalizeMessages(keptForPrompt).filter((m) => m.role === "user" || m.role === "assistant");
+      rt.lastKeptBySession.set(sessionKey, recentMessages);
+      const finalUser = [...recentMessages].reverse().find((m) => m.role === "user")?.text ?? prompt;
+      rt.lastUserBySession.set(sessionKey, finalUser);
+
+      keptEstimated = splitRecentByTokenBudget(keptForPrompt, Number.MAX_SAFE_INTEGER, 1).keptTokens;
+      totalEstimatedInput = keptEstimated + injectedTokens + promptTokens + totalReserve;
+    }
     const overCap = totalEstimatedInput > totalMaxInput ? 1 : 0;
 
     logInfo(
       api,
-      `[memq-v2] before_prompt_build session=${sessionKey} kept_msgs=${keptForPrompt.length} pruned_msgs=${sliced.pruned.length} kept_tokens=${sliced.keptTokens} recent_budget=${recentBudget} recent_cfg=${recentMax} injected_tokens=${injectedTokens} total_est=${totalEstimatedInput} total_cap=${totalMaxInput} total_over=${overCap} surface_hit=${surfaceHit ? 1 : 0} deep_called=${deepCalled ? 1 : 0} latency_ms=${Date.now() - t0}`
+      `[memq-v2] before_prompt_build session=${sessionKey} kept_msgs=${keptForPrompt.length} pruned_msgs=${sliced.pruned.length} kept_tokens=${keptEstimated} recent_budget=${recentBudget} recent_cfg=${recentMax} trim_loops=${trimLoops} lean_mode=${leanMode ? 1 : 0} injected_tokens=${injectedTokens} total_est=${totalEstimatedInput} total_cap=${totalMaxInput} total_over=${overCap} surface_hit=${surfaceHit ? 1 : 0} deep_called=${deepCalled ? 1 : 0} latency_ms=${Date.now() - t0}`
     );
 
     return { prependContext };

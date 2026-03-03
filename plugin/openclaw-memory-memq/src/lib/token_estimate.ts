@@ -13,7 +13,7 @@ export function estimateTokens(text: string): number {
 
 export function messageText(m: any): string {
   if (!m || typeof m !== "object") return "";
-  const toText = (v: any, maxLen = 3200): string => {
+  const toText = (v: any, maxLen = 12000): string => {
     if (v == null) return "";
     if (typeof v === "string") return v.trim().slice(0, maxLen);
     try {
@@ -28,16 +28,16 @@ export function messageText(m: any): string {
       .map((b: any) => {
         if (!b || typeof b !== "object") return "";
         const t = String((b as any).type ?? "");
-        if (t === "text") return toText((b as any).text, 3200);
+        if (t === "text") return toText((b as any).text, 12000);
         if (t === "toolResult" || t === "tool_result" || t === "function_call_output" || t === "tool-output" || t === "toolOutput") {
-          return toText((b as any).output ?? (b as any).result ?? (b as any).content ?? b, 3600);
+          return toText((b as any).output ?? (b as any).result ?? (b as any).content ?? b, 18000);
         }
         if (t === "toolCall" || t === "tool_call" || t === "tool-use" || t === "function_call") {
           const name = toText((b as any).name ?? (b as any).function?.name ?? "", 120);
-          const args = toText((b as any).args ?? (b as any).arguments ?? (b as any).function?.arguments ?? "", 480);
+          const args = toText((b as any).args ?? (b as any).arguments ?? (b as any).function?.arguments ?? "", 1500);
           return `tool_call:${name} args:${args}`.trim();
         }
-        return "";
+        return toText(b, 1600);
       })
       .join(" ")
       .trim();
@@ -79,7 +79,29 @@ export function splitRecentByTokenBudget(messages: any[], maxTokens: number, min
   const n = messages.length;
   if (!n) return { keepStart: 0, kept: [], pruned: [], keptTokens: 0 };
   const normalized = normalizeMessages(messages);
-  const tokenByIndex = messages.map((m, i) => estimateMessageTokens(normalized[i] ?? { role: String(m?.role ?? "x"), text: messageText(m) }));
+  const tokenByIndex = messages.map((m, i) => {
+    const role = String(m?.role ?? "").toLowerCase();
+    const human = role === "user" || role === "assistant";
+    let t = estimateMessageTokens(normalized[i] ?? { role: String(m?.role ?? "x"), text: messageText(m) });
+
+    // Guard against severe under-estimation on rich non-text payloads.
+    let rawLen = 0;
+    try {
+      rawLen = JSON.stringify(m).length;
+    } catch {
+      rawLen = 0;
+    }
+    if (rawLen > 0) {
+      const rawTok = Math.ceil(rawLen / 3.4);
+      t = human ? Math.max(t, Math.ceil(rawTok * 0.65)) : Math.max(t, rawTok);
+    }
+
+    if (!human) {
+      // Tool/function messages generally serialize with larger protocol overhead.
+      t = Math.ceil(t * 1.22 + 20);
+    }
+    return Math.max(1, t);
+  });
   const isHumanRole = (role: string): boolean => role === "user" || role === "assistant";
 
   let sum = 0;
