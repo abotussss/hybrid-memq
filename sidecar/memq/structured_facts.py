@@ -22,11 +22,52 @@ class StructuredPattern:
 # Centralized extraction patterns to avoid endpoint-local special cases.
 PATTERNS: Sequence[StructuredPattern] = (
     StructuredPattern(
+        pattern=re.compile(
+            r"(?:俺|オレ|僕|ぼく|私|わたし|自分|my)\s*(?:の)?\s*名前\s*(?:は|が|:|：)?\s*([A-Za-z0-9ぁ-んァ-ヶ一-龠ー\\-]{1,24})",
+            re.IGNORECASE,
+        ),
+        subject="user",
+        relation="identity.user_name",
+        fact_key="profile.user.name",
+        confidence=0.78,
+    ),
+    StructuredPattern(
+        pattern=re.compile(
+            r"(?:my name is)\s*([A-Za-z0-9ぁ-んァ-ヶ一-龠ー\\-]{1,24})",
+            re.IGNORECASE,
+        ),
+        subject="user",
+        relation="identity.user_name",
+        fact_key="profile.user.name",
+        confidence=0.78,
+    ),
+    StructuredPattern(
         pattern=re.compile(r"(?:妻|奥さま|奥さん|夫|旦那|husband|wife)\s*(?:は|が|:|：)\s*([A-Za-z0-9ぁ-んァ-ヶ一-龠ー\\-]{1,24})", re.IGNORECASE),
         subject="user",
         relation="family.spouse",
         fact_key="profile.family.spouse",
         confidence=0.75,
+    ),
+    StructuredPattern(
+        pattern=re.compile(r"(?:家族構成|家族)\s*(?:は|が|:|：)\s*([^。\\n]{2,60})", re.IGNORECASE),
+        subject="user",
+        relation="family.summary",
+        fact_key="profile.family.summary",
+        confidence=0.74,
+    ),
+    StructuredPattern(
+        pattern=re.compile(r"(?:子ども|子供|子)\s*(?:は|が|:|：)?\s*(\d{1,2})\s*人", re.IGNORECASE),
+        subject="user",
+        relation="family.children_count",
+        fact_key="profile.family.children_count",
+        confidence=0.76,
+    ),
+    StructuredPattern(
+        pattern=re.compile(r"(\d{1,2})\s*人(?:の)?\s*(?:子ども|子供|子)", re.IGNORECASE),
+        subject="user",
+        relation="family.children_count",
+        fact_key="profile.family.children_count",
+        confidence=0.74,
     ),
     StructuredPattern(
         pattern=re.compile(r"(?:愛犬|犬|猫|ペット|dog|cat|pet)\s*(?:は|が|:|：)\s*([A-Za-z0-9ぁ-んァ-ヶ一-龠ー\\-]{1,24})", re.IGNORECASE),
@@ -48,6 +89,20 @@ PATTERNS: Sequence[StructuredPattern] = (
         relation="identity.call_user",
         fact_key="profile.identity.call_user",
         confidence=0.76,
+    ),
+    StructuredPattern(
+        pattern=re.compile(r"([A-Za-z0-9ぁ-んァ-ヶ一-龠ー\\-]{1,24})\s*(?:って|と)\s*呼んで", re.IGNORECASE),
+        subject="assistant",
+        relation="identity.call_user",
+        fact_key="profile.identity.call_user",
+        confidence=0.80,
+    ),
+    StructuredPattern(
+        pattern=re.compile(r"(?:call me)\s*([A-Za-z0-9ぁ-んァ-ヶ一-龠ー\\-]{1,24})", re.IGNORECASE),
+        subject="assistant",
+        relation="identity.call_user",
+        fact_key="profile.identity.call_user",
+        confidence=0.80,
     ),
     StructuredPattern(
         pattern=re.compile(r"(?:一人称)\s*(?:は|が|:|：)?\s*([A-Za-z0-9ぁ-んァ-ヶ一-龠ー\\-]{1,24})", re.IGNORECASE),
@@ -88,8 +143,13 @@ def plausible_fact_value(fact_key: str, value: str) -> bool:
         "profile.family.pet",
         "profile.family.child",
         "profile.identity.call_user",
+        "profile.user.name",
     }:
         return bool(_NAME_LIKE_RE.match(v))
+    if fact_key == "profile.family.summary":
+        return 2 <= len(v) <= 60
+    if fact_key == "profile.family.children_count":
+        return bool(re.fullmatch(r"\d{1,2}", v))
     return True
 
 
@@ -197,10 +257,16 @@ def structured_fact_summary(f: Dict[str, Any], max_len: int = 220) -> str:
 
     if rel == "family.spouse":
         core = f"家族: 妻={val}"
+    elif rel == "family.summary":
+        core = f"家族構成: {val}"
+    elif rel == "family.children_count":
+        core = f"家族: 子ども人数={val}"
     elif rel == "family.pet":
         core = f"家族: ペット={val}"
     elif rel == "family.child":
         core = f"家族: 子ども={val}"
+    elif rel == "identity.user_name":
+        core = f"プロフィール: 名前={val}"
     elif rel == "identity.call_user":
         core = f"呼称: ユーザー呼称={val}"
     elif rel == "identity.first_person":

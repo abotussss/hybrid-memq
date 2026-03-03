@@ -169,9 +169,11 @@ def _pack_memctx_payload(
             selected_token_sets.append(set(c["tokens"]))
         return True
 
-    must_keys = {"wm.surf", "p.snapshot", "t.recent"}
+    must_keys = {"wm.surf", "p.snapshot"}
     if time_scoped:
         must_keys.add("t.range")
+    else:
+        must_keys.add("t.recent")
     for c in sorted(candidates, key=lambda x: x["idx"]):
         if c["key"] in must_keys:
             _select(c)
@@ -448,6 +450,10 @@ def build_memctx(
     def _push_timeline_block() -> None:
         if not timeline_range:
             return
+        digest_day_cap = 2 if time_scoped else 4
+        digest_item_limit = 120 if time_scoped else 180
+        event_cap = 6 if time_scoped else 4
+        event_item_limit = 96 if time_scoped else 120
         _push_kv(lines, "t.range", f"{timeline_range.start_day}..{timeline_range.end_day}", dedupe_by_value=False)
         _push_kv(lines, "t.label", timeline_range.label, dedupe_by_value=False)
         dg_rows = db.list_daily_digests_range(
@@ -465,11 +471,11 @@ def build_memctx(
             if not day_key or day_key in seen_days:
                 continue
             seen_days.add(day_key)
-            compact = _clean_summary(str(r["compact_text"] or "").replace("\n", " | "), 180)
+            compact = _clean_summary(str(r["compact_text"] or "").replace("\n", " | "), digest_item_limit)
             if not compact:
                 continue
             digest_parts.append(f"{day_key}:{compact}")
-            if len(digest_parts) >= 4:
+            if len(digest_parts) >= digest_day_cap:
                 break
         if digest_parts:
             _push_kv(lines, "t.digest", " || ".join(digest_parts), dedupe_by_value=False)
@@ -484,12 +490,12 @@ def build_memctx(
         ev_count = 0
         ev_seen = set()
         for r in ev_rows:
-            if ev_count >= 4:
+            if ev_count >= event_cap:
                 break
             day_key = str(r["day_key"] or "")
             actor = str(r["actor"] or "assistant")
             kind = str(r["kind"] or "chat")
-            summary = _clean_summary(str(r["summary"] or ""), 120)
+            summary = _clean_summary(str(r["summary"] or ""), event_item_limit)
             if not summary:
                 continue
             sig = summary.lower()
@@ -622,9 +628,9 @@ def build_memctx(
                 break
 
     # Always carry a tiny slice of durable global memory so long-term identity/preferences survive.
-    durable_rows = db.list_memory_items("deep", session_key, limit=128)
+    durable_rows = db.list_memory_items("deep", "global", limit=256)
     g_count = 0
-    g_limit = 1 if query_memory_overview else 0
+    g_limit = 1 if (query_memory_overview or profile_query or bool(q_fact_keys) or d_count == 0) else 0
     for row in durable_rows:
         if g_count >= g_limit:
             break
@@ -648,7 +654,7 @@ def build_memctx(
             except Exception:
                 tags = {}
             row_keys = set(tags.get("fact_keys") or [])
-            if (q_fact_keys & row_keys) == set() and rel < 0.10:
+            if (q_fact_keys & row_keys) == set() and rel < 0.08:
                 continue
         if rel < 0.05 and not durable_like.search(clean):
             continue
@@ -669,7 +675,7 @@ def build_memctx(
             clean = _clean_summary(convdeep.replace(chr(10), " | "), 120)
             if clean and (_lex_rel(clean) >= 0.08 or query_memory_overview):
                 _push_kv(lines, "convdeep", clean)
-    elif d_count == 0 and q_fact_keys:
+    elif d_count == 0 and q_fact_keys and g_count == 0:
         _push_kv(lines, "memory.fact_status", "weak_or_missing", dedupe_by_value=False)
 
     # Mark ephemeral only for directly relevant prompts.

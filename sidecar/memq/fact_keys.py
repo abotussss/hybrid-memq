@@ -7,16 +7,27 @@ from typing import Iterable, List, Sequence, Set, Tuple
 # Centralized key taxonomy so query/text key inference is declarative and reusable.
 _PATTERNS: Sequence[Tuple[re.Pattern[str], Sequence[str]]] = [
     (
-        re.compile(r"(家族|family|妻|夫|husband|wife|子ども|子供|息子|娘|child|son|daughter|犬|猫|ペット|pet|dog|cat)", re.IGNORECASE),
-        ("profile.family",),
+        re.compile(r"(君は誰|あなたは誰|who are you|what are you|何者|自己紹介|identity)", re.IGNORECASE),
+        ("profile.identity", "profile.persona.role"),
     ),
+    (
+        re.compile(r"((?:俺|私|僕|わたし|ぼく).{0,3}名前|my name|名前は)", re.IGNORECASE),
+        ("profile.user.name",),
+    ),
+    (
+        re.compile(r"(家族|family|妻|夫|husband|wife|子ども|子供|息子|娘|child|son|daughter|犬|猫|ペット|pet|dog|cat)", re.IGNORECASE),
+        ("profile.family", "profile.family.summary"),
+    ),
+    (re.compile(r"(家族構成|family composition)", re.IGNORECASE), ("profile.family.summary",)),
     (re.compile(r"(妻|夫|husband|wife)", re.IGNORECASE), ("profile.family.spouse",)),
     (re.compile(r"(犬|猫|ペット|pet|dog|cat)", re.IGNORECASE), ("profile.family.pet",)),
     (re.compile(r"(子ども|子供|息子|娘|child|son|daughter)", re.IGNORECASE), ("profile.family.child",)),
+    (re.compile(r"(子ども.*\d+人|\d+人.*子ども|children?\s*\d+)", re.IGNORECASE), ("profile.family.children_count",)),
     (re.compile(r"(人格|persona|キャラ|ロール|roleplay|口調|tone|話し方|speaking style)", re.IGNORECASE), ("profile.persona", "profile.persona.role")),
     (re.compile(r"(呼称|呼び方|call me|identity)", re.IGNORECASE), ("profile.identity", "profile.identity.call_user")),
+    (re.compile(r"(って呼んで|と呼んで|呼んでほしい)", re.IGNORECASE), ("profile.identity.call_user",)),
     (re.compile(r"(一人称|first person|firstPerson)", re.IGNORECASE), ("profile.identity", "profile.identity.first_person")),
-    (re.compile(r"(検索設定|検索エンジン|search\\s*settings?|search\\s*engine)", re.IGNORECASE), ("pref.search.engine",)),
+    (re.compile(r"(検索設定|検索エンジン|search\s*settings?|search\s*engine)", re.IGNORECASE), ("pref.search.engine",)),
     (re.compile(r"(検索|search).*(brave|google|bing|duckduckgo)", re.IGNORECASE), ("pref.search.engine",)),
     (re.compile(r"(ルール|rule|policy|方針|制約|constraint)", re.IGNORECASE), ("memory.policy",)),
     (re.compile(r"(10分前|直近|recent|さっき|minutes? ago)", re.IGNORECASE), ("memory.recent",)),
@@ -45,4 +56,3 @@ def infer_query_fact_keys(text: str) -> Set[str]:
 
 def infer_text_fact_keys(text: str) -> List[str]:
     return _dedupe(infer_query_fact_keys(text))
-

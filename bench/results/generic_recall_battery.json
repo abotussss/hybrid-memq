@@ -1,0 +1,120 @@
+{
+  "summary": {
+    "total_cases": 8,
+    "success_rate": 1.0,
+    "empty_material_rate": 0.0,
+    "avg_memctx_tokens": 110.375,
+    "by_category": {
+      "fact": {
+        "n": 1,
+        "success_rate": 1.0,
+        "empty_material_rate": 0.0,
+        "avg_memctx_tokens": 104.0
+      },
+      "identity": {
+        "n": 1,
+        "success_rate": 1.0,
+        "empty_material_rate": 0.0,
+        "avg_memctx_tokens": 108.0
+      },
+      "overview": {
+        "n": 1,
+        "success_rate": 1.0,
+        "empty_material_rate": 0.0,
+        "avg_memctx_tokens": 116.0
+      },
+      "profile": {
+        "n": 2,
+        "success_rate": 1.0,
+        "empty_material_rate": 0.0,
+        "avg_memctx_tokens": 109.5
+      },
+      "state": {
+        "n": 1,
+        "success_rate": 1.0,
+        "empty_material_rate": 0.0,
+        "avg_memctx_tokens": 108.0
+      },
+      "timeline": {
+        "n": 2,
+        "success_rate": 1.0,
+        "empty_material_rate": 0.0,
+        "avg_memctx_tokens": 114.0
+      }
+    }
+  },
+  "cases": [
+    {
+      "category": "profile",
+      "prompt": "俺の名前覚えてる？",
+      "success": true,
+      "empty_material": false,
+      "memctx_tokens": 116,
+      "surface_count": 1,
+      "deep_count": 2
+    },
+    {
+      "category": "profile",
+      "prompt": "家族構成は？",
+      "success": true,
+      "empty_material": false,
+      "memctx_tokens": 103,
+      "surface_count": 5,
+      "deep_count": 4
+    },
+    {
+      "category": "identity",
+      "prompt": "君は誰？",
+      "success": true,
+      "empty_material": false,
+      "memctx_tokens": 108,
+      "surface_count": 5,
+      "deep_count": 2
+    },
+    {
+      "category": "timeline",
+      "prompt": "昨日何した？",
+      "success": true,
+      "empty_material": false,
+      "memctx_tokens": 115,
+      "surface_count": 5,
+      "deep_count": 5
+    },
+    {
+      "category": "timeline",
+      "prompt": "最近の要点まとめて",
+      "success": true,
+      "empty_material": false,
+      "memctx_tokens": 113,
+      "surface_count": 5,
+      "deep_count": 5
+    },
+    {
+      "category": "overview",
+      "prompt": "これまでの記憶を要約して",
+      "success": true,
+      "empty_material": false,
+      "memctx_tokens": 116,
+      "surface_count": 5,
+      "deep_count": 5
+    },
+    {
+      "category": "state",
+      "prompt": "今の進捗は？",
+      "success": true,
+      "empty_material": false,
+      "memctx_tokens": 108,
+      "surface_count": 5,
+      "deep_count": 5
+    },
+    {
+      "category": "fact",
+      "prompt": "呼び方の設定は？",
+      "success": true,
+      "empty_material": false,
+      "memctx_tokens": 104,
+      "surface_count": 5,
+      "deep_count": 2
+    }
+  ]
+}

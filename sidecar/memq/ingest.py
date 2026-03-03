@@ -190,16 +190,28 @@ def _extract_fact_keys(user_text: str, styles: Dict[str, str], rules: List[Tuple
         out.append("rule.output.format")
     if re.search(r"(家族|family|妻|奥さま|夫|husband|wife|子ども|息子|娘|犬|猫|ペット|pet)", t, re.IGNORECASE):
         out.append("profile.family")
+        out.append("profile.family.summary")
+    if re.search(r"(家族構成|family composition)", t, re.IGNORECASE):
+        out.append("profile.family.summary")
     if re.search(r"(妻|奥さま|夫|husband|wife)", t, re.IGNORECASE):
         out.append("profile.family.spouse")
     if re.search(r"(犬|猫|ペット|愛犬|dog|cat|pet)", t, re.IGNORECASE):
         out.append("profile.family.pet")
     if re.search(r"(子ども|子供|息子|娘|child|son|daughter)", t, re.IGNORECASE):
         out.append("profile.family.child")
+    if re.search(r"(子ども.*\d+人|\d+人.*子ども|children?\s*\d+)", t, re.IGNORECASE):
+        out.append("profile.family.children_count")
+    if re.search(r"((?:俺|私|僕|わたし|ぼく).{0,3}名前|my name|名前は)", t, re.IGNORECASE):
+        out.append("profile.user.name")
     if re.search(r"(人格|persona|キャラ|ロール|roleplay|口調|tone|話し方|speaking style)", t, re.IGNORECASE):
         out.append("profile.persona")
         out.append("profile.persona.role")
+    if re.search(r"(君は誰|あなたは誰|who are you|what are you|何者|自己紹介|identity)", t, re.IGNORECASE):
+        out.append("profile.identity")
+        out.append("profile.persona.role")
     if re.search(r"(呼称|呼び方|call me)", t, re.IGNORECASE):
+        out.append("profile.identity.call_user")
+    if re.search(r"(って呼んで|と呼んで|呼んでほしい)", t, re.IGNORECASE):
         out.append("profile.identity.call_user")
     if re.search(r"(一人称|first person)", t, re.IGNORECASE):
         out.append("profile.identity.first_person")
@@ -251,6 +263,16 @@ def _extract_structured_facts(
     if spouse:
         add_fact("user", "family.spouse", spouse.group(1), "profile.family.spouse", 0.93)
 
+    family_summary = re.search(r"(?:家族構成|家族)\s*(?:は|が|:|：)\s*([^。\n]{2,60})", t, re.IGNORECASE)
+    if family_summary:
+        add_fact("user", "family.summary", family_summary.group(1), "profile.family.summary", 0.84)
+
+    child_count = re.search(r"(?:子ども|子供|子)\s*(?:は|が|:|：)?\s*(\d{1,2})\s*人", t, re.IGNORECASE)
+    if not child_count:
+        child_count = re.search(r"(\d{1,2})\s*人(?:の)?\s*(?:子ども|子供|子)", t, re.IGNORECASE)
+    if child_count:
+        add_fact("user", "family.children_count", child_count.group(1), "profile.family.children_count", 0.84)
+
     pet = re.search(r"(?:愛犬|犬|猫|ペット|dog|cat|pet)\s*(?:は|が|:|：)\s*([A-Za-z0-9ぁ-んァ-ヶ一-龠ー\-]{1,24})", t, re.IGNORECASE)
     if pet:
         add_fact("user", "family.pet", pet.group(1), "profile.family.pet", 0.92)
@@ -259,6 +281,12 @@ def _extract_structured_facts(
     if child:
         add_fact("user", "family.child", child.group(1), "profile.family.child", 0.90)
 
+    user_name = re.search(r"(?:俺|オレ|僕|ぼく|私|わたし|自分|my)\s*(?:の)?\s*名前\s*(?:は|が|:|：)?\s*([A-Za-z0-9ぁ-んァ-ヶ一-龠ー\-]{1,24})", t, re.IGNORECASE)
+    if not user_name:
+        user_name = re.search(r"(?:my name is)\s*([A-Za-z0-9ぁ-んァ-ヶ一-龠ー\-]{1,24})", t, re.IGNORECASE)
+    if user_name:
+        add_fact("user", "identity.user_name", user_name.group(1), "profile.user.name", 0.90)
+
     call_user = styles.get("callUser")
     if call_user:
         add_fact("assistant", "identity.call_user", call_user, "profile.identity.call_user", 0.96)
@@ -266,6 +294,10 @@ def _extract_structured_facts(
         m_call = re.search(r"(?:俺|ぼく|僕|私|わたし|オレ)のことは\s*([A-Za-z0-9ぁ-んァ-ヶ一-龠ー]{1,24})", t, re.IGNORECASE)
         if m_call:
             add_fact("assistant", "identity.call_user", m_call.group(1), "profile.identity.call_user", 0.93)
+        else:
+            m_call2 = re.search(r"([A-Za-z0-9ぁ-んァ-ヶ一-龠ー\-]{1,24})\s*(?:って|と)\s*呼んで", t, re.IGNORECASE)
+            if m_call2:
+                add_fact("assistant", "identity.call_user", m_call2.group(1), "profile.identity.call_user", 0.93)
 
     first_person = styles.get("firstPerson")
     if first_person:
@@ -392,10 +424,16 @@ def _structured_fact_summary(f: Dict[str, Any]) -> str:
     ttl_days = int(f.get("ttl_days") or 365)
     if rel == "family.spouse":
         core = f"家族: 妻={val}"
+    elif rel == "family.summary":
+        core = f"家族構成: {val}"
+    elif rel == "family.children_count":
+        core = f"家族: 子ども人数={val}"
     elif rel == "family.pet":
         core = f"家族: ペット={val}"
     elif rel == "family.child":
         core = f"家族: 子ども={val}"
+    elif rel == "identity.user_name":
+        core = f"プロフィール: 名前={val}"
     elif rel == "identity.call_user":
         core = f"呼称: ユーザー呼称={val}"
     elif rel == "identity.first_person":

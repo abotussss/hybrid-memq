@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import time
 import unittest
@@ -15,6 +16,7 @@ from sidecar.memq.retrieval import retrieve_candidates
 from sidecar.memq.retrieval_deep import search_deep
 from sidecar.memq.retrieval_deep import NOISE_SUMMARY_RE as DEEP_NOISE_RE
 from sidecar.memq.retrieval_surface import NOISE_SUMMARY_RE as SURFACE_NOISE_RE
+from sidecar.memq.fact_keys import infer_query_fact_keys
 from sidecar.memq.timeline import day_key_from_ts, detect_timeline_range
 from sidecar.memq.tokens import lexical_overlap, tokenize_lexical
 
@@ -171,6 +173,69 @@ class RegressionGuardsTest(unittest.TestCase):
         self.assertEqual(0, int(wrote.get("deep", 0)))
         deep = self.db.list_memory_items("deep", "s1", limit=50)
         self.assertEqual(0, len(deep))
+
+    def test_ingest_extracts_natural_profile_facts(self) -> None:
+        now = int(time.time())
+        wrote = ingest_turn(
+            db=self.db,
+            session_key="s1",
+            user_text="覚えて。家族構成は妻ミナと子ども2人。俺の名前はヒロ。ヒロって呼んで。",
+            assistant_text="了解、記憶したよ。",
+            ts=now,
+            dim=64,
+            bits_per_dim=8,
+        )
+        self.assertGreaterEqual(int(wrote.get("deep", 0)), 1)
+        rows = self.db.list_memory_items("deep", "s1", limit=200)
+        keys = set()
+        for r in rows:
+            try:
+                tags = json.loads(str(r["tags"] or "{}"))
+            except Exception:
+                tags = {}
+            for k in (tags.get("fact_keys") or []):
+                keys.add(str(k))
+        self.assertIn("profile.family.summary", keys)
+        self.assertIn("profile.family.children_count", keys)
+        self.assertIn("profile.user.name", keys)
+        self.assertIn("profile.identity.call_user", keys)
+
+    def test_memctx_profile_query_uses_global_durable_fallback(self) -> None:
+        now = int(time.time())
+        self.db.add_memory_item(
+            session_key="global",
+            layer="deep",
+            text="家族構成: 妻ミナ 子ども2人",
+            summary="家族構成: 妻ミナ 子ども2人 | subject=user | conf=0.95 | src=user_msg | ttl=365d",
+            importance=0.95,
+            tags={
+                "kind": "durable_global_fact",
+                "fact_keys": ["profile.family.summary"],
+                "fact": {
+                    "fact_key": "profile.family.summary",
+                    "value": "妻ミナ 子ども2人",
+                    "confidence": 0.95,
+                    "source": "user_msg",
+                    "ts": now,
+                },
+            },
+            emb_f16=None,
+            emb_q=None,
+            emb_dim=0,
+            source="turn",
+        )
+        q_keys = infer_query_fact_keys("家族構成は？")
+        self.assertIn("profile.family.summary", q_keys)
+        ctx = build_memctx(
+            db=self.db,
+            session_key="s1",
+            prompt="家族構成は？",
+            surface=[],
+            deep=[],
+            budget_tokens=140,
+        )
+        self.assertIn("g1=", ctx)
+        self.assertNotIn("memory.fact_status=weak_or_missing", ctx)
 
     def test_deep_ttl_is_materialized_and_enforced(self) -> None:
         self.db.upsert_memory_policy("ttl.default_days", "1", 0.95)
