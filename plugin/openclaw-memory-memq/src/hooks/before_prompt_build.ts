@@ -241,6 +241,11 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
 
     const recentMax = Math.max(800, getCfg(api, "memq.recent.maxTokens", defaults["memq.recent.maxTokens"]));
     const minKeep = Math.max(2, getCfg(api, "memq.recent.minKeepMessages", defaults["memq.recent.minKeepMessages"]));
+    const recallLikePrompt = /(覚えて|記憶|これまで|君は誰|あなたは誰|家族|呼称|一人称|最近|昨日|一昨日|先週|先月|summary|recap|who are you|yesterday|recent)/i.test(
+      prompt
+    );
+    const codingLikePrompt = /(コード|code|bug|error|stack|trace|diff|patch|test|build|compile|実装|修正)/i.test(prompt);
+    const recentBudget = recallLikePrompt && !codingLikePrompt ? Math.max(1200, Math.min(recentMax, Math.floor(recentMax * 0.45))) : recentMax;
 
     const topK = Math.max(1, getCfg(api, "memq.retrieval.topK", defaults["memq.retrieval.topK"]));
     const surfaceThreshold = Number(getCfg(api, "memq.retrieval.surfaceThreshold", defaults["memq.retrieval.surfaceThreshold"]));
@@ -268,7 +273,7 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
     }
 
     const messages = Array.isArray(event?.messages) ? event.messages : [];
-    const sliced = splitRecentByTokenBudget(messages, recentMax, minKeep);
+    const sliced = splitRecentByTokenBudget(messages, recentBudget, minKeep);
 
     if (sliced.pruned.length > 0) {
       if (getCfg(api, "memq.archive.enabled", defaults["memq.archive.enabled"])) {
@@ -358,7 +363,7 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
 
     logInfo(
       api,
-      `[memq-v2] before_prompt_build session=${sessionKey} kept_msgs=${keptForPrompt.length} pruned_msgs=${sliced.pruned.length} kept_tokens=${sliced.keptTokens} recent_budget=${recentMax} injected_tokens=${injectedTokens} surface_hit=${surfaceHit ? 1 : 0} deep_called=${deepCalled ? 1 : 0} latency_ms=${Date.now() - t0}`
+      `[memq-v2] before_prompt_build session=${sessionKey} kept_msgs=${keptForPrompt.length} pruned_msgs=${sliced.pruned.length} kept_tokens=${sliced.keptTokens} recent_budget=${recentBudget} recent_cfg=${recentMax} injected_tokens=${injectedTokens} surface_hit=${surfaceHit ? 1 : 0} deep_called=${deepCalled ? 1 : 0} latency_ms=${Date.now() - t0}`
     );
 
     return { prependContext };

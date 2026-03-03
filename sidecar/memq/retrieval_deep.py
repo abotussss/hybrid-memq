@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 
 from .db import MemqDB
 from .fact_keys import infer_query_fact_keys
+from .tokens import lexical_overlap, tokenize_lexical
 
 NOISE_SUMMARY_RE = re.compile(
     r"(<MEM(?:RULES|STYLE|CTX)\s+v1>|\[MEM(?:RULES|STYLE|CTX)\s+v1\]|\[\[reply_to_current\]\]|read\s+(?:agents|soul|identity|heartbeat)\.md|workspace context)",
@@ -153,20 +154,8 @@ def _score(sim_proxy: float, importance: float, usage_count: int, age_sec: int) 
     return sim_proxy + 0.34 * recency + 0.12 * freq + 0.44 * imp
 
 
-def _tokenize(text: str) -> set[str]:
-    s = (text or "").lower()
-    out = set(re.findall(r"[a-z0-9_]{2,}", s))
-    out.update(re.findall(r"[ぁ-んァ-ヶ一-龠]{1,8}", s))
-    return out
-
-
 def _lex_overlap(q_tokens: set[str], text: str) -> float:
-    if not q_tokens:
-        return 0.0
-    t = _tokenize(text)
-    if not t:
-        return 0.0
-    return float(len(q_tokens & t)) / float(len(q_tokens))
+    return lexical_overlap(q_tokens, text)
 
 
 def _durable_bonus(row: Any, lex: float, summary: str) -> float:
@@ -232,7 +221,7 @@ def search_deep(db: MemqDB, session_key: str, query_text: str, top_k: int, top_m
         extra = db.list_memory_items_any("deep", limit=5000)
         have = {str(r["id"]) for r in rows}
         rows.extend([r for r in extra if str(r["id"]) not in have])
-    q_tokens = _tokenize(query_text)
+    q_tokens = tokenize_lexical(query_text)
     is_recent_query = "memory.recent" in q_fact_keys
     now = __import__("time").time()
     scored: List[Dict[str, Any]] = []

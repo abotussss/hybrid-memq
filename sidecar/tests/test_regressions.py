@@ -8,12 +8,15 @@ from pathlib import Path
 from sidecar.memq.db import MemqDB
 from sidecar.memq.ingest_md import import_markdown_memory
 from sidecar.memq.ingest import _sanitize_turn_text, ingest_turn
+from sidecar.memq.intent import infer_intent
 from sidecar.memq.idle_consolidation import run_idle_consolidation
 from sidecar.memq.memctx_pack import build_memctx
+from sidecar.memq.retrieval import retrieve_candidates
 from sidecar.memq.retrieval_deep import search_deep
 from sidecar.memq.retrieval_deep import NOISE_SUMMARY_RE as DEEP_NOISE_RE
 from sidecar.memq.retrieval_surface import NOISE_SUMMARY_RE as SURFACE_NOISE_RE
 from sidecar.memq.timeline import day_key_from_ts, detect_timeline_range
+from sidecar.memq.tokens import lexical_overlap, tokenize_lexical
 
 
 class RegressionGuardsTest(unittest.TestCase):
@@ -71,6 +74,31 @@ class RegressionGuardsTest(unittest.TestCase):
         )
         self.assertNotIn("h e l l o", out)
         self.assertIn("hello world", out)
+
+    def test_memctx_has_always_on_anchors(self) -> None:
+        out = build_memctx(
+            db=self.db,
+            session_key="s1",
+            prompt="覚えてる？",
+            surface=[],
+            deep=[],
+            budget_tokens=140,
+        )
+        self.assertIn("wm.surf=", out)
+        self.assertIn("wm.deep=", out)
+        self.assertIn("p.snapshot=", out)
+        self.assertIn("t.recent=", out)
+
+    def test_intent_router_profile_timeline(self) -> None:
+        i1 = infer_intent("君は誰？")
+        self.assertGreaterEqual(float(i1.get("profile", 0.0)), 0.8)
+        i2 = infer_intent("昨日何した？")
+        self.assertGreaterEqual(float(i2.get("timeline", 0.0)), 0.8)
+
+    def test_cjk_token_overlap_handles_paraphrase(self) -> None:
+        q = tokenize_lexical("家族構成は？")
+        self.assertIn("家族", q)
+        self.assertGreater(lexical_overlap(q, "家族: 妻=ミナ"), 0.0)
 
     def test_ingest_sanitize_keeps_normal_text(self) -> None:
         src = "Please remember my name is Hiro and I prefer concise Japanese answers."
@@ -342,6 +370,37 @@ class RegressionGuardsTest(unittest.TestCase):
         out = search_deep(self.db, "s1", "家族構成は？", top_k=5)
         self.assertGreaterEqual(len(out), 1)
         self.assertTrue(any("妻はミナです" in str(x.get("summary", "")) for x in out))
+
+    def test_memctx_profile_query_prefers_answerable_deep_fact(self) -> None:
+        now = int(time.time())
+        ingest_turn(
+            db=self.db,
+            session_key="s1",
+            user_text="覚えて。妻はミナです。犬はタロです。",
+            assistant_text="了解です。",
+            ts=now,
+            dim=64,
+            bits_per_dim=8,
+        )
+        surface, deep, _ = retrieve_candidates(
+            db=self.db,
+            session_key="s1",
+            prompt="家族構成は？",
+            dim=64,
+            bits_per_dim=8,
+            top_k=5,
+            surface_threshold=0.85,
+            deep_enabled=True,
+        )
+        ctx = build_memctx(
+            db=self.db,
+            session_key="s1",
+            prompt="家族構成は？",
+            surface=surface,
+            deep=deep,
+            budget_tokens=260,
+        )
+        self.assertTrue(("d1=" in ctx) or ("d2=" in ctx) or ("d3=" in ctx))
 
     def test_idle_consolidation_updates_daily_digest(self) -> None:
         now = int(time.time())

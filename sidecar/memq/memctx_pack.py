@@ -7,10 +7,12 @@ import time
 
 from .db import MemqDB
 from .fact_keys import infer_query_fact_keys
+from .intent import infer_intent
 from .rules import extract_allowed_languages_from_rules
 from .style import style_profile_lines
 from .text_sanitize import strip_memq_blocks
-from .timeline import detect_timeline_range
+from .timeline import day_key_from_ts, detect_timeline_range
+from .tokens import tokenize_lexical
 
 
 def estimate_tokens(text: str) -> int:
@@ -97,9 +99,9 @@ def build_memctx(
         r"(覚えて|remember|必ず|always|ルール|方針|制約|callUser|一人称|language\.primary|検索は|search)",
         re.IGNORECASE,
     )
-    q_tokens = set(re.findall(r"[a-z0-9_]{2,}", (prompt or "").lower()))
-    q_tokens.update(re.findall(r"[ぁ-んァ-ヶ一-龠]{1,8}", prompt or ""))
+    q_tokens = tokenize_lexical(prompt or "")
     q_fact_keys = infer_query_fact_keys(prompt)
+    intent = infer_intent(prompt)
 
     def _lex_rel(s: str) -> float:
         tks = set(re.findall(r"[a-z0-9_]{2,}", (s or "").lower()))
@@ -155,9 +157,7 @@ def build_memctx(
     seen_values: List[str] = []
 
     def _tokset(v: str) -> set[str]:
-        out: set[str] = set(re.findall(r"[a-z0-9_]{2,}", v.lower()))
-        out.update(re.findall(r"[ぁ-んァ-ヶ一-龠]{1,8}", v))
-        return out
+        return tokenize_lexical(v)
 
     def _push_kv(lines_ref: List[str], key: str, value: str, *, dedupe_by_value: bool = True) -> bool:
         v = " ".join((value or "").split()).strip()
@@ -186,11 +186,119 @@ def build_memctx(
         lines_ref.append(f"{key}={v}")
         return True
 
-    lines: List[str] = [f"budget_tokens={budget_tokens}", f"q={prompt[:120].replace(chr(10), ' ')}"]
+    def _profile_snapshot_line() -> str:
+        parts: List[str] = []
+        style = db.get_style_profile()
+        for k in ("callUser", "firstPerson", "persona", "tone", "verbosity"):
+            v = str(style.get(k) or "").strip()
+            if not v:
+                continue
+            parts.append(f"{k}:{v}")
+            if len(parts) >= 3:
+                break
+
+        pref = db.get_preference_profile()
+        for k in ("language.primary", "policy.retention.default"):
+            pv = pref.get(k) or {}
+            v = str(pv.get("value") or "").strip()
+            conf = float(pv.get("confidence", 0.0) or 0.0)
+            if not v or conf < 0.55:
+                continue
+            parts.append(f"{k}:{v}")
+            if len(parts) >= 4:
+                break
+
+        key_label = {
+            "profile.family": "family",
+            "profile.family.spouse": "spouse",
+            "profile.family.pet": "pet",
+            "profile.identity.call_user": "callUser",
+            "profile.identity.first_person": "firstPerson",
+            "profile.persona.role": "persona",
+            "profile.persona.tone": "tone",
+        }
+        fact_rows = db.fetch_deep_items_by_fact_keys(
+            session_key=session_key,
+            fact_keys=list(key_label.keys()),
+            limit=20,
+            include_global=True,
+        )
+        seen_labels = set()
+        for row in fact_rows:
+            try:
+                tags = json.loads(str(row["tags"] or "{}"))
+            except Exception:
+                tags = {}
+            fact = tags.get("fact") if isinstance(tags, dict) else {}
+            if not isinstance(fact, dict):
+                continue
+            fk = str(fact.get("fact_key") or "")
+            label = key_label.get(fk)
+            if not label or label in seen_labels:
+                continue
+            val = str(fact.get("value") or "").strip()
+            if not val:
+                continue
+            seen_labels.add(label)
+            parts.append(f"{label}:{val[:40]}")
+            if len(parts) >= 6:
+                break
+        return " | ".join(parts)[:220]
+
+    def _recent_timeline_line() -> str:
+        now_ts = int(time.time())
+        end_day = day_key_from_ts(now_ts)
+        start_day = day_key_from_ts(now_ts - 2 * 86400)
+        rows = db.list_daily_digests_range(
+            session_key=session_key,
+            start_day=start_day,
+            end_day=end_day,
+            scope="session",
+            limit=6,
+            include_global=True,
+        )
+        parts: List[str] = []
+        seen_days = set()
+        for r in rows:
+            dk = str(r["day_key"] or "")
+            if not dk or dk in seen_days:
+                continue
+            seen_days.add(dk)
+            compact = _clean_summary(str(r["compact_text"] or "").replace("\n", " | "), 120)
+            if not compact:
+                continue
+            parts.append(f"{dk}:{compact}")
+            if len(parts) >= 2:
+                break
+        if parts:
+            return " || ".join(parts)[:220]
+        ev = db.list_events_range(
+            session_key=session_key,
+            start_day=start_day,
+            end_day=end_day,
+            limit=16,
+            include_global=True,
+        )
+        ev_parts: List[str] = []
+        for r in ev:
+            summary = _clean_summary(str(r["summary"] or ""), 90)
+            if not summary:
+                continue
+            dk = str(r["day_key"] or "")
+            kind = str(r["kind"] or "chat")
+            ev_parts.append(f"{dk}:{kind}:{summary}")
+            if len(ev_parts) >= 2:
+                break
+        return " || ".join(ev_parts)[:220]
+
+    lines: List[str] = [f"budget_tokens={budget_tokens}", f"q={prompt[:96].replace(chr(10), ' ')}"]
     timeline_range = detect_timeline_range(prompt)
     time_scoped = bool(timeline_range and timeline_range.explicit)
-    query_memory_overview = bool(re.search(r"(記憶|覚えてる|これまで|要点|summary|what.*remember|memory overview)", prompt, re.IGNORECASE))
-    need_meta = bool(re.search(r"(件数|count|pool|stats?)", prompt, re.IGNORECASE))
+    query_memory_overview = bool(
+        intent["overview"] >= 0.55
+        or re.search(r"(記憶|覚えてる|これまで|要点|summary|what.*remember|memory overview)", prompt, re.IGNORECASE)
+    )
+    need_meta = bool(intent["meta"] >= 0.60 or re.search(r"(件数|count|pool|stats?)", prompt, re.IGNORECASE))
     # Tiny observability hints to avoid "memory is only 1-2 lines" misconceptions.
     surface_pool = len(db.list_memory_items("surface", session_key, limit=5000))
     deep_pool = len(db.list_memory_items("deep", session_key, limit=5000))
@@ -199,6 +307,16 @@ def build_memctx(
         _push_kv(lines, "meta.deep_pool", str(deep_pool), dedupe_by_value=False)
         deep_verified = len([x for x in deep if bool(x.get("verification_ok", True))])
         _push_kv(lines, "meta.deep_verified", str(deep_verified), dedupe_by_value=False)
+
+    # Always-on anchors keep conversational continuity even when query routing misses.
+    convsurf_anchor = _clean_summary((db.get_conv_summary(session_key, "surface_only") or "").replace(chr(10), " | "), 110)
+    convdeep_anchor = _clean_summary((db.get_conv_summary(session_key, "deep") or "").replace(chr(10), " | "), 110)
+    profile_anchor = _clean_summary(_profile_snapshot_line(), 120)
+    recent_anchor = _clean_summary(_recent_timeline_line(), 120)
+    _push_kv(lines, "wm.surf", convsurf_anchor or "none", dedupe_by_value=False)
+    _push_kv(lines, "wm.deep", convdeep_anchor or "none", dedupe_by_value=False)
+    _push_kv(lines, "p.snapshot", profile_anchor or "unknown", dedupe_by_value=False)
+    _push_kv(lines, "t.recent", recent_anchor or "none", dedupe_by_value=False)
 
     # Timeline / episodic context for vague temporal prompts (yesterday/recent/etc).
     if timeline_range:
@@ -270,7 +388,9 @@ def build_memctx(
     # Keep surface/deep memory facts before long summaries so they survive budget trimming.
     s_count = 0
     if q_fact_keys:
-        s_limit = 0
+        # Keep at least one surface clue so profile/fact questions don't collapse
+        # into "no memory" when deep verification gets strict.
+        s_limit = 1
     else:
         s_limit = 1 if query_memory_overview else 2
     for item in surface[:12]:
@@ -283,6 +403,7 @@ def build_memctx(
             _push_kv(lines, f"s{s_count}", summary)
 
     d_count = 0
+    profile_query = intent["profile"] >= 0.45
     if query_memory_overview:
         d_limit = 3
     else:
@@ -307,11 +428,14 @@ def build_memctx(
         has_intent_match = bool(q_fact_keys) and tag_overlap > 0
         # Pre-response verification gate:
         # for intented factual recalls, avoid low-confidence / weak-evidence deep rows.
-        if bool(q_fact_keys) and not verification_ok and not has_intent_match and rel < 0.18:
+        weak_rel_gate = 0.08 if profile_query else 0.18
+        if bool(q_fact_keys) and not verification_ok and not has_intent_match and rel < weak_rel_gate:
             continue
-        if bool(q_fact_keys) and has_intent_match and verification_score < 0.46:
+        verify_gate = 0.35 if profile_query else 0.46
+        if bool(q_fact_keys) and has_intent_match and verification_score < verify_gate:
             continue
-        if bool(q_fact_keys) and not has_intent_match and rel < 0.12:
+        no_tag_rel_gate = 0.06 if profile_query else 0.12
+        if bool(q_fact_keys) and not has_intent_match and rel < no_tag_rel_gate:
             continue
         if _allow_ctx_line(summary) and (rel >= 0.05 or durable_like.search(summary) or has_intent_match):
             if has_intent_match:
@@ -334,9 +458,9 @@ def build_memctx(
             fact_conf = float(item.get("fact_confidence", 0.0) or 0.0)
             fact_ts = int(item.get("fact_ts", 0) or 0)
             src = str(item.get("source", "") or "")
-            if bool(q_fact_keys) and tag_overlap == 0:
+            if bool(q_fact_keys) and tag_overlap == 0 and not profile_query:
                 continue
-            if bool(q_fact_keys) and not verification_ok and tag_overlap == 0:
+            if bool(q_fact_keys) and not verification_ok and tag_overlap == 0 and not profile_query:
                 continue
             if fallback and _allow_ctx_line(fallback):
                 if bool(q_fact_keys):
@@ -398,7 +522,7 @@ def build_memctx(
             if clean and (_lex_rel(clean) >= 0.08 or query_memory_overview):
                 _push_kv(lines, "convdeep", clean)
     elif d_count == 0 and q_fact_keys:
-        _push_kv(lines, "verify.fact_lookup", "no_verified_fact", dedupe_by_value=False)
+        _push_kv(lines, "memory.fact_status", "weak_or_missing", dedupe_by_value=False)
 
     # Mark ephemeral only for directly relevant prompts.
     if re.search(r"(直近|recent|temporary|一時|ephemeral)", prompt, re.IGNORECASE):

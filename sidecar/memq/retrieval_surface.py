@@ -5,6 +5,7 @@ import re
 from typing import Any, Dict, List
 
 from .db import MemqDB
+from .tokens import lexical_overlap, tokenize_lexical
 
 NOISE_SUMMARY_RE = re.compile(
     r"(<MEM(?:RULES|STYLE|CTX)\s+v1>|\[MEM(?:RULES|STYLE|CTX)\s+v1\]|\[\[reply_to_current\]\]|read\s+(?:agents|soul|identity|heartbeat)\.md|workspace context)",
@@ -27,25 +28,13 @@ def _score(lex: float, importance: float, usage_count: int, age_sec: int) -> flo
     return 0.95 * lex + 0.45 * recency + 0.15 * freq + 0.5 * float(importance)
 
 
-def _tokenize(text: str) -> set[str]:
-    s = (text or "").lower()
-    out = set(re.findall(r"[a-z0-9_]{2,}", s))
-    out.update(re.findall(r"[ぁ-んァ-ヶ一-龠]{1,8}", s))
-    return out
-
-
 def _lex_overlap(q_tokens: set[str], text: str) -> float:
-    if not q_tokens:
-        return 0.0
-    t = _tokenize(text)
-    if not t:
-        return 0.0
-    return float(len(q_tokens & t)) / float(len(q_tokens))
+    return lexical_overlap(q_tokens, text)
 
 
 def search_surface(db: MemqDB, session_key: str, query_text: str, top_k: int) -> List[Dict[str, Any]]:
     rows = db.list_memory_items("surface", session_key, limit=2000)
-    q_tokens = _tokenize(query_text)
+    q_tokens = tokenize_lexical(query_text)
     now = __import__("time").time()
     scored: List[Dict[str, Any]] = []
     for r in rows:

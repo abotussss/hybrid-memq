@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import re
 from typing import Any, Dict, List, Tuple
 
 from .db import MemqDB
 from .fact_keys import infer_query_fact_keys
+from .intent import infer_intent
 from .retrieval_deep import search_deep
 from .retrieval_surface import search_surface
 
@@ -26,19 +26,22 @@ def retrieve_candidates(
 
     deep_called = False
     deep: List[Dict[str, Any]] = []
-    long_term_required = bool(
-        re.search(
-            r"(覚えてる|記憶|これまで|長期|long[-\s]?term|family|家族|人格|persona|呼称|一人称|10分前|直近|recent)",
-            prompt or "",
-            re.IGNORECASE,
-        )
-    )
+    q_fact_keys = infer_query_fact_keys(prompt)
+    intent = infer_intent(prompt)
+
     if deep_enabled:
-        # Call deep when surface confidence or lexical coverage is insufficient.
+        # Call deep by coverage + intent (not only phrase matching).
         best_surface_sim = float(surface[0].get("sim", -1.0)) if surface else -1.0
         best_surface_lex = float(surface[0].get("lex", 0.0)) if surface else 0.0
-        min_lex = 0.12
-        if long_term_required or (not surface) or (best_surface_sim < float(surface_threshold)) or (best_surface_lex < min_lex):
+        coverage_gap = (not surface) or (best_surface_sim < float(surface_threshold)) or (best_surface_lex < 0.12)
+        intent_deep = bool(
+            intent["profile"] >= 0.35
+            or intent["timeline"] >= 0.40
+            or intent["overview"] >= 0.55
+            or intent["fact_lookup"] >= 0.45
+            or bool(q_fact_keys)
+        )
+        if coverage_gap or intent_deep:
             deep_called = True
             deep = search_deep(db, session_key, prompt, top_k=max(1, top_k))
 
@@ -51,6 +54,13 @@ def retrieve_candidates(
         "surface_top_sim": surface[0]["sim"] if surface else None,
         "surface_top_lex": surface[0]["lex"] if surface else None,
         "surface_threshold": float(surface_threshold),
-        "long_term_required": long_term_required,
+        "intent_profile": intent["profile"],
+        "intent_timeline": intent["timeline"],
+        "intent_state": intent["state"],
+        "intent_fact_lookup": intent["fact_lookup"],
+        "intent_meta": intent["meta"],
+        "intent_overview": intent["overview"],
+        "coverage_gap": 1 if ((not surface) or ((surface[0]["sim"] if surface else -1.0) < float(surface_threshold)) or ((surface[0]["lex"] if surface else 0.0) < 0.12)) else 0,
+        "q_fact_keys_n": len(q_fact_keys),
     }
     return surface, deep, {"surfaceHit": bool(surface), "deepCalled": deep_called, "debug": debug}
