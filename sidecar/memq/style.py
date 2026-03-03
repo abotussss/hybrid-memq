@@ -4,7 +4,7 @@ import re
 from typing import Dict, List, Tuple
 
 from .db import MemqDB
-from .text_sanitize import strip_memq_blocks
+from .text_sanitize import contains_runtime_noise, strip_memq_blocks, strip_runtime_noise
 
 
 STYLE_PATTERNS: List[Tuple[re.Pattern[str], Tuple[str, str]]] = [
@@ -20,14 +20,17 @@ def _compact(text: str, limit: int = 260) -> str:
 
 
 def _clean_style_value(raw: str, limit: int = 120) -> str:
-    v = strip_memq_blocks(raw or "")
+    v = strip_runtime_noise(strip_memq_blocks(raw or ""))
     v = re.sub(r"```[^`]*```", " ", v)
-    v = re.sub(r"\bthinkingSignature\b[^,\s]*", " ", v, flags=re.IGNORECASE)
     v = re.sub(r"\{[^{}]{0,240}\}\s*$", " ", v)
     v = re.sub(r"\s+", " ", v).strip()
+    if contains_runtime_noise(v):
+        return ""
     if re.search(r"(<MEM(?:RULES|STYLE|CTX)\b|\[MEM(?:RULES|STYLE|CTX)\b)", v, re.IGNORECASE):
         return ""
     if re.search(r'"\w+"\s*:\s*', v) and (v.count("{") != v.count("}") or len(v) > 140):
+        return ""
+    if re.search(r"(budget_tokens=|identity\.precedence=|security\.|procedure\.)", v, re.IGNORECASE):
         return ""
     return v[:limit]
 
@@ -55,6 +58,10 @@ def _normalize_persona(raw: str) -> str:
     v = _clean_style_value(raw, 120)
     if not v:
         return ""
+    if re.search(r"(memstyle|スタイル|更新してください|維持|余計な提案|一人称|ユーザー呼称|文頭は|以後)", v, re.IGNORECASE):
+        return ""
+    if re.search(r"(?:^|[ ,。])(?:must|always|禁止|しない|するな)(?:[ ,。]|$)", v, re.IGNORECASE):
+        return ""
     return v[:120]
 
 
@@ -67,6 +74,13 @@ def extract_style_updates(user_text: str) -> Dict[str, str]:
 
     if re.search(r"(persona|キャラ|性格|話し方|口調|なりき|模倣|として振る舞|act as|roleplay)", text, re.IGNORECASE):
         persona = None
+        m_persona_named = re.search(
+            r"(?:キャラ|人格|persona)\s*(?:は|=|:|：)\s*([A-Za-z0-9ぁ-んァ-ヶ一-龠ー._\- ]{1,64})",
+            text,
+            re.IGNORECASE,
+        )
+        if m_persona_named:
+            persona = m_persona_named.group(1).strip()
         m_persona_q = _extract_quoted(text, r"(?:persona|キャラ|人格|role|roleplay|act as)", 64)
         if m_persona_q:
             persona = m_persona_q
@@ -78,9 +92,10 @@ def extract_style_updates(user_text: str) -> Dict[str, str]:
             )
             if m_persona_as:
                 persona = m_persona_as.group(1)
-        if not persona:
-            persona = _compact(text, 120)
-        out["persona"] = _normalize_persona(persona)
+        if persona:
+            normalized = _normalize_persona(persona)
+            if normalized:
+                out["persona"] = normalized
 
     m_first = re.search(r"一人称.*?(ボク|僕|私|わたし|俺)", text)
     if m_first:
@@ -131,6 +146,8 @@ def extract_style_updates(user_text: str) -> Dict[str, str]:
         out["prefix"] = f"{out['callUser']}、"
     if "persona" in out:
         out["persona"] = _normalize_persona(out["persona"])
+        if not out["persona"]:
+            out.pop("persona", None)
     return out
 
 
@@ -158,3 +175,32 @@ def style_profile_lines(db: MemqDB) -> List[str]:
         if v:
             lines.append(f"{key}={v}")
     return lines
+
+
+def sanitize_style_profile(db: MemqDB) -> int:
+    prof = db.get_style_profile()
+    allowed_keys = {"tone", "persona", "verbosity", "firstPerson", "callUser", "prefix", "speakingStyle", "avoid"}
+    changed = 0
+    for key, raw in prof.items():
+        if key not in allowed_keys:
+            db.conn.execute("DELETE FROM style_profile WHERE key=?", (key,))
+            changed += 1
+            continue
+        cleaned = _clean_style_value(str(raw or ""), 160)
+        if key == "callUser":
+            cleaned = _normalize_call_user(cleaned)
+        elif key == "persona":
+            cleaned = _normalize_persona(cleaned)
+        elif key == "prefix" and cleaned:
+            cleaned = cleaned[:24]
+
+        if cleaned == str(raw or ""):
+            continue
+        changed += 1
+        if cleaned:
+            db.upsert_style(key, cleaned)
+        else:
+            db.conn.execute("DELETE FROM style_profile WHERE key=?", (key,))
+    if changed > 0:
+        db.conn.commit()
+    return changed

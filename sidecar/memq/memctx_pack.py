@@ -11,7 +11,7 @@ from .fact_keys import infer_query_fact_keys
 from .intent import infer_intent
 from .rules import extract_allowed_languages_from_rules
 from .style import style_profile_lines
-from .text_sanitize import strip_memq_blocks
+from .text_sanitize import contains_runtime_noise, strip_memq_blocks, strip_runtime_noise
 from .timeline import day_key_from_ts, detect_timeline_range
 from .tokens import tokenize_lexical
 
@@ -68,6 +68,7 @@ def _pack_memctx_payload(
     intent: Dict[str, float],
     time_scoped: bool,
     query_memory_overview: bool,
+    budget_split: Dict[str, int] | None = None,
 ) -> List[str]:
     out: List[str] = [ln for ln in base_lines if ln.strip()]
     used = sum(estimate_tokens(ln) for ln in out)
@@ -105,6 +106,19 @@ def _pack_memctx_payload(
     token_targets: Dict[str, int] = {
         g: max(0, int(remain * (max(0.01, float(w)) / sum_w))) for g, w in weights.items()
     }
+    if isinstance(budget_split, dict):
+        for src, dst in (
+            ("profile", "profile"),
+            ("timeline", "timeline"),
+            ("surface", "surface"),
+            ("deep", "deep"),
+            ("ephemeral", "ephemeral"),
+        ):
+            try:
+                raw = int(budget_split.get(src, token_targets.get(dst, 0)))
+            except Exception:
+                raw = token_targets.get(dst, 0)
+            token_targets[dst] = max(0, min(remain, raw))
     if time_scoped:
         token_targets["timeline"] = max(token_targets["timeline"], int(remain * 0.35))
     if float(intent.get("profile", 0.0)) >= 0.55:
@@ -250,9 +264,8 @@ def _looks_fragmented_payload(text: str) -> bool:
 
 
 def _compact_ctx_value(value: str, limit: int = 160) -> str:
-    v = strip_memq_blocks(value or "")
+    v = strip_runtime_noise(strip_memq_blocks(value or ""))
     v = re.sub(r"```[^`]*```", " ", v)
-    v = re.sub(r"\bthinkingSignature\b[^,\s]*", " ", v, flags=re.IGNORECASE)
     v = re.sub(r"\s+", " ", v).strip()
     return v[:limit]
 
@@ -281,8 +294,6 @@ def _finalize_memctx_lines(
         if k.startswith("meta.") or k.startswith("memory.fact_"):
             continue
         if k in {"wm.deep"}:
-            continue
-        if k == "p.snapshot" and float(intent.get("profile", 0.0)) < 0.65:
             continue
         vv = _compact_ctx_value(v, 180)
         if not vv or _looks_fragmented_payload(vv):
@@ -345,8 +356,9 @@ def build_memrules(db: MemqDB, budget_tokens: int) -> str:
         "identity.precedence=memstyle",
         "identity.no_generic_assistant_label=true",
         "security.never_output_secrets=true",
+        "operation.allow_user_requested_local_config=true",
     ]
-    allowed_prefixes = ("language.", "security.", "procedure.", "compliance.", "output.")
+    allowed_prefixes = ("language.", "security.", "procedure.", "compliance.", "output.", "operation.", "identity.")
     style_keys = {
         "tone",
         "persona",
@@ -430,6 +442,7 @@ def build_memctx(
     surface: Sequence[Dict[str, Any]],
     deep: Sequence[Dict[str, Any]],
     budget_tokens: int,
+    brain_plan: Dict[str, Any] | None = None,
 ) -> str:
     rule_like = re.compile(r"(language\\.allowed=|security\\.|procedure\\.|compliance\\.|rules\\.)", re.IGNORECASE)
     style_like = re.compile(r"(tone=|persona=|verbosity=|speakingStyle=|style\\.)", re.IGNORECASE)
@@ -446,8 +459,20 @@ def build_memctx(
         re.IGNORECASE,
     )
     q_tokens = tokenize_lexical(prompt or "")
-    q_fact_keys = infer_query_fact_keys(prompt)
+    q_fact_keys = set(infer_query_fact_keys(prompt))
     intent = infer_intent(prompt)
+    if isinstance(brain_plan, dict):
+        p_intent = brain_plan.get("intent") if isinstance(brain_plan.get("intent"), dict) else {}
+        for k in ("timeline", "profile", "state", "fact_lookup", "meta", "overview"):
+            if k in p_intent:
+                try:
+                    intent[k] = max(0.0, min(1.0, float(p_intent.get(k, intent.get(k, 0.0)))))
+                except Exception:
+                    pass
+        for fk in (brain_plan.get("fact_keys") or []):
+            fks = str(fk or "").strip().lower()
+            if fks:
+                q_fact_keys.add(fks)
 
     def _lex_rel(s: str) -> float:
         tks = set(re.findall(r"[a-z0-9_]{2,}", (s or "").lower()))
@@ -459,6 +484,8 @@ def build_memctx(
     def _allow_ctx_line(s: str) -> bool:
         t = (s or "").strip()
         if not t:
+            return False
+        if contains_runtime_noise(t):
             return False
         # Structured factual lines are allowed even if they contain tokens like persona=.
         if "| subject=" in t and "| conf=" in t:
@@ -474,7 +501,7 @@ def build_memctx(
         return True
 
     def _clean_summary(s: str, limit: int = 180) -> str:
-        t = strip_memq_blocks(str(s or ""))
+        t = strip_runtime_noise(strip_memq_blocks(str(s or "")))
         # Strip only the metadata header line; do not erase broad multiline content.
         t = re.sub(r"Conversation info \(untrusted metadata\):[^\n]*", " ", t, flags=re.IGNORECASE)
         t = re.sub(r"```[^`]*```", " ", t)
@@ -583,6 +610,17 @@ def build_memctx(
 
     lines: List[str] = [f"budget_tokens={budget_tokens}"]
     timeline_range = detect_timeline_range(prompt)
+    if isinstance(brain_plan, dict):
+        tr = brain_plan.get("time_range")
+        if isinstance(tr, dict):
+            sd = str(tr.get("startDay") or "").strip()
+            ed = str(tr.get("endDay") or "").strip()
+            label = str(tr.get("label") or "brain")
+            if sd and ed:
+                timeline_range = detect_timeline_range(f"{sd}") or timeline_range
+                from .timeline import TimelineRange  # local import to avoid cycle at module load
+
+                timeline_range = TimelineRange(start_day=sd, end_day=ed, label=label, explicit=True)
     time_scoped = bool(timeline_range and timeline_range.explicit)
     query_memory_overview = bool(
         intent["overview"] >= 0.55
@@ -855,6 +893,7 @@ def build_memctx(
         intent=intent,
         time_scoped=time_scoped,
         query_memory_overview=query_memory_overview,
+        budget_split=(brain_plan.get("budget_split") if isinstance(brain_plan, dict) else None),
     )
     finalized = _finalize_memctx_lines(
         packed_lines=packed,

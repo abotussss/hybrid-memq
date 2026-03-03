@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 from fastapi import FastAPI, Query
 
 from memq.audit import audit_output
+from memq.brain import BrainService
 from memq.config import MemqConfig, load_config
 from memq.conv_summarize import deep_summary_candidates, merge_summary, summarize_for_deep, summarize_for_surface
 from memq.db import MemqDB
@@ -35,6 +36,7 @@ from memq.models import (
 )
 from memq.retrieval import retrieve_candidates
 from memq.rules import refresh_preference_profiles
+from memq.style import sanitize_style_profile
 from memq.structured_facts import (
     extract_structured_facts_from_text,
     is_durable_fact_text,
@@ -48,6 +50,7 @@ from memq.timeline import detect_timeline_range
 app = FastAPI(title="hybrid-memq-sidecar", version="2.0.0")
 cfg: MemqConfig = load_config()
 db = MemqDB(cfg.db_path)
+brain = BrainService(cfg)
 state_lock = Lock()
 state: Dict[str, Any] = {
     "started_at": int(time.time()),
@@ -178,7 +181,11 @@ def health() -> Dict[str, Any]:
             "bitsPerDim": cfg.bits_per_dim,
             "idleEnabled": cfg.idle_enabled,
             "idleSeconds": cfg.idle_seconds,
+            "brainEnabled": cfg.brain_enabled,
+            "brainProvider": cfg.brain_provider,
+            "brainModel": cfg.brain_model,
         },
+        "brain": brain.status,
         "state": snapshot,
     }
 
@@ -220,45 +227,115 @@ def conversation_summarize(req: SummarizeRequest) -> SummarizeResponse:
 @app.post("/memory/ingest_turn", response_model=IngestTurnResponse)
 def memory_ingest_turn(req: IngestTurnRequest) -> IngestTurnResponse:
     _touch(req.sessionKey)
-    wrote = ingest_turn(
-        db=db,
+    wrote: Dict[str, int] | None = None
+    brain_used = False
+    plan = brain.build_ingest_plan(
         session_key=req.sessionKey,
         user_text=req.userText,
         assistant_text=req.assistantText,
         ts=req.ts,
-        dim=cfg.dim,
-        bits_per_dim=cfg.bits_per_dim,
         metadata=req.metadata,
     )
+    if plan is not None:
+        try:
+            wrote = brain.apply_ingest_plan(
+                db=db,
+                session_key=req.sessionKey,
+                ts=req.ts,
+                plan=plan,
+                user_text=req.userText,
+                assistant_text=req.assistantText,
+                metadata=req.metadata,
+            )
+            brain_used = True
+        except Exception:
+            wrote = None
+    if wrote is None:
+        wrote = ingest_turn(
+            db=db,
+            session_key=req.sessionKey,
+            user_text=req.userText,
+            assistant_text=req.assistantText,
+            ts=req.ts,
+            dim=cfg.dim,
+            bits_per_dim=cfg.bits_per_dim,
+            metadata=req.metadata,
+        )
     refresh_preference_profiles(db, int(time.time()))
+    wrote["brain"] = 1 if brain_used else 0
     return IngestTurnResponse(ok=True, wrote=wrote)
 
 
 @app.post("/memctx/query", response_model=MemctxQueryResponse)
 def memctx_query(req: MemctxQueryRequest) -> MemctxQueryResponse:
     _touch(req.sessionKey)
+    sanitize_style_profile(db)
 
     top_k = max(1, int(req.topK or cfg.retrieval_top_k))
     surface_threshold = float(req.surfaceThreshold if req.surfaceThreshold is not None else cfg.surface_threshold)
     deep_enabled = bool(req.deepEnabled if req.deepEnabled is not None else cfg.deep_enabled)
     timeline_range = detect_timeline_range(req.prompt)
     timeline_first = bool(timeline_range and timeline_range.explicit)
-    deep_enabled_for_retrieval = deep_enabled and not timeline_first
-    top_k_for_retrieval = max(1, min(top_k, 3)) if timeline_first else top_k
-
-    surf, deep, meta = retrieve_candidates(
-        db=db,
+    recent_messages = [
+        {"role": str(m.role), "text": str(m.text), "ts": int(m.ts) if m.ts is not None else None}
+        for m in (req.recentMessages or [])
+    ]
+    brain_plan_obj = brain.build_recall_plan(
         session_key=req.sessionKey,
         prompt=req.prompt,
-        dim=cfg.dim,
-        bits_per_dim=cfg.bits_per_dim,
-        top_k=top_k_for_retrieval,
+        recent_messages=recent_messages,
+        budgets={
+            "memctxTokens": max(16, int(req.budgets.memctxTokens)),
+            "rulesTokens": max(8, int(req.budgets.rulesTokens)),
+            "styleTokens": max(8, int(req.budgets.styleTokens)),
+        },
+        top_k=top_k,
         surface_threshold=surface_threshold,
-        deep_enabled=deep_enabled_for_retrieval,
+        deep_enabled=deep_enabled,
     )
+    brain_plan: Dict[str, Any] | None = brain_plan_obj.model_dump() if brain_plan_obj is not None else None
+
+    if brain_plan is not None:
+        from memq.retrieval import retrieve_candidates_with_plan
+
+        surf, deep, meta = retrieve_candidates_with_plan(
+            db=db,
+            session_key=req.sessionKey,
+            prompt=req.prompt,
+            dim=cfg.dim,
+            bits_per_dim=cfg.bits_per_dim,
+            top_k=top_k,
+            surface_threshold=surface_threshold,
+            deep_enabled=deep_enabled,
+            plan=brain_plan,
+        )
+    else:
+        # Keep deep fallback available even for explicit timeline prompts.
+        # Timeline blocks are prioritized in MEMCTX packing, but deep can rescue
+        # missing/immature digests so "昨日何した？" does not return empty context.
+        deep_enabled_for_retrieval = deep_enabled
+        top_k_for_retrieval = max(1, min(top_k, 3)) if timeline_first else top_k
+        surf, deep, meta = retrieve_candidates(
+            db=db,
+            session_key=req.sessionKey,
+            prompt=req.prompt,
+            dim=cfg.dim,
+            bits_per_dim=cfg.bits_per_dim,
+            top_k=top_k_for_retrieval,
+            surface_threshold=surface_threshold,
+            deep_enabled=deep_enabled_for_retrieval,
+        )
+
     dbg = dict(meta.get("debug") or {})
     dbg["timeline_route"] = 1 if timeline_first else 0
     dbg["timeline_label"] = timeline_range.label if timeline_range else ""
+    dbg["brain_enabled"] = 1 if brain.enabled else 0
+    dbg["brain_plan"] = 1 if brain_plan is not None else 0
+    if brain_plan and isinstance(brain_plan.get("intent"), dict):
+        for k, v in brain_plan["intent"].items():
+            dbg[f"brain_intent_{k}"] = v
+    if brain_plan and isinstance(brain_plan.get("time_range"), dict):
+        dbg["brain_time_range"] = f"{brain_plan['time_range'].get('startDay','')}..{brain_plan['time_range'].get('endDay','')}"
     meta["debug"] = dbg
 
     used_ids = [x["id"] for x in surf] + [x["id"] for x in deep]
@@ -274,6 +351,7 @@ def memctx_query(req: MemctxQueryRequest) -> MemctxQueryResponse:
         surface=surf,
         deep=deep,
         budget_tokens=max(16, int(b.memctxTokens)),
+        brain_plan=brain_plan,
     )
 
     return MemctxQueryResponse(

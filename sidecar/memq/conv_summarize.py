@@ -4,7 +4,7 @@ import re
 from typing import List, Sequence, Tuple
 
 from .models import Message
-from .text_sanitize import strip_memq_blocks
+from .text_sanitize import contains_runtime_noise, strip_memq_blocks, strip_runtime_noise
 
 
 IMPORTANT_PATTERNS = [
@@ -31,7 +31,7 @@ RUNTIME_META_RE = re.compile(
 
 def _normalize_line(s: str) -> str:
     t = s or ""
-    t = strip_memq_blocks(t)
+    t = strip_runtime_noise(strip_memq_blocks(t))
     t = UNTRUSTED_META_RE.sub(" ", t)
     t = FENCED_BLOCK_RE.sub(" ", t)
     t = re.sub(r"\[\[reply_to_current\]\]", " ", t, flags=re.IGNORECASE)
@@ -43,6 +43,8 @@ def _normalize_line(s: str) -> str:
     t = re.sub(r"backup=/\S+", " ", t)
     t = re.sub(r"/Users/\S+", " ", t)
     t = " ".join(t.strip().split())
+    if contains_runtime_noise(t):
+        return ""
     if t.lower().startswith("x:"):
         return ""
     return t

@@ -7,6 +7,8 @@ from collections import defaultdict
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .db import MemqDB
+from .style import extract_style_updates
+from .text_sanitize import contains_runtime_noise, strip_memq_blocks, strip_runtime_noise
 
 
 SECRET_WORDS = [
@@ -174,9 +176,11 @@ def extract_preference_events(user_text: str) -> List[Tuple[str, str, float, boo
         events.append(("style.verbosity", "low", 0.8, True, "user_msg"))
     if re.search(r"(詳しく|detailed|more detail)", text, re.IGNORECASE):
         events.append(("style.verbosity", "high", 0.8, True, "user_msg"))
-    if re.search(r"(persona|キャラ|口調|話し方|性格)", text, re.IGNORECASE):
-        value = sanitize_rule_value(text)
-        events.append(("style.persona_prompt", value, 0.9, True, "user_msg"))
+    # Keep persona preference as compact normalized value only.
+    style_updates = extract_style_updates(text)
+    persona = str(style_updates.get("persona") or "").strip()
+    if persona:
+        events.append(("style.persona", sanitize_rule_value(persona), 0.9, True, "user_msg"))
 
     for pat, (k, v, w) in MEMORY_POLICY_PATTERNS:
         if pat.search(text):
@@ -194,6 +198,8 @@ def refresh_preference_profiles(db: MemqDB, now_sec: int) -> Dict[str, Dict[str,
     keys = [
         "style.tone",
         "style.verbosity",
+        "style.persona",
+        # legacy key kept for migration/cleanup; no new writes should use this.
         "style.persona_prompt",
         "language.primary",
         "policy.retention.default",
@@ -202,6 +208,7 @@ def refresh_preference_profiles(db: MemqDB, now_sec: int) -> Dict[str, Dict[str,
     tau = {
         "style.tone": 86400 * 30,
         "style.verbosity": 86400 * 10,
+        "style.persona": 86400 * 30,
         "style.persona_prompt": 86400 * 30,
         "language.primary": 86400 * 15,
         "policy.retention.default": 86400 * 45,
@@ -209,6 +216,19 @@ def refresh_preference_profiles(db: MemqDB, now_sec: int) -> Dict[str, Dict[str,
     }
 
     updated: Dict[str, Dict[str, float | str]] = {}
+
+    def _clean_persona(v: str) -> str:
+        t = strip_runtime_noise(strip_memq_blocks(v or ""))
+        t = " ".join(t.split()).strip()
+        if not t:
+            return ""
+        if contains_runtime_noise(t):
+            return ""
+        if re.search(r"(budget_tokens=|identity\.precedence=|security\.|procedure\.|<MEM(?:RULES|STYLE|CTX)|\[MEM(?:RULES|STYLE|CTX))", t, re.IGNORECASE):
+            return ""
+        if re.search(r"(memstyle|スタイル|更新してください|維持|余計な提案|一人称|ユーザー呼称|文頭は|以後)", t, re.IGNORECASE):
+            return ""
+        return t[:220]
 
     for key in keys:
         events = db.iter_preference_events(key)
@@ -218,9 +238,15 @@ def refresh_preference_profiles(db: MemqDB, now_sec: int) -> Dict[str, Dict[str,
         for ev in events:
             dt = max(0, now_sec - int(ev["created_at"]))
             w = float(ev["weight"])
+            raw_val = str(ev["value"])
+            val = _clean_persona(raw_val) if key in {"style.persona", "style.persona_prompt"} else raw_val
+            if not val:
+                continue
             decayed = w * math.exp(-dt / float(tau.get(key, 86400 * 20)))
-            by_value[str(ev["value"])] += decayed
+            by_value[val] += decayed
         if not by_value:
+            if key in {"style.persona", "style.persona_prompt"}:
+                db.conn.execute("DELETE FROM preference_profile WHERE key=?", (key,))
             continue
         best_value, best_score = max(by_value.items(), key=lambda x: x[1])
         total = sum(by_value.values()) + 1e-9
@@ -232,14 +258,50 @@ def refresh_preference_profiles(db: MemqDB, now_sec: int) -> Dict[str, Dict[str,
 
         updated[key] = {"value": best_value, "confidence": conf}
 
+    # Optional legacy migration: promote clean style.persona_prompt to style.persona only when missing.
+    profile = db.get_preference_profile()
+    persona_new = profile.get("style.persona")
+    persona_old = profile.get("style.persona_prompt")
+    cleaned_new = _clean_persona(str((persona_new or {}).get("value") or "")) if persona_new else ""
+    if persona_new and not cleaned_new:
+        db.conn.execute("DELETE FROM preference_profile WHERE key='style.persona'")
+        persona_new = None
+    if (not persona_new or float(persona_new.get("confidence", 0.0) or 0.0) < 0.55) and persona_old:
+        old_v = _clean_persona(str(persona_old.get("value") or ""))
+        old_c = float(persona_old.get("confidence", 0.0) or 0.0)
+        if old_v and old_c >= 0.60:
+            db.upsert_preference_profile("style.persona", old_v, old_c)
+            updated["style.persona"] = {"value": old_v, "confidence": old_c}
+
     # Bridge style keys from preference_profile to style_profile.
     profile = db.get_preference_profile()
     if "style.tone" in profile and float(profile["style.tone"]["confidence"]) >= 0.55:
         db.upsert_style("tone", str(profile["style.tone"]["value"]))
     if "style.verbosity" in profile and float(profile["style.verbosity"]["confidence"]) >= 0.55:
         db.upsert_style("verbosity", str(profile["style.verbosity"]["value"]))
-    if "style.persona_prompt" in profile and float(profile["style.persona_prompt"]["confidence"]) >= 0.60:
-        db.upsert_style("persona", str(profile["style.persona_prompt"]["value"])[:220])
+    if "style.persona" in profile and float(profile["style.persona"]["confidence"]) >= 0.60:
+        cleaned = _clean_persona(str(profile["style.persona"]["value"]))
+        if cleaned:
+            db.upsert_style("persona", cleaned)
+        else:
+            db.conn.execute("DELETE FROM preference_profile WHERE key='style.persona'")
+            db.conn.execute("DELETE FROM style_profile WHERE key='persona'")
+    elif "style.persona_prompt" in profile and float(profile["style.persona_prompt"]["confidence"]) >= 0.60:
+        # Backward-compatible bridge for existing DBs.
+        cleaned = _clean_persona(str(profile["style.persona_prompt"]["value"]))
+        if cleaned:
+            db.upsert_style("persona", cleaned)
+
+    # Remove legacy/contaminated persona-prompt profile rows so they never leak again.
+    try:
+        legacy = profile.get("style.persona_prompt") or {}
+        legacy_value = _clean_persona(str(legacy.get("value") or ""))
+        has_new = "style.persona" in profile and _clean_persona(str((profile.get("style.persona") or {}).get("value") or ""))
+        if has_new or not legacy_value:
+            db.conn.execute("DELETE FROM preference_profile WHERE key='style.persona_prompt'")
+            db.conn.commit()
+    except Exception:
+        pass
 
     return updated
 

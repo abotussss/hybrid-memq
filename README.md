@@ -17,6 +17,8 @@ Each turn injects three bounded channels in fixed order:
 - Output audit redaction is applied even when `block=false` (if `redactedText` is returned).
 - `MEMSTYLE` budget default is fixed to `120` tokens (`styleTokens=120`, `maxBudgetTokens=120`).
 - Timeline memory is persisted as `events` + `daily_digests` for time-scoped prompts like “yesterday/recent”.
+- Optional local Brain path (`Ollama`, default model `gpt-oss:20b`) can generate schema-validated ingest/recall plans.
+- If Brain is unavailable or times out, sidecar falls back to deterministic heuristics without stopping the turn.
 
 ## Why This Plugin Exists
 
@@ -32,6 +34,7 @@ Each turn injects three bounded channels in fixed order:
 - Local sidecar (`FastAPI + SQLite`) with persistent memory state.
 - Surface-first retrieval with Deep fallback gating.
 - Embedding-free scalable candidate generation via SQLite FTS5/BM25 (with lexical/fact-key reranking).
+- Optional Brain-assisted ingest/recall planning (JSON schema validated, deterministic DB apply).
 - Deep fact indexing (`fact_key`) to improve long-lag recall beyond recent-item limits.
 - Conversation pruning by token budget, archive of pruned history, and sidecar reconstruction summaries.
 - Episodic timeline pipeline: turn/action events -> idle daily digest -> compact `t.*` MEMCTX injection.
@@ -56,6 +59,7 @@ Each turn injects three bounded channels in fixed order:
 - Node.js + pnpm
 - Python 3.10+
 - CLI tools: `openclaw`, `pnpm`, `python3`, `curl`, `lsof`
+- Optional for Brain mode: local Ollama (`http://127.0.0.1:11434`, model `gpt-oss:20b`)
 
 ## Quick Start
 

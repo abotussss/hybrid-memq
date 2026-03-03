@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import timedelta
 from typing import Dict, List
 
 from .db import MemqDB
 from .rules import prune_stale_rule_overrides, refresh_preference_profiles
+from .style import sanitize_style_profile
 from .structured_facts import (
     extract_structured_facts_from_text,
     parse_fact_signature_from_row,
@@ -107,11 +109,57 @@ def _prune_invalid_profile_facts(db: MemqDB) -> int:
             "profile.family.spouse",
             "profile.family.pet",
             "profile.family.child",
+            "profile.family.summary",
+            "profile.family.children_count",
             "profile.identity.call_user",
             "profile.identity.first_person",
+            "profile.user.name",
+            "profile.persona.role",
+            "profile.persona.tone",
         }:
             continue
         fv = str(fact.get("value") or "")
+        if fk == "profile.persona.role":
+            if re.search(r"(<MEM(?:RULES|STYLE|CTX)|thinkingSignature|encrypted_content|budget_tokens=|identity\.precedence=|security\.)", fv, re.IGNORECASE):
+                db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
+                removed += 1
+                continue
+            if re.search(r"(?:が1つある|\d+\s*(?:件|個|つ)|none|unknown|不明)", fv, re.IGNORECASE):
+                db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
+                removed += 1
+                continue
+            if re.search(r"(memstyle|スタイル|更新してください|維持|余計な提案|一人称|ユーザー呼称|文頭は|以後)", fv, re.IGNORECASE):
+                db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
+                removed += 1
+                continue
+            if len(" ".join(fv.split())) > 48:
+                db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
+                removed += 1
+                continue
+        if fk in {"profile.family.child", "profile.family.spouse", "profile.family.pet", "profile.user.name"}:
+            if re.search(r"^(?:僕|ぼく|私|わたし|俺|オレ|自分|me|myself|you|yourself|assistant|アシスタント)$", fv, re.IGNORECASE):
+                db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
+                removed += 1
+                continue
+            if re.search(r"(です|だよ|だね|ます)$", fv):
+                db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
+                removed += 1
+                continue
+        if fk == "profile.family.summary":
+            if re.search(r"(<MEM|subject=|conf=|src=|ttl=|\||thinkingSignature|encrypted_content)", fv, re.IGNORECASE):
+                db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
+                removed += 1
+                continue
+        if fk == "profile.family.children_count":
+            if not re.fullmatch(r"\d{1,2}", fv):
+                db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
+                removed += 1
+                continue
+        if fk == "profile.persona.tone":
+            if not re.fullmatch(r"[A-Za-z0-9ぁ-んァ-ヶ一-龠ー._\-]{1,24}", fv):
+                db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
+                removed += 1
+                continue
         if plausible_fact_value(fk, fv):
             continue
         db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
@@ -124,6 +172,7 @@ def _prune_invalid_profile_facts(db: MemqDB) -> int:
 def _promote_profile_facts(db: MemqDB, *, dim: int, bits_per_dim: int) -> int:
     _ = dim
     _ = bits_per_dim
+    sanitize_style_profile(db)
     style = db.get_style_profile()
     if not style:
         return 0
@@ -149,6 +198,14 @@ def _promote_profile_facts(db: MemqDB, *, dim: int, bits_per_dim: int) -> int:
     tone = str(style.get("tone") or "").strip()
     call_user = str(style.get("callUser") or "").strip()
     first_person = str(style.get("firstPerson") or "").strip()
+    if re.search(r"(<MEM(?:RULES|STYLE|CTX)|thinkingSignature|encrypted_content|budget_tokens=|identity\.precedence=|security\.)", persona, re.IGNORECASE):
+        persona = ""
+    if tone and not re.fullmatch(r"[A-Za-z0-9ぁ-んァ-ヶ一-龠ー._\-]{1,24}", tone):
+        tone = ""
+    if call_user and not plausible_fact_value("profile.identity.call_user", call_user):
+        call_user = ""
+    if first_person and not plausible_fact_value("profile.identity.first_person", first_person):
+        first_person = ""
     if persona:
         defs.append(
             {"subject": "assistant", "relation": "persona.role", "value": persona[:48], "fact_key": "profile.persona.role", "confidence": 0.96}

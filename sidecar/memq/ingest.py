@@ -8,7 +8,7 @@ from .db import MemqDB
 from .fact_keys import infer_text_fact_keys
 from .rules import apply_rule_updates, extract_preference_events, extract_rule_updates
 from .style import apply_style_updates, extract_style_updates
-from .text_sanitize import strip_memq_blocks
+from .text_sanitize import strip_memq_blocks, strip_runtime_noise
 
 
 INJECTION_PATTERNS = [
@@ -28,7 +28,7 @@ RUNTIME_NOISE_PATTERNS = [
 
 def _sanitize_turn_text(text: str) -> str:
     raw = text or ""
-    t = strip_memq_blocks(raw)
+    t = strip_runtime_noise(strip_memq_blocks(raw))
     # Drop known structured-injection fragments that should never become memory facts.
     bad_lines = []
     for ln in t.splitlines():
@@ -233,6 +233,47 @@ def _norm_val(v: str, max_len: int = 48) -> str:
     return re.sub(r"\s+", " ", (v or "").strip())[:max_len]
 
 
+_FORBIDDEN_PROFILE_VALUES = {
+    "僕",
+    "ぼく",
+    "私",
+    "わたし",
+    "俺",
+    "オレ",
+    "自分",
+    "me",
+    "myself",
+    "you",
+    "yourself",
+    "assistant",
+    "アシスタント",
+}
+
+
+def _plausible_profile_value(fact_key: str, value: str) -> bool:
+    v = _norm_val(value, 64)
+    if not v:
+        return False
+    low = v.lower()
+    if low in {x.lower() for x in _FORBIDDEN_PROFILE_VALUES}:
+        return False
+    if re.search(r"(<MEM(?:RULES|STYLE|CTX)|thinkingSignature|encrypted_content|budget_tokens=|identity\.precedence=)", v, re.IGNORECASE):
+        return False
+    if fact_key in {"profile.identity.first_person", "profile.identity.call_user", "profile.user.name", "profile.family.spouse", "profile.family.pet", "profile.family.child"}:
+        if len(v) > 24:
+            return False
+        if not re.fullmatch(r"[A-Za-z0-9ぁ-んァ-ヶ一-龠ー._\-]{1,24}", v):
+            return False
+    if fact_key == "profile.family.summary":
+        if len(v) < 2 or len(v) > 60:
+            return False
+        if re.search(r"(この会話|情報だけ|分からない|わからない|不足|未確認|unknown)", v, re.IGNORECASE):
+            return False
+    if fact_key == "profile.family.children_count":
+        return bool(re.fullmatch(r"\d{1,2}", v))
+    return True
+
+
 def _extract_structured_facts(
     user_text: str,
     styles: Dict[str, str],
@@ -245,6 +286,8 @@ def _extract_structured_facts(
     def add_fact(subject: str, relation: str, value: str, fact_key: str, confidence: float, stable: bool = True, ttl_days: int = 365) -> None:
         vv = _norm_val(value)
         if not vv:
+            return
+        if not _plausible_profile_value(fact_key, vv):
             return
         out.append(
             {

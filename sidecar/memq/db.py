@@ -11,6 +11,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .fact_keys import infer_text_fact_keys
 from .timeline import day_key_from_ts
+from .text_sanitize import contains_runtime_noise, strip_memq_blocks, strip_runtime_noise
 
 
 def now_ts() -> int:
@@ -962,8 +963,17 @@ class MemqDB:
     def get_profile_snapshot(self, session_key: str, max_parts: int = 8) -> str:
         parts: List[str] = []
         style = self.get_style_profile()
+        def _clean_style(v: str, limit: int = 40) -> str:
+            t = strip_runtime_noise(strip_memq_blocks(str(v or "")))
+            t = re.sub(r"\s+", " ", t).strip()
+            if not t or contains_runtime_noise(t):
+                return ""
+            if re.search(r"(<MEM(?:RULES|STYLE|CTX)|budget_tokens=|identity\.precedence=|security\.)", t, re.IGNORECASE):
+                return ""
+            return t[:limit]
+
         for k in ("callUser", "firstPerson", "persona", "tone", "verbosity"):
-            v = str(style.get(k) or "").strip()
+            v = _clean_style(str(style.get(k) or ""))
             if not v:
                 continue
             parts.append(f"{k}:{v[:40]}")
@@ -1375,6 +1385,9 @@ class MemqDB:
             r"OpenClawで動く.*アシスタント",
             r"I am .*assistant",
             r"(?:お前自身は|あなたは).*(?:ロックマン|persona|キャラ|roleplay|act as)",
+            r"thinkingSignature",
+            r"encrypted_content",
+            r"\"type\"\s*:\s*\"(?:reasoning|thinking)\"",
         ]
         safe_patterns = self._compile_safe_cleanup_patterns(patterns)
         removed_items = 0
@@ -1393,6 +1406,63 @@ class MemqDB:
             kind = str(tags.get("kind", ""))
             fact = tags.get("fact") if isinstance(tags, dict) else None
             fks = [str(x) for x in (tags.get("fact_keys") or [])] if isinstance(tags, dict) else []
+            if isinstance(fact, dict):
+                fk = str(fact.get("fact_key") or "")
+                fv = str(fact.get("value") or "")
+                if fk == "profile.persona.role" and re.search(
+                    r"(<MEM(?:RULES|STYLE|CTX)|thinkingSignature|encrypted_content|budget_tokens=|identity\.precedence=|security\.|memstyle|スタイル|更新してください|維持|余計な提案|一人称|ユーザー呼称|文頭は|以後)",
+                    fv,
+                    re.IGNORECASE,
+                ):
+                    if removed_items >= max_delete:
+                        capped = True
+                        break
+                    self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
+                    removed_items += 1
+                    continue
+                if fk == "profile.persona.role" and re.search(r"(?:が1つある|\d+\s*(?:件|個|つ)|none|unknown|不明)", fv, re.IGNORECASE):
+                    if removed_items >= max_delete:
+                        capped = True
+                        break
+                    self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
+                    removed_items += 1
+                    continue
+                if fk == "profile.persona.role" and len(" ".join(fv.split())) > 48:
+                    if removed_items >= max_delete:
+                        capped = True
+                        break
+                    self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
+                    removed_items += 1
+                    continue
+                if fk in {"profile.family.child", "profile.family.spouse", "profile.family.pet", "profile.user.name"}:
+                    if re.search(r"^(?:僕|ぼく|私|わたし|俺|オレ|自分|me|myself|you|yourself|assistant|アシスタント)$", fv, re.IGNORECASE):
+                        if removed_items >= max_delete:
+                            capped = True
+                            break
+                        self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
+                        removed_items += 1
+                        continue
+                    if re.search(r"(です|だよ|だね|ます)$", fv):
+                        if removed_items >= max_delete:
+                            capped = True
+                            break
+                        self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
+                        removed_items += 1
+                        continue
+                if fk == "profile.family.summary" and re.search(r"(<MEM|subject=|conf=|src=|ttl=|\||thinkingSignature|encrypted_content)", fv, re.IGNORECASE):
+                    if removed_items >= max_delete:
+                        capped = True
+                        break
+                    self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
+                    removed_items += 1
+                    continue
+                if fk == "profile.family.children_count" and not re.fullmatch(r"\d{1,2}", fv):
+                    if removed_items >= max_delete:
+                        capped = True
+                        break
+                    self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
+                    removed_items += 1
+                    continue
             if (
                 str(r["layer"]) == "deep"
                 and kind in {"convdeep", "convdeep_global", "durable_global", "deep_global", "signal_deep", "auto_deep"}

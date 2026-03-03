@@ -8,6 +8,21 @@ from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 _NAME_LIKE_RE = re.compile(r"^[A-Za-z0-9ぁ-んァ-ヶ一-龠ー._\\-]{1,24}$")
 _PREFIX_RE = re.compile(r"^(?:u|a|x):\s*", re.IGNORECASE)
+_FORBIDDEN_NAME_VALUES = {
+    "僕",
+    "ぼく",
+    "私",
+    "わたし",
+    "俺",
+    "オレ",
+    "自分",
+    "me",
+    "myself",
+    "you",
+    "yourself",
+    "assistant",
+    "アシスタント",
+}
 
 
 @dataclass(frozen=True)
@@ -136,8 +151,22 @@ def plausible_fact_value(fact_key: str, value: str) -> bool:
     v = normalize_fact_value(value)
     if not v:
         return False
+    if re.search(r"(<MEM(?:RULES|STYLE|CTX)|thinkingSignature|encrypted_content|budget_tokens=|identity\.precedence=|security\.|procedure\.)", v, re.IGNORECASE):
+        return False
+    if re.search(r"(?:\|\s*(?:subject|conf|src|ttl)\s*=)", v, re.IGNORECASE):
+        return False
+    if re.search(r"(この会話|情報だけ|分からない|わからない|不足|未確認|unknown|assistant)", v, re.IGNORECASE):
+        return False
     if fact_key in {"profile.identity.first_person"}:
         return len(v) <= 12 and not any(ch.isspace() for ch in v)
+    if fact_key == "profile.persona.role":
+        if len(v) < 2 or len(v) > 32:
+            return False
+        if re.search(r"(?:\d+\s*(?:件|個|つ|行)|が1つある|unknown|none|不明)", v, re.IGNORECASE):
+            return False
+        if re.search(r"(です|だよ|だね|ます)$", v):
+            return False
+        return bool(re.fullmatch(r"[A-Za-z0-9ぁ-んァ-ヶ一-龠ー._\- ]{2,32}", v))
     if fact_key in {
         "profile.family.spouse",
         "profile.family.pet",
@@ -145,9 +174,17 @@ def plausible_fact_value(fact_key: str, value: str) -> bool:
         "profile.identity.call_user",
         "profile.user.name",
     }:
+        if v in _FORBIDDEN_NAME_VALUES:
+            return False
+        if re.search(r"(です|だよ|だね|ます)$", v):
+            return False
         return bool(_NAME_LIKE_RE.match(v))
     if fact_key == "profile.family.summary":
-        return 2 <= len(v) <= 60
+        if len(v) < 2 or len(v) > 60:
+            return False
+        if re.search(r"(<MEM|subject=|conf=|src=|ttl=|\||\{|\})", v, re.IGNORECASE):
+            return False
+        return True
     if fact_key == "profile.family.children_count":
         return bool(re.fullmatch(r"\d{1,2}", v))
     return True

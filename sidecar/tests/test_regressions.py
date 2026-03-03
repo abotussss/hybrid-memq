@@ -12,13 +12,28 @@ from sidecar.memq.ingest import _sanitize_turn_text, ingest_turn
 from sidecar.memq.intent import infer_intent
 from sidecar.memq.idle_consolidation import run_idle_consolidation
 from sidecar.memq.memctx_pack import build_memctx, build_memrules, build_memstyle
-from sidecar.memq.retrieval import retrieve_candidates
+from sidecar.memq.retrieval import retrieve_candidates, retrieve_candidates_with_plan
 from sidecar.memq.retrieval_deep import search_deep
 from sidecar.memq.retrieval_deep import NOISE_SUMMARY_RE as DEEP_NOISE_RE
 from sidecar.memq.retrieval_surface import NOISE_SUMMARY_RE as SURFACE_NOISE_RE
 from sidecar.memq.fact_keys import infer_query_fact_keys
+from sidecar.memq.rules import extract_preference_events, refresh_preference_profiles
+from sidecar.memq.style import sanitize_style_profile
+from sidecar.memq.structured_facts import plausible_fact_value
 from sidecar.memq.timeline import day_key_from_ts, detect_timeline_range
 from sidecar.memq.tokens import lexical_overlap, tokenize_lexical
+
+try:
+    from sidecar.memq.brain.schemas import BrainIngestPlan
+    from sidecar.memq.brain.service import BrainService
+    from sidecar.memq.config import load_config
+
+    HAVE_BRAIN_DEPS = True
+except Exception:
+    BrainIngestPlan = None  # type: ignore[assignment]
+    BrainService = None  # type: ignore[assignment]
+    load_config = None  # type: ignore[assignment]
+    HAVE_BRAIN_DEPS = False
 
 
 class RegressionGuardsTest(unittest.TestCase):
@@ -144,6 +159,119 @@ class RegressionGuardsTest(unittest.TestCase):
         self.assertEqual([], deep)
         self.assertFalse(bool(meta.get("deepCalled")))
 
+    def test_retrieve_candidates_with_brain_plan_prefers_fact_key(self) -> None:
+        self.db.add_memory_item(
+            session_key="s1",
+            layer="deep",
+            text="家族構成: 妻ミナ 子ども2人",
+            summary="家族構成: 妻ミナ 子ども2人",
+            importance=0.95,
+            tags={"kind": "structured_fact", "fact_keys": ["profile.family.spouse", "profile.family.summary"]},
+            emb_f16=None,
+            emb_q=None,
+            emb_dim=0,
+            source="turn",
+        )
+        plan = {
+            "fact_keys": ["profile.family.spouse"],
+            "fts_queries": ["家族構成 妻", "spouse family"],
+            "retrieval": {
+                "topk_surface": 3,
+                "topk_deep": 6,
+                "allow_deep": True,
+            },
+        }
+        surface, deep, meta = retrieve_candidates_with_plan(
+            db=self.db,
+            session_key="s1",
+            prompt="俺の家族構成は？",
+            dim=128,
+            bits_per_dim=8,
+            top_k=5,
+            surface_threshold=0.85,
+            deep_enabled=True,
+            plan=plan,
+        )
+        self.assertIsInstance(surface, list)
+        self.assertGreaterEqual(len(deep), 1)
+        self.assertEqual(1, int((meta.get("debug") or {}).get("brain_plan_used", 0)))
+        self.assertTrue(any(int(x.get("key_overlap", 0)) > 0 for x in deep))
+
+    @unittest.skipUnless(HAVE_BRAIN_DEPS, "brain deps unavailable in this python env")
+    def test_brain_apply_ingest_plan_explicit_gate(self) -> None:
+        cfg = load_config()
+        svc = BrainService(cfg)
+        now = int(time.time())
+        plan_no_explicit = BrainIngestPlan.model_validate(
+            {
+                "version": "memq_brain_v1",
+                "facts": [
+                    {
+                        "entity_id": "ent:user",
+                        "fact_key": "profile.user.name",
+                        "value": "ヒロ",
+                        "confidence": 0.9,
+                        "layer": "deep",
+                        "ttl_days": 365,
+                        "keywords": ["名前", "ヒロ"],
+                        "evidence_quote": "俺の名前はヒロ",
+                    }
+                ],
+                "events": [
+                    {
+                        "day": "2026-03-03",
+                        "ts": now,
+                        "summary": "ユーザーが名前を共有した",
+                        "salience": 0.7,
+                        "ttl_days": 30,
+                        "keywords": ["名前"],
+                        "kind": "chat",
+                        "actor": "user",
+                    }
+                ],
+                "style_update": {"apply": True, "explicit": False, "keys": {"callUser": "ヒロ"}},
+                "rules_update": {"apply": True, "explicit": False, "rules": ["language.allowed=ja,en"]},
+            }
+        )
+        wrote = svc.apply_ingest_plan(
+            db=self.db,
+            session_key="s1",
+            ts=now,
+            plan=plan_no_explicit,
+            user_text="俺の名前はヒロ",
+            assistant_text="了解",
+            metadata=None,
+        )
+        self.assertGreaterEqual(int(wrote.get("deep", 0)), 1)
+        self.assertGreaterEqual(int(wrote.get("events", 0)), 1)
+        style = self.db.get_style_profile()
+        self.assertNotIn("callUser", style)
+        rules = [str(r["body"]) for r in self.db.list_rules()]
+        self.assertFalse(any(b.startswith("language.allowed=") for b in rules))
+
+        plan_explicit = BrainIngestPlan.model_validate(
+            {
+                "version": "memq_brain_v1",
+                "facts": [],
+                "events": [],
+                "style_update": {"apply": True, "explicit": True, "keys": {"callUser": "ヒロ"}},
+                "rules_update": {"apply": True, "explicit": True, "rules": ["language.allowed=ja,en"]},
+            }
+        )
+        svc.apply_ingest_plan(
+            db=self.db,
+            session_key="s1",
+            ts=now + 1,
+            plan=plan_explicit,
+            user_text="呼び方はヒロで",
+            assistant_text="了解",
+            metadata=None,
+        )
+        style2 = self.db.get_style_profile()
+        self.assertEqual("ヒロ", style2.get("callUser"))
+        rules2 = [str(r["body"]) for r in self.db.list_rules()]
+        self.assertTrue(any(b.startswith("language.allowed=ja,en") for b in rules2))
+
     def test_memrules_memstyle_compact_and_non_overlapping(self) -> None:
         self.db.upsert_rule("r_lang", 90, True, "language", "language.allowed=ja,en")
         self.db.upsert_rule("r_sec", 90, True, "security", "security.never_output_secrets=true")
@@ -165,6 +293,61 @@ class RegressionGuardsTest(unittest.TestCase):
         self.assertIn("firstPerson=僕", style)
         self.assertIn("callUser=ヒロ", style)
         self.assertNotIn("<MEMRULES", style)
+
+    def test_style_profile_sanitization_removes_contaminated_persona(self) -> None:
+        self.db.upsert_style("firstPerson", "僕")
+        self.db.upsert_style("callUser", "ヒロ")
+        self.db.upsert_style("persona", '<MEMRULES v1> budget_tokens=80 identity.precedence=memstyle security.never_output_secrets=true')
+        self.db.upsert_style("mustFirstPerson", "僕")
+        changed = sanitize_style_profile(self.db)
+        self.assertGreaterEqual(changed, 1)
+        prof = self.db.get_style_profile()
+        self.assertNotIn("mustFirstPerson", prof)
+        self.assertNotIn("persona", prof)
+        style = build_memstyle(self.db, 120)
+        self.assertNotIn("<MEMRULES", style)
+        self.assertNotIn("mustFirstPerson", style)
+
+    def test_preference_events_do_not_store_raw_persona_prompt(self) -> None:
+        text = (
+            "MEMSTYLEを更新してください。キャラはロックマン。"
+            "口調は丁寧。一人称は僕。ユーザー呼称はヒロ。"
+        )
+        events = extract_preference_events(text)
+        persona_events = [ev for ev in events if ev[0] in {"style.persona", "style.persona_prompt"}]
+        self.assertGreaterEqual(len(persona_events), 1)
+        for key, value, _w, _exp, _src in persona_events:
+            self.assertEqual("style.persona", key)
+            self.assertNotIn("MEMSTYLEを更新してください", value)
+            self.assertNotIn("一人称", value)
+            self.assertNotIn("ユーザー呼称", value)
+
+    def test_refresh_profile_removes_legacy_persona_prompt(self) -> None:
+        now = int(time.time())
+        self.db.add_preference_event(
+            key="style.persona_prompt",
+            value="MEMSTYLEを更新してください。キャラはロックマン。口調は丁寧。",
+            weight=1.0,
+            explicit=True,
+            source="user_msg",
+            evidence_uri="session:s1:1",
+            created_at=now,
+        )
+        updated = refresh_preference_profiles(self.db, now)
+        prof = self.db.get_preference_profile()
+        self.assertNotIn("style.persona_prompt", prof)
+        # no contaminated persona should be bridged to style profile
+        style = self.db.get_style_profile()
+        self.assertNotIn("persona", style)
+        self.assertTrue(isinstance(updated, dict))
+
+    def test_profile_snapshot_ignores_contaminated_style_values(self) -> None:
+        self.db.upsert_style("callUser", "ヒロ")
+        self.db.upsert_style("persona", '<MEMSTYLE v1> thinkingSignature={"id":"rs_xxx"}')
+        snap = self.db.get_profile_snapshot("s1")
+        self.assertIn("callUser:ヒロ", snap)
+        self.assertNotIn("thinkingSignature", snap)
+        self.assertNotIn("<MEMSTYLE", snap)
 
     def test_explicit_memory_note_is_not_collapsed_to_single_slot(self) -> None:
         now = int(time.time())
@@ -300,6 +483,56 @@ class RegressionGuardsTest(unittest.TestCase):
         self.assertIn("profile.family.children_count", keys)
         self.assertIn("profile.user.name", keys)
         self.assertIn("profile.identity.call_user", keys)
+
+    def test_ingest_rejects_invalid_family_pronoun_value(self) -> None:
+        now = int(time.time())
+        ingest_turn(
+            db=self.db,
+            session_key="s1",
+            user_text="覚えて。子どもは僕。",
+            assistant_text="了解。",
+            ts=now,
+            dim=64,
+            bits_per_dim=8,
+        )
+        rows = self.db.list_memory_items("deep", "s1", limit=100)
+        for r in rows:
+            try:
+                tags = json.loads(str(r["tags"] or "{}"))
+            except Exception:
+                tags = {}
+            fact = tags.get("fact") if isinstance(tags, dict) else {}
+            if not isinstance(fact, dict):
+                continue
+            self.assertFalse(
+                str(fact.get("fact_key") or "") == "profile.family.child"
+                and str(fact.get("value") or "") == "僕"
+            )
+
+    def test_rejects_invalid_persona_role_counter_phrase(self) -> None:
+        self.assertFalse(plausible_fact_value("profile.persona.role", "が1つある"))
+
+    def test_cleanup_removes_invalid_persona_role_counter_phrase(self) -> None:
+        now = int(time.time())
+        self.db.add_memory_item(
+            session_key="global",
+            layer="deep",
+            text="persona role invalid",
+            summary="人格: persona=が1つある | subject=assistant | conf=0.69 | src=idle_consolidation | ttl=365d",
+            importance=0.8,
+            tags={
+                "kind": "durable_global_fact",
+                "fact_keys": ["profile.persona.role"],
+                "fact": {"fact_key": "profile.persona.role", "value": "が1つある"},
+                "ts": now,
+            },
+            emb_f16=None,
+            emb_q=None,
+            emb_dim=0,
+            source="idle_consolidation",
+        )
+        stats = self.db.cleanup_noisy_memory(max_delete=50)
+        self.assertGreaterEqual(int(stats.get("removed_memory_items", 0)), 1)
 
     def test_memctx_profile_query_uses_global_durable_fallback(self) -> None:
         now = int(time.time())
