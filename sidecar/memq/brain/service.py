@@ -11,7 +11,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..config import MemqConfig
 from ..db import MemqDB
+from ..rules import apply_rule_updates, extract_rule_updates
 from ..structured_facts import normalize_fact_value, plausible_fact_value, structured_fact_summary
+from ..style import apply_style_updates, extract_style_updates
 from ..style import sanitize_style_profile
 from .ollama_client import BrainUnavailable, OllamaBrainClient, OllamaConfig
 from .schemas import BrainAuditPatchPlan, BrainIngestPlan, BrainMergePlan, BrainRecallPlan
@@ -616,7 +618,7 @@ class BrainService:
         assistant_text: str,
         metadata: Optional[Dict[str, Any]],
     ) -> Dict[str, int]:
-        wrote = {"surface": 0, "deep": 0, "ephemeral": 0, "quarantined": 0, "events": 0}
+        wrote = {"surface": 0, "deep": 0, "ephemeral": 0, "quarantined": 0, "events": 0, "style": 0, "rules": 0}
         now = int(ts or time.time())
 
         def quarantine(raw: str, reason: str, risk: float = 0.8) -> None:
@@ -781,33 +783,68 @@ class BrainService:
 
         wrote["events"] += event_written
 
+        # Style/rules updates are allowed when either:
+        # - Brain marks explicit=true, or
+        # - deterministic parser finds explicit user directives in this turn.
+        det_style = extract_style_updates(user_text or "")
+        det_rules = extract_rule_updates(user_text or "")
+
         su = plan.style_update
-        if su and su.apply and su.explicit:
-            for k, v in (su.keys or {}).items():
+        allow_style_update = bool(det_style) or bool(su and su.explicit)
+        if allow_style_update:
+            style_updates: Dict[str, str] = {}
+            if su and su.apply:
+                for k, v in (su.keys or {}).items():
+                    kk = str(k or "").strip()
+                    if kk not in SAFE_STYLE_KEYS:
+                        continue
+                    vv = " ".join(str(v or "").split()).strip()
+                    if not vv or SECRET_RE.search(vv):
+                        continue
+                    style_updates[kk] = vv[:180]
+            # Deterministic parser is the source of truth for explicit user directives.
+            for k, v in (det_style or {}).items():
                 kk = str(k or "").strip()
-                if kk not in SAFE_STYLE_KEYS:
-                    continue
                 vv = " ".join(str(v or "").split()).strip()
-                if not vv or SECRET_RE.search(vv):
-                    continue
-                db.upsert_style(kk, vv[:180])
-            sanitize_style_profile(db)
+                if kk in SAFE_STYLE_KEYS and vv and not SECRET_RE.search(vv):
+                    style_updates[kk] = vv[:180]
+            if style_updates:
+                wrote["style"] += int(apply_style_updates(db, style_updates))
+                sanitize_style_profile(db)
 
         ru = plan.rules_update
-        if ru and ru.apply and ru.explicit:
-            for i, line in enumerate(ru.rules or []):
-                t = " ".join(str(line or "").split()).strip()
-                if "=" not in t:
+        allow_rule_update = bool(det_rules) or bool(ru and ru.explicit)
+        if allow_rule_update:
+            rule_updates: List[tuple[str, str, int, str]] = []
+            if ru and ru.apply:
+                for i, line in enumerate(ru.rules or []):
+                    t = " ".join(str(line or "").split()).strip()
+                    if "=" not in t:
+                        continue
+                    k, v = t.split("=", 1)
+                    k = k.strip()
+                    v = v.strip()
+                    if not k or not k.startswith(SAFE_RULE_PREFIX):
+                        continue
+                    if SECRET_RE.search(v):
+                        continue
+                    kind = k.split(".", 1)[0]
+                    # Brain updates are conservative priority; deterministic updates can override by key.
+                    rule_updates.append((k, v[:200], 75, kind))
+            # Deterministic parser yields explicit, whitelist-filtered rules.
+            for k, v, prio, kind in det_rules:
+                if not str(k or "").startswith(SAFE_RULE_PREFIX):
                     continue
-                k, v = t.split("=", 1)
-                k = k.strip()
-                v = v.strip()
-                if not k or not k.startswith(SAFE_RULE_PREFIX):
+                if SECRET_RE.search(str(v or "")):
                     continue
-                if SECRET_RE.search(v):
-                    continue
-                rid = f"brain_{k}_{i}".replace(" ", "_").replace("/", "_")
-                kind = k.split(".", 1)[0]
-                db.upsert_rule(rid, priority=75, enabled=True, kind=kind, body=f"{k}={v[:200]}")
+                rule_updates.append((str(k), str(v)[:200], int(prio), str(kind)))
+            if rule_updates:
+                # De-duplicate by key keeping the highest priority update.
+                by_key: Dict[str, tuple[str, str, int, str]] = {}
+                for k, v, prio, kind in rule_updates:
+                    cur = by_key.get(k)
+                    if cur is None or int(prio) >= int(cur[2]):
+                        by_key[k] = (k, v, int(prio), kind)
+                wrote["rules"] += int(apply_rule_updates(db, list(by_key.values())))
 
         return wrote
