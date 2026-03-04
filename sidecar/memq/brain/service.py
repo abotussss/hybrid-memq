@@ -34,6 +34,7 @@ class BrainResult:
 
 class BrainService:
     def __init__(self, cfg: MemqConfig) -> None:
+        self.cfg = cfg
         self.enabled = bool(cfg.brain_enabled and cfg.brain_provider.lower() == "ollama")
         self.required = str(cfg.brain_mode or "best_effort").lower() == "required"
         self.mode = str(cfg.brain_mode or "best_effort").lower()
@@ -53,6 +54,10 @@ class BrainService:
                     temperature=cfg.brain_temperature,
                     max_tokens=cfg.brain_max_tokens,
                     concurrent=cfg.brain_concurrent,
+                    required_mode=self.required,
+                    auto_restart=cfg.brain_auto_restart,
+                    restart_cooldown_sec=cfg.brain_restart_cooldown_sec,
+                    restart_wait_ms=cfg.brain_restart_wait_ms,
                 )
             )
         self.trace_path = (cfg.db_path.parent / "brain_trace.jsonl").resolve()
@@ -70,6 +75,24 @@ class BrainService:
             "err_calls": 0,
             "ops": {},
         }
+
+    def _compact_text(self, text: str, max_chars: int) -> str:
+        if max_chars <= 0:
+            return ""
+        return " ".join(str(text or "").split()).strip()[:max_chars]
+
+    def _compact_recent_messages(self, recent_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        max_items = max(1, int(self.cfg.brain_recall_recent_messages))
+        max_chars = max(80, int(self.cfg.brain_recall_message_chars))
+        for m in (recent_messages or [])[-max_items:]:
+            role = str((m or {}).get("role") or "")
+            text = self._compact_text(str((m or {}).get("text") or ""), max_chars)
+            if not text:
+                continue
+            ts = (m or {}).get("ts")
+            out.append({"role": role, "text": text, "ts": ts})
+        return out
 
     def _can_attempt(self) -> bool:
         if self.required:
@@ -348,12 +371,20 @@ class BrainService:
         ts: int,
         metadata: Optional[Dict[str, Any]],
     ) -> Optional[BrainIngestPlan]:
+        user_compact = self._compact_text(user_text, int(self.cfg.brain_ingest_user_chars))
+        assistant_compact = self._compact_text(assistant_text, int(self.cfg.brain_ingest_assistant_chars))
+        md = dict(metadata or {})
+        # Keep metadata compact to avoid bloating local 20B prompts.
+        if "actions" in md and isinstance(md.get("actions"), list):
+            md["actions"] = list(md.get("actions") or [])[:6]
+        if "actionSummaries" in md and isinstance(md.get("actionSummaries"), list):
+            md["actionSummaries"] = [self._compact_text(str(x), 120) for x in list(md.get("actionSummaries") or [])[:8]]
         payload = {
             "session_key": session_key,
             "ts": int(ts),
-            "user_text": user_text or "",
-            "assistant_text": assistant_text or "",
-            "metadata": metadata or {},
+            "user_text": user_compact,
+            "assistant_text": assistant_compact,
+            "metadata": md,
         }
         return self._call_plan(
             op="ingest_plan",
@@ -361,12 +392,61 @@ class BrainService:
             payload=payload,
             call=lambda: self.client.build_ingest_plan(
                 session_key=session_key,
-                user_text=user_text,
-                assistant_text=assistant_text,
+                user_text=user_compact,
+                assistant_text=assistant_compact,
                 ts=ts,
-                metadata=metadata,
+                metadata=md,
             ) if self.client else None,
         )
+
+    def ensure_runtime(self, *, session_key: str = "runtime") -> Dict[str, Any]:
+        trace_id = str(uuid.uuid4())
+        if not self.client:
+            self._mark_error("brain_disabled_or_no_client", err_type="brain_unavailable", trace_id=trace_id)
+            return {"ok": False, "seen": False, "trace_id": trace_id, "err": "brain_disabled_or_no_client"}
+        try:
+            ps = self.client.ensure_runtime()
+            if bool(ps.get("seen")):
+                self._last_ps_seen_model = self.model
+                self._last_ps_seen_ts = int(time.time())
+            self._append_trace(
+                {
+                    "ts": int(time.time()),
+                    "trace_id": trace_id,
+                    "session_key": session_key,
+                    "op": "runtime_ensure",
+                    "provider": self.provider,
+                    "model": self.model,
+                    "ok": bool(ps.get("seen")),
+                    "latency_ms": 0,
+                    "prompt_sha256": "",
+                    "schema_version": "memq_brain_v1",
+                    "ps_snapshot": ps,
+                }
+            )
+            return {"ok": True, "seen": bool(ps.get("seen")), "trace_id": trace_id, "ps": ps}
+        except Exception as e:
+            self._mark_error(str(e), err_type=type(e).__name__, trace_id=trace_id)
+            self._append_trace(
+                {
+                    "ts": int(time.time()),
+                    "trace_id": trace_id,
+                    "session_key": session_key,
+                    "op": "runtime_ensure",
+                    "provider": self.provider,
+                    "model": self.model,
+                    "ok": False,
+                    "latency_ms": 0,
+                    "prompt_sha256": "",
+                    "schema_version": "memq_brain_v1",
+                    "err_type": type(e).__name__,
+                    "err_msg": str(e),
+                    "ps_snapshot": {"ok": False, "seen": False, "matched": None},
+                }
+            )
+            if self.required:
+                raise BrainUnavailable(str(e)) from e
+            return {"ok": False, "seen": False, "trace_id": trace_id, "err": str(e)}
 
     def build_recall_plan(
         self,
@@ -379,10 +459,12 @@ class BrainService:
         surface_threshold: float,
         deep_enabled: bool,
     ) -> Optional[BrainRecallPlan]:
+        prompt_compact = self._compact_text(prompt, 320)
+        recent_compact = self._compact_recent_messages(recent_messages)
         payload = {
             "session_key": session_key,
-            "prompt": prompt or "",
-            "recent_messages": recent_messages[:8],
+            "prompt": prompt_compact,
+            "recent_messages": recent_compact,
             "budgets": budgets,
             "top_k": int(top_k),
             "surface_threshold": float(surface_threshold),
@@ -394,8 +476,8 @@ class BrainService:
             payload=payload,
             call=lambda: self.client.build_recall_plan(
                 session_key=session_key,
-                prompt=prompt,
-                recent_messages=recent_messages,
+                prompt=prompt_compact,
+                recent_messages=recent_compact,
                 budgets=budgets,
                 top_k=top_k,
                 surface_threshold=surface_threshold,
@@ -410,9 +492,23 @@ class BrainService:
         memory_candidates: List[Dict[str, Any]],
         stats: Optional[Dict[str, Any]] = None,
     ) -> Optional[BrainMergePlan]:
+        merge_limit = max(20, int(self.cfg.brain_merge_candidate_limit))
+        compact_candidates: List[Dict[str, Any]] = []
+        for r in (memory_candidates or [])[:merge_limit]:
+            compact_candidates.append(
+                {
+                    "id": str((r or {}).get("id") or ""),
+                    "session_key": str((r or {}).get("session_key") or ""),
+                    "layer": str((r or {}).get("layer") or ""),
+                    "summary": self._compact_text(str((r or {}).get("summary") or ""), 220),
+                    "updated_at": int((r or {}).get("updated_at") or 0),
+                    "importance": float((r or {}).get("importance") or 0.0),
+                    "usage_count": int((r or {}).get("usage_count") or 0),
+                }
+            )
         payload = {
             "session_key": session_key,
-            "memory_candidates": memory_candidates[:120],
+            "memory_candidates": compact_candidates,
             "stats": stats or {},
         }
         return self._call_plan(
@@ -421,7 +517,7 @@ class BrainService:
             payload=payload,
             call=lambda: self.client.build_merge_plan(
                 session_key=session_key,
-                memory_candidates=memory_candidates,
+                memory_candidates=compact_candidates,
                 stats=stats or {},
             ) if self.client else None,
         )

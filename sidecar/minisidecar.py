@@ -103,6 +103,30 @@ def _brain_code(default: str, err: Exception | str) -> str:
         return "brain_apply_failed"
     return default
 
+
+def _ensure_brain_or_error(session_key: str, *, op: str, required: bool) -> JSONResponse | None:
+    if not required:
+        return None
+    try:
+        status = brain.ensure_runtime(session_key=session_key)
+    except Exception as e:
+        return _brain_error_response(
+            code=_brain_code("brain_unavailable", e),
+            op=op,
+            session_key=session_key,
+            trace_id=brain.last_trace_id(op),
+            err=e,
+        )
+    if not bool(status.get("seen")):
+        return _brain_error_response(
+            code="brain_unavailable",
+            op=op,
+            session_key=session_key,
+            trace_id=str(status.get("trace_id") or brain.last_trace_id(op)),
+            err=str(status.get("err") or "brain_runtime_not_ready"),
+        )
+    return None
+
 def _has_fact(session_key: str, fact_key: str, value: str, limit: int = 6000) -> bool:
     value_l = normalize_fact_value(value).lower()
     if not fact_key or not value_l:
@@ -290,6 +314,11 @@ def brain_trace_recent(n: int = Query(default=50, ge=1, le=500)) -> Dict[str, An
     return {"ok": True, "items": brain.recent_traces(n)}
 
 
+@app.post("/brain/ensure")
+def brain_ensure(sessionKey: str = Query(default="runtime")) -> Dict[str, Any]:
+    return brain.ensure_runtime(session_key=sessionKey)
+
+
 @app.post("/idle_tick")
 def idle_tick(req: IdleTickRequest) -> Dict[str, Any]:
     now = int(req.nowSec or time.time())
@@ -330,6 +359,9 @@ def memory_ingest_turn(req: IngestTurnRequest) -> IngestTurnResponse:
     wrote: Dict[str, int] | None = None
     brain_used = False
     required = _brain_mode_required()
+    ensure_err = _ensure_brain_or_error(req.sessionKey, op="ingest_plan", required=required)
+    if ensure_err is not None:
+        return ensure_err
     try:
         plan = brain.build_ingest_plan(
             session_key=req.sessionKey,
@@ -419,6 +451,9 @@ def memctx_query(req: MemctxQueryRequest) -> MemctxQueryResponse:
     timeline_range = detect_timeline_range(req.prompt)
     timeline_first = bool(timeline_range and timeline_range.explicit)
     required = _brain_mode_required()
+    ensure_err = _ensure_brain_or_error(req.sessionKey, op="recall_plan", required=required)
+    if ensure_err is not None:
+        return ensure_err
     recent_messages = [
         {"role": str(m.role), "text": str(m.text), "ts": int(m.ts) if m.ts is not None else None}
         for m in (req.recentMessages or [])
@@ -539,6 +574,9 @@ def idle_run_once(req: IdleRunRequest) -> IdleRunResponse:
     with state_lock:
         session_key = str(state.get("last_session_key", "default"))
     required = _brain_mode_required()
+    ensure_err = _ensure_brain_or_error(session_key, op="merge_plan", required=required)
+    if ensure_err is not None:
+        return ensure_err
     res = run_idle_consolidation(db, session_key=session_key, dim=cfg.dim, bits_per_dim=cfg.bits_per_dim)
     try:
         merge = _idle_merge_with_brain(session_key, required=required)

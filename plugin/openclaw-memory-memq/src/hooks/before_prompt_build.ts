@@ -245,6 +245,11 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
     const brainKeepAlive = String(getCfg(api, "memq.brain.keepAlive", defaults["memq.brain.keepAlive"]));
     const brainTimeoutMs = Number(getCfg(api, "memq.brain.timeoutMs", defaults["memq.brain.timeoutMs"]));
     const brainMaxTokens = Number(getCfg(api, "memq.brain.maxTokens", defaults["memq.brain.maxTokens"]));
+    const brainAutoRestart = getCfg(api, "memq.brain.autoRestart", defaults["memq.brain.autoRestart"]);
+    const brainRestartCooldownSec = Number(
+      getCfg(api, "memq.brain.restartCooldownSec", defaults["memq.brain.restartCooldownSec"])
+    );
+    const brainRestartWaitMs = Number(getCfg(api, "memq.brain.restartWaitMs", defaults["memq.brain.restartWaitMs"]));
     const brainRequired = brainMode === "required";
 
     const recentMax = Math.max(800, getCfg(api, "memq.recent.maxTokens", defaults["memq.recent.maxTokens"]));
@@ -283,6 +288,9 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
       brainKeepAlive,
       brainTimeoutMs,
       brainMaxTokens,
+      brainAutoRestart,
+      brainRestartCooldownSec,
+      brainRestartWaitMs,
     });
     if (!ensured) {
       logInfo(api, `[memq-v2] before_prompt_build sidecar_unavailable session=${sessionKey}`);

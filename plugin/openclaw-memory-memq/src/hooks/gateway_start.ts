@@ -11,6 +11,11 @@ export function createGatewayStart(api: any, sidecar: SidecarClient) {
     const brainKeepAlive = String(getCfg(api, "memq.brain.keepAlive", defaults["memq.brain.keepAlive"]));
     const brainTimeoutMs = Number(getCfg(api, "memq.brain.timeoutMs", defaults["memq.brain.timeoutMs"]));
     const brainMaxTokens = Number(getCfg(api, "memq.brain.maxTokens", defaults["memq.brain.maxTokens"]));
+    const brainAutoRestart = getCfg(api, "memq.brain.autoRestart", defaults["memq.brain.autoRestart"]);
+    const brainRestartCooldownSec = Number(
+      getCfg(api, "memq.brain.restartCooldownSec", defaults["memq.brain.restartCooldownSec"])
+    );
+    const brainRestartWaitMs = Number(getCfg(api, "memq.brain.restartWaitMs", defaults["memq.brain.restartWaitMs"]));
     logInfo(api, `[memq-v2] gateway_start workspace_root=${workspaceRoot}`);
     let healthy = await sidecar.health();
     if (!healthy) {
@@ -22,6 +27,9 @@ export function createGatewayStart(api: any, sidecar: SidecarClient) {
         brainKeepAlive,
         brainTimeoutMs,
         brainMaxTokens,
+        brainAutoRestart,
+        brainRestartCooldownSec,
+        brainRestartWaitMs,
       });
     }
     if (!healthy) {

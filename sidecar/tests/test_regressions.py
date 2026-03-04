@@ -287,6 +287,10 @@ class RegressionGuardsTest(unittest.TestCase):
                 temperature=0.0,
                 max_tokens=1024,
                 concurrent=1,
+                required_mode=False,
+                auto_restart=False,
+                restart_cooldown_sec=30,
+                restart_wait_ms=2000,
             )
         )
         repaired = client._repair_payload(  # type: ignore[attr-defined]
@@ -314,6 +318,10 @@ class RegressionGuardsTest(unittest.TestCase):
                 temperature=0.0,
                 max_tokens=1024,
                 concurrent=1,
+                required_mode=False,
+                auto_restart=False,
+                restart_cooldown_sec=30,
+                restart_wait_ms=2000,
             )
         )
         repaired = client._repair_payload(  # type: ignore[attr-defined]
@@ -325,6 +333,35 @@ class RegressionGuardsTest(unittest.TestCase):
         plan = BrainIngestPlan.model_validate(repaired)
         self.assertGreaterEqual(len(plan.facts), 1)
         self.assertEqual("memory.note.generic", plan.facts[0].fact_key)
+
+    @unittest.skipUnless(HAVE_BRAIN_DEPS, "brain deps unavailable in this python env")
+    def test_brain_parse_chat_json_recovers_from_non_content_fields(self) -> None:
+        client = OllamaBrainClient(
+            OllamaConfig(
+                base_url="http://127.0.0.1:11434",
+                model="gpt-oss:20b",
+                timeout_ms=60000,
+                keep_alive="30m",
+                temperature=0.0,
+                max_tokens=256,
+                concurrent=1,
+                required_mode=False,
+                auto_restart=False,
+                restart_cooldown_sec=30,
+                restart_wait_ms=2000,
+            )
+        )
+        parsed = client._parse_chat_json(  # type: ignore[attr-defined]
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                    "thinking": [{"text": "{\"intent\":{\"timeline\":1}}"}],
+                }
+            }
+        )
+        self.assertIsInstance(parsed, dict)
+        self.assertEqual(1, int(((parsed or {}).get("intent") or {}).get("timeline")))
 
     def test_memrules_memstyle_compact_and_non_overlapping(self) -> None:
         self.db.upsert_rule("r_lang", 90, True, "language", "language.allowed=ja,en")

@@ -2,7 +2,7 @@
   "ok": true,
   "base": "http://127.0.0.1:7781",
   "model": "gpt-oss:20b",
-  "session": "brain_required_proof_1772636342",
+  "session": "brain_required_proof_1772638134",
   "assertions": {
     "brain_mode_required": true,
     "global_ingest_plan_ge_target": true,
@@ -17,28 +17,10 @@
   "brain_mode": "required",
   "stats_before": {
     "ok": true,
-    "total_calls": 50,
-    "ok_calls": 50,
+    "total_calls": 0,
+    "ok_calls": 0,
     "err_calls": 0,
-    "ops": {
-      "ingest_plan": {
-        "total": 45,
-        "ok": 45,
-        "err": 0
-      },
-      "recall_plan": {
-        "total": 3,
-        "ok": 3,
-        "err": 0
-      },
-      "merge_plan": {
-        "total": 2,
-        "ok": 2,
-        "err": 0
-      }
-    },
-    "last_ok_ts": 1772636316,
-    "last_trace_id": "b7965b94-2a9b-46a6-9357-2177cd8d1a52",
+    "ops": {},
     "enabled": true,
     "required": true,
     "mode": "required",
@@ -47,34 +29,35 @@
     "last_error": "",
     "last_error_type": "",
     "last_error_ts": 0,
-    "last_ps_seen_model": "gpt-oss:20b",
-    "last_ps_seen_ts": 1772636316,
+    "last_trace_id": "",
+    "last_ps_seen_model": "",
+    "last_ps_seen_ts": 0,
     "trace_path": "/Users/hiroyukimiyake/Documents/New project/.memq/brain_trace.jsonl"
   },
   "stats_after": {
     "ok": true,
-    "total_calls": 50,
-    "ok_calls": 50,
+    "total_calls": 11,
+    "ok_calls": 11,
     "err_calls": 0,
     "ops": {
       "ingest_plan": {
-        "total": 45,
-        "ok": 45,
+        "total": 5,
+        "ok": 5,
         "err": 0
       },
       "recall_plan": {
-        "total": 3,
-        "ok": 3,
+        "total": 5,
+        "ok": 5,
         "err": 0
       },
       "merge_plan": {
-        "total": 2,
-        "ok": 2,
+        "total": 1,
+        "ok": 1,
         "err": 0
       }
     },
-    "last_ok_ts": 1772636316,
-    "last_trace_id": "b7965b94-2a9b-46a6-9357-2177cd8d1a52",
+    "last_ok_ts": 1772638218,
+    "last_trace_id": "52bd695c-912b-4560-9c84-b71778d3f8ac",
     "enabled": true,
     "required": true,
     "mode": "required",
@@ -84,47 +67,42 @@
     "last_error_type": "",
     "last_error_ts": 0,
     "last_ps_seen_model": "gpt-oss:20b",
-    "last_ps_seen_ts": 1772636316,
+    "last_ps_seen_ts": 1772638218,
     "trace_path": "/Users/hiroyukimiyake/Documents/New project/.memq/brain_trace.jsonl"
   },
   "delta": {
-    "ingest_plan": 0,
-    "recall_plan": 0,
-    "merge_plan": 0
+    "ingest_plan": 5,
+    "recall_plan": 5,
+    "merge_plan": 1
   },
   "targets": {
-    "ingest": 10,
-    "recall": 10,
+    "ingest": 5,
+    "recall": 5,
     "merge": 1
   },
   "needed": {
-    "ingest": 0,
-    "recall": 0,
-    "merge": 0
+    "ingest": 5,
+    "recall": 5,
+    "merge": 1
   },
-  "idle_skipped": true,
-  "global_before": {
-    "ingest_plan": 102,
-    "ingest_plan_apply": 102,
-    "recall_plan": 28,
-    "merge_plan": 17,
-    "merge_plan_apply": 17
-  },
+  "idle_skipped": false,
+  "global_before": {},
   "global_after": {
-    "ingest_plan": 102,
-    "ingest_plan_apply": 102,
-    "recall_plan": 28,
-    "merge_plan": 17,
-    "merge_plan_apply": 17
+    "runtime_ensure": 11,
+    "ingest_plan": 5,
+    "ingest_plan_apply": 5,
+    "recall_plan": 5,
+    "merge_plan": 1,
+    "merge_plan_apply": 1
   },
-  "trace_session_count": 0,
-  "trace_model_count": 0,
-  "trace_ps_seen_count": 0,
+  "trace_session_count": 28,
+  "trace_model_count": 28,
+  "trace_ps_seen_count": 28,
   "ollama_ps_models_n": 1,
   "fail_test": {
     "ok": true,
     "code": 503,
-    "body": "{\"ok\":false,\"code\":\"brain_unavailable\",\"op\":\"recall_plan\",\"session_key\":\"fail_closed_test\",\"provider\":\"ollama\",\"model\":\"gpt-oss:20b\",\"trace_id\":\"f1c6ad3c-3860-430a-94e1-7f27d1522fa7\",\"err_type\":\"BrainUnavailable\",\"err_msg\":\"brain_http_error:ConnectError\"}",
+    "body": "{\"ok\":false,\"code\":\"brain_unavailable\",\"op\":\"recall_plan\",\"session_key\":\"fail_closed_test\",\"provider\":\"ollama\",\"model\":\"gpt-oss:20b\",\"trace_id\":\"\",\"err_type\":\"BrainUnavailable\",\"err_msg\":\"brain_ps_error:ConnectError\"}",
     "error": "",
     "resp": {
       "ok": false,
@@ -133,9 +111,9 @@
       "session_key": "fail_closed_test",
       "provider": "ollama",
       "model": "gpt-oss:20b",
-      "trace_id": "f1c6ad3c-3860-430a-94e1-7f27d1522fa7",
+      "trace_id": "",
       "err_type": "BrainUnavailable",
-      "err_msg": "brain_http_error:ConnectError"
+      "err_msg": "brain_ps_error:ConnectError"
     }
   }
 }

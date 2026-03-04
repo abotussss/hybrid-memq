@@ -121,6 +121,15 @@ cfg = {
   "memq.sidecarUrl": "http://127.0.0.1:7781",
   "memq.workspaceRoot": "__ROOT__",
   "memq.brain.mode": "best_effort",
+  "memq.brain.provider": "ollama",
+  "memq.brain.baseUrl": "http://127.0.0.1:11434",
+  "memq.brain.model": "gpt-oss:20b",
+  "memq.brain.keepAlive": "30m",
+  "memq.brain.timeoutMs": 60000,
+  "memq.brain.maxTokens": 256,
+  "memq.brain.autoRestart": True,
+  "memq.brain.restartCooldownSec": 30,
+  "memq.brain.restartWaitMs": 2000,
   "memq.budgets.memctxTokens": 120,
   "memq.budgets.rulesTokens": 80,
   "memq.budgets.styleTokens": 120,
@@ -233,8 +242,11 @@ cmd_start_sidecar() {
     MEMQ_BRAIN_BASE_URL="${MEMQ_BRAIN_BASE_URL:-http://127.0.0.1:11434}" \
     MEMQ_BRAIN_MODEL="${MEMQ_BRAIN_MODEL:-gpt-oss:20b}" \
     MEMQ_BRAIN_KEEP_ALIVE="${MEMQ_BRAIN_KEEP_ALIVE:-30m}" \
-    MEMQ_BRAIN_TIMEOUT_MS="${MEMQ_BRAIN_TIMEOUT_MS:-240000}" \
-    MEMQ_BRAIN_MAX_TOKENS="${MEMQ_BRAIN_MAX_TOKENS:-1024}" \
+    MEMQ_BRAIN_TIMEOUT_MS="${MEMQ_BRAIN_TIMEOUT_MS:-60000}" \
+    MEMQ_BRAIN_MAX_TOKENS="${MEMQ_BRAIN_MAX_TOKENS:-256}" \
+    MEMQ_BRAIN_AUTO_RESTART="${MEMQ_BRAIN_AUTO_RESTART:-1}" \
+    MEMQ_BRAIN_RESTART_COOLDOWN_SEC="${MEMQ_BRAIN_RESTART_COOLDOWN_SEC:-30}" \
+    MEMQ_BRAIN_RESTART_WAIT_MS="${MEMQ_BRAIN_RESTART_WAIT_MS:-2000}" \
     MEMQ_LLM_AUDIT_ENABLED="${MEMQ_LLM_AUDIT_ENABLED:-0}" \
     MEMQ_LLM_AUDIT_URL="${MEMQ_LLM_AUDIT_URL:-https://api.openai.com/v1/chat/completions}" \
     MEMQ_LLM_AUDIT_MODEL="${MEMQ_LLM_AUDIT_MODEL:-gpt-5.2}" \
@@ -315,8 +327,11 @@ cmd_audit_on() {
     echo "MEMQ_BRAIN_BASE_URL=${MEMQ_BRAIN_BASE_URL:-http://127.0.0.1:11434}"
     echo "MEMQ_BRAIN_MODEL=${MEMQ_BRAIN_MODEL:-gpt-oss:20b}"
     echo "MEMQ_BRAIN_KEEP_ALIVE=${MEMQ_BRAIN_KEEP_ALIVE:-30m}"
-    echo "MEMQ_BRAIN_TIMEOUT_MS=${MEMQ_BRAIN_TIMEOUT_MS:-240000}"
-    echo "MEMQ_BRAIN_MAX_TOKENS=${MEMQ_BRAIN_MAX_TOKENS:-1024}"
+    echo "MEMQ_BRAIN_TIMEOUT_MS=${MEMQ_BRAIN_TIMEOUT_MS:-60000}"
+    echo "MEMQ_BRAIN_MAX_TOKENS=${MEMQ_BRAIN_MAX_TOKENS:-256}"
+    echo "MEMQ_BRAIN_AUTO_RESTART=${MEMQ_BRAIN_AUTO_RESTART:-1}"
+    echo "MEMQ_BRAIN_RESTART_COOLDOWN_SEC=${MEMQ_BRAIN_RESTART_COOLDOWN_SEC:-30}"
+    echo "MEMQ_BRAIN_RESTART_WAIT_MS=${MEMQ_BRAIN_RESTART_WAIT_MS:-2000}"
     echo "MEMQ_LLM_AUDIT_ENABLED=1"
     echo "MEMQ_LLM_AUDIT_URL=$url"
     echo "MEMQ_LLM_AUDIT_MODEL=$model"
@@ -339,8 +354,11 @@ cmd_audit_off() {
     echo "MEMQ_BRAIN_BASE_URL=${MEMQ_BRAIN_BASE_URL:-http://127.0.0.1:11434}"
     echo "MEMQ_BRAIN_MODEL=${MEMQ_BRAIN_MODEL:-gpt-oss:20b}"
     echo "MEMQ_BRAIN_KEEP_ALIVE=${MEMQ_BRAIN_KEEP_ALIVE:-30m}"
-    echo "MEMQ_BRAIN_TIMEOUT_MS=${MEMQ_BRAIN_TIMEOUT_MS:-240000}"
-    echo "MEMQ_BRAIN_MAX_TOKENS=${MEMQ_BRAIN_MAX_TOKENS:-1024}"
+    echo "MEMQ_BRAIN_TIMEOUT_MS=${MEMQ_BRAIN_TIMEOUT_MS:-60000}"
+    echo "MEMQ_BRAIN_MAX_TOKENS=${MEMQ_BRAIN_MAX_TOKENS:-256}"
+    echo "MEMQ_BRAIN_AUTO_RESTART=${MEMQ_BRAIN_AUTO_RESTART:-1}"
+    echo "MEMQ_BRAIN_RESTART_COOLDOWN_SEC=${MEMQ_BRAIN_RESTART_COOLDOWN_SEC:-30}"
+    echo "MEMQ_BRAIN_RESTART_WAIT_MS=${MEMQ_BRAIN_RESTART_WAIT_MS:-2000}"
     echo "MEMQ_LLM_AUDIT_ENABLED=0"
     echo "MEMQ_LLM_AUDIT_URL=https://api.openai.com/v1/chat/completions"
     echo "MEMQ_LLM_AUDIT_MODEL=gpt-5.2"
@@ -405,8 +423,11 @@ cmd_brain_required_on() {
     echo "MEMQ_BRAIN_BASE_URL=${MEMQ_BRAIN_BASE_URL:-http://127.0.0.1:11434}"
     echo "MEMQ_BRAIN_MODEL=${MEMQ_BRAIN_MODEL:-gpt-oss:20b}"
     echo "MEMQ_BRAIN_KEEP_ALIVE=${MEMQ_BRAIN_KEEP_ALIVE:-30m}"
-    echo "MEMQ_BRAIN_TIMEOUT_MS=${MEMQ_BRAIN_TIMEOUT_MS:-240000}"
-    echo "MEMQ_BRAIN_MAX_TOKENS=${MEMQ_BRAIN_MAX_TOKENS:-1024}"
+    echo "MEMQ_BRAIN_TIMEOUT_MS=${MEMQ_BRAIN_TIMEOUT_MS:-60000}"
+    echo "MEMQ_BRAIN_MAX_TOKENS=${MEMQ_BRAIN_MAX_TOKENS:-256}"
+    echo "MEMQ_BRAIN_AUTO_RESTART=${MEMQ_BRAIN_AUTO_RESTART:-1}"
+    echo "MEMQ_BRAIN_RESTART_COOLDOWN_SEC=${MEMQ_BRAIN_RESTART_COOLDOWN_SEC:-30}"
+    echo "MEMQ_BRAIN_RESTART_WAIT_MS=${MEMQ_BRAIN_RESTART_WAIT_MS:-2000}"
     echo "MEMQ_LLM_AUDIT_ENABLED=${MEMQ_LLM_AUDIT_ENABLED:-0}"
     echo "MEMQ_LLM_AUDIT_URL=${MEMQ_LLM_AUDIT_URL:-https://api.openai.com/v1/chat/completions}"
     echo "MEMQ_LLM_AUDIT_MODEL=${MEMQ_LLM_AUDIT_MODEL:-gpt-5.2}"
@@ -429,8 +450,11 @@ cmd_brain_required_off() {
     echo "MEMQ_BRAIN_BASE_URL=${MEMQ_BRAIN_BASE_URL:-http://127.0.0.1:11434}"
     echo "MEMQ_BRAIN_MODEL=${MEMQ_BRAIN_MODEL:-gpt-oss:20b}"
     echo "MEMQ_BRAIN_KEEP_ALIVE=${MEMQ_BRAIN_KEEP_ALIVE:-30m}"
-    echo "MEMQ_BRAIN_TIMEOUT_MS=${MEMQ_BRAIN_TIMEOUT_MS:-240000}"
-    echo "MEMQ_BRAIN_MAX_TOKENS=${MEMQ_BRAIN_MAX_TOKENS:-1024}"
+    echo "MEMQ_BRAIN_TIMEOUT_MS=${MEMQ_BRAIN_TIMEOUT_MS:-60000}"
+    echo "MEMQ_BRAIN_MAX_TOKENS=${MEMQ_BRAIN_MAX_TOKENS:-256}"
+    echo "MEMQ_BRAIN_AUTO_RESTART=${MEMQ_BRAIN_AUTO_RESTART:-1}"
+    echo "MEMQ_BRAIN_RESTART_COOLDOWN_SEC=${MEMQ_BRAIN_RESTART_COOLDOWN_SEC:-30}"
+    echo "MEMQ_BRAIN_RESTART_WAIT_MS=${MEMQ_BRAIN_RESTART_WAIT_MS:-2000}"
     echo "MEMQ_LLM_AUDIT_ENABLED=${MEMQ_LLM_AUDIT_ENABLED:-0}"
     echo "MEMQ_LLM_AUDIT_URL=${MEMQ_LLM_AUDIT_URL:-https://api.openai.com/v1/chat/completions}"
     echo "MEMQ_LLM_AUDIT_MODEL=${MEMQ_LLM_AUDIT_MODEL:-gpt-5.2}"
@@ -442,6 +466,9 @@ cmd_brain_required_off() {
 }
 
 cmd_brain_proof() {
+  echo "brain ensure:"
+  curl -sS -X POST "http://127.0.0.1:7781/brain/ensure?sessionKey=brain-proof" || true
+  echo
   echo "brain stats:"
   curl -sS http://127.0.0.1:7781/brain/stats || true
   echo

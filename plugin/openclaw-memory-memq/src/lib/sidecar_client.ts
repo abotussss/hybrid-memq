@@ -25,7 +25,7 @@ export class SidecarClient {
     if (this.runtimeBrainTimeoutMs && Number.isFinite(this.runtimeBrainTimeoutMs)) {
       return Math.max(5000, Math.floor(this.runtimeBrainTimeoutMs));
     }
-    return this.parseTimeout(process.env.MEMQ_BRAIN_TIMEOUT_MS, 120000);
+    return this.parseTimeout(process.env.MEMQ_BRAIN_TIMEOUT_MS, 60000);
   }
 
   private async req<T>(path: string, body?: unknown, method = "POST", timeoutMs = 6000): Promise<T> {
@@ -73,11 +73,14 @@ export class SidecarClient {
       brainKeepAlive?: string;
       brainTimeoutMs?: string | number;
       brainMaxTokens?: string | number;
+      brainAutoRestart?: string | number | boolean;
+      brainRestartCooldownSec?: string | number;
+      brainRestartWaitMs?: string | number;
     }
   ): Promise<boolean> {
     const configuredTimeout = this.parseTimeout(
       opts?.brainTimeoutMs !== undefined ? String(opts.brainTimeoutMs) : process.env.MEMQ_BRAIN_TIMEOUT_MS,
-      120000
+      60000
     );
     this.runtimeBrainTimeoutMs = configuredTimeout;
     if (await this.health()) return true;
@@ -99,8 +102,17 @@ export class SidecarClient {
         MEMQ_BRAIN_BASE_URL: opts?.brainBaseUrl || process.env.MEMQ_BRAIN_BASE_URL || "http://127.0.0.1:11434",
         MEMQ_BRAIN_MODEL: opts?.brainModel || process.env.MEMQ_BRAIN_MODEL || "gpt-oss:20b",
         MEMQ_BRAIN_KEEP_ALIVE: opts?.brainKeepAlive || process.env.MEMQ_BRAIN_KEEP_ALIVE || "30m",
-        MEMQ_BRAIN_TIMEOUT_MS: String(opts?.brainTimeoutMs || process.env.MEMQ_BRAIN_TIMEOUT_MS || "240000"),
-        MEMQ_BRAIN_MAX_TOKENS: String(opts?.brainMaxTokens || process.env.MEMQ_BRAIN_MAX_TOKENS || "1024"),
+        MEMQ_BRAIN_TIMEOUT_MS: String(opts?.brainTimeoutMs || process.env.MEMQ_BRAIN_TIMEOUT_MS || "60000"),
+        MEMQ_BRAIN_MAX_TOKENS: String(opts?.brainMaxTokens || process.env.MEMQ_BRAIN_MAX_TOKENS || "256"),
+        MEMQ_BRAIN_AUTO_RESTART: String(
+          opts?.brainAutoRestart ?? process.env.MEMQ_BRAIN_AUTO_RESTART ?? "1"
+        ),
+        MEMQ_BRAIN_RESTART_COOLDOWN_SEC: String(
+          opts?.brainRestartCooldownSec ?? process.env.MEMQ_BRAIN_RESTART_COOLDOWN_SEC ?? "30"
+        ),
+        MEMQ_BRAIN_RESTART_WAIT_MS: String(
+          opts?.brainRestartWaitMs ?? process.env.MEMQ_BRAIN_RESTART_WAIT_MS ?? "2000"
+        ),
       };
       const child = spawn(py, [app], {
         cwd: root,

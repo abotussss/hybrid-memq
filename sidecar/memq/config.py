@@ -61,6 +61,14 @@ class MemqConfig:
     brain_max_tokens: int
     brain_concurrent: int
     brain_mode: str
+    brain_auto_restart: bool
+    brain_restart_cooldown_sec: int
+    brain_restart_wait_ms: int
+    brain_ingest_user_chars: int
+    brain_ingest_assistant_chars: int
+    brain_recall_recent_messages: int
+    brain_recall_message_chars: int
+    brain_merge_candidate_limit: int
 
 
 def load_config() -> MemqConfig:
@@ -99,12 +107,20 @@ def load_config() -> MemqConfig:
         brain_provider=os.getenv("MEMQ_BRAIN_PROVIDER", "ollama"),
         brain_base_url=os.getenv("MEMQ_BRAIN_BASE_URL", "http://127.0.0.1:11434"),
         brain_model=os.getenv("MEMQ_BRAIN_MODEL", "gpt-oss:20b"),
-        # gpt-oss:20b on local CPUs/consumer GPUs can exceed 120s on structured JSON plans.
-        brain_timeout_ms=max(500, _env_int("MEMQ_BRAIN_TIMEOUT_MS", 240000)),
+        # Keep required-mode latency in practical range while still allowing large local models.
+        brain_timeout_ms=max(500, _env_int("MEMQ_BRAIN_TIMEOUT_MS", 60000)),
         brain_keep_alive=os.getenv("MEMQ_BRAIN_KEEP_ALIVE", "30m"),
         brain_temperature=max(0.0, min(1.0, _env_float("MEMQ_BRAIN_TEMPERATURE", 0.0))),
-        # Keep JSON plan generation bounded while avoiding frequent truncation on 20B models.
-        brain_max_tokens=max(64, _env_int("MEMQ_BRAIN_MAX_TOKENS", 1024)),
+        # Plan JSON is compact; keep generation bounded to reduce end-to-end latency.
+        brain_max_tokens=max(64, _env_int("MEMQ_BRAIN_MAX_TOKENS", 256)),
         brain_concurrent=max(1, _env_int("MEMQ_BRAIN_CONCURRENT", 1)),
         brain_mode=brain_mode,
+        brain_auto_restart=_env_bool("MEMQ_BRAIN_AUTO_RESTART", True),
+        brain_restart_cooldown_sec=max(5, _env_int("MEMQ_BRAIN_RESTART_COOLDOWN_SEC", 30)),
+        brain_restart_wait_ms=max(250, _env_int("MEMQ_BRAIN_RESTART_WAIT_MS", 2000)),
+        brain_ingest_user_chars=max(120, _env_int("MEMQ_BRAIN_INGEST_USER_CHARS", 320)),
+        brain_ingest_assistant_chars=max(120, _env_int("MEMQ_BRAIN_INGEST_ASSISTANT_CHARS", 320)),
+        brain_recall_recent_messages=max(1, _env_int("MEMQ_BRAIN_RECALL_RECENT_MESSAGES", 4)),
+        brain_recall_message_chars=max(80, _env_int("MEMQ_BRAIN_RECALL_MESSAGE_CHARS", 220)),
+        brain_merge_candidate_limit=max(20, _env_int("MEMQ_BRAIN_MERGE_CANDIDATE_LIMIT", 80)),
     )

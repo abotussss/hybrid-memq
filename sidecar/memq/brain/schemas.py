@@ -84,11 +84,11 @@ class QuarantinePlan(BaseModel):
 
 class BrainIngestPlan(BaseModel):
     version: str = "memq_brain_v1"
-    facts: List[FactCandidate] = Field(default_factory=list)
-    events: List[EventCandidate] = Field(default_factory=list)
+    facts: List[FactCandidate] = Field(default_factory=list, max_length=8)
+    events: List[EventCandidate] = Field(default_factory=list, max_length=8)
     style_update: Optional[StyleUpdatePlan] = None
     rules_update: Optional[RulesUpdatePlan] = None
-    quarantine: List[QuarantinePlan] = Field(default_factory=list)
+    quarantine: List[QuarantinePlan] = Field(default_factory=list, max_length=8)
 
 
 class IntentWeights(BaseModel):
@@ -138,9 +138,9 @@ class BrainRecallPlan(BaseModel):
     version: str = "memq_brain_v1"
     intent: IntentWeights = Field(default_factory=IntentWeights)
     time_range: Optional[TimeRangePlan] = None
-    entity_hints: List[str] = Field(default_factory=list)
-    fact_keys: List[str] = Field(default_factory=list)
-    fts_queries: List[str] = Field(default_factory=list)
+    entity_hints: List[str] = Field(default_factory=list, max_length=12)
+    fact_keys: List[str] = Field(default_factory=list, max_length=16)
+    fts_queries: List[str] = Field(default_factory=list, max_length=6)
     budget_split: BudgetSplitPlan = Field(default_factory=BudgetSplitPlan)
     retrieval: RetrievalPlan = Field(default_factory=RetrievalPlan)
 
@@ -161,8 +161,8 @@ class BrainPruneItem(BaseModel):
 
 class BrainMergePlan(BaseModel):
     version: str = "memq_brain_v1"
-    merges: List[BrainMergeItem] = Field(default_factory=list)
-    prunes: List[BrainPruneItem] = Field(default_factory=list)
+    merges: List[BrainMergeItem] = Field(default_factory=list, max_length=20)
+    prunes: List[BrainPruneItem] = Field(default_factory=list, max_length=40)
 
 
 class BrainSpanPatch(BaseModel):

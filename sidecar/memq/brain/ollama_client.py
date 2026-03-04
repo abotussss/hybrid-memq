@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -29,6 +30,10 @@ class OllamaConfig:
     temperature: float
     max_tokens: int
     concurrent: int
+    required_mode: bool
+    auto_restart: bool
+    restart_cooldown_sec: int
+    restart_wait_ms: int
 
 
 def _read_prompt(name: str) -> str:
@@ -50,6 +55,37 @@ def _extract_json(text: str) -> str:
     if b >= 0 and e > b:
         return s[b : e + 1]
     return "{}"
+
+
+def _extract_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for k in ("content", "text", "thinking", "response", "message"):
+            v = value.get(k)
+            if isinstance(v, (str, dict, list)):
+                t = _extract_text(v)
+                if t:
+                    parts.append(t)
+        if parts:
+            return "\n".join(parts)
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return ""
+    if isinstance(value, (list, tuple)):
+        out: list[str] = []
+        for it in value:
+            t2 = _extract_text(it)
+            if t2:
+                out.append(t2)
+        return "\n".join(out)
+    return ""
 
 
 def _to_dict(v: Any) -> Dict[str, Any]:
@@ -169,42 +205,117 @@ class OllamaBrainClient:
         self.cfg = cfg
         self._sem = threading.Semaphore(max(1, int(cfg.concurrent)))
         self._cooldown_until = 0.0
+        self._last_restart_attempt = 0.0
+        self._restart_lock = threading.Lock()
         self._last_chat_stats: Dict[str, Any] = {}
         self._ingest_system = _read_prompt("ingest_system.txt")
         self._recall_system = _read_prompt("recall_system.txt")
         self._merge_system = _read_prompt("merge_system.txt")
         self._audit_patch_system = _read_prompt("audit_patch_system.txt")
 
+    def _post_once(self, *, url: str, payload: Dict[str, Any], timeout: float) -> Dict[str, Any]:
+        t = httpx.Timeout(timeout=timeout, connect=min(3.0, timeout), read=timeout, write=timeout, pool=min(3.0, timeout))
+        with httpx.Client(timeout=t) as client:
+            resp = client.post(url, json=payload)
+            resp.raise_for_status()
+            obj = resp.json()
+            if not isinstance(obj, dict):
+                raise BrainUnavailable("brain_non_object_response")
+            self._last_chat_stats = {
+                "prompt_eval_count": obj.get("prompt_eval_count"),
+                "eval_count": obj.get("eval_count"),
+                "total_duration": obj.get("total_duration"),
+                "load_duration": obj.get("load_duration"),
+                "eval_duration": obj.get("eval_duration"),
+            }
+            return obj
+
+    def _probe_ollama_unlocked(self) -> bool:
+        url = f"{self.cfg.base_url.rstrip('/')}/api/ps"
+        timeout = min(5.0, max(0.5, float(self.cfg.timeout_ms) / 1000.0))
+        try:
+            t = httpx.Timeout(timeout=timeout, connect=min(2.0, timeout), read=timeout, write=timeout, pool=min(2.0, timeout))
+            with httpx.Client(timeout=t) as client:
+                resp = client.get(url)
+                resp.raise_for_status()
+                obj = resp.json()
+                return isinstance(obj, dict)
+        except Exception:
+            return False
+
+    def _warm_model(self) -> bool:
+        url = f"{self.cfg.base_url.rstrip('/')}/api/chat"
+        timeout = min(12.0, max(2.0, float(self.cfg.timeout_ms) / 1000.0))
+        payload = self._build_chat_payload(
+            user_payload={"ping": "memq"},
+            system_prompt="Return {\"ok\":true} as JSON only.",
+            schema=None,
+            num_predict=64,
+        )
+        try:
+            _ = self._post_once(url=url, payload=payload, timeout=timeout)
+            return True
+        except Exception:
+            return False
+
+    def _try_restart_ollama(self) -> bool:
+        if not bool(self.cfg.auto_restart):
+            return False
+        now = time.time()
+        if now - float(self._last_restart_attempt) < float(max(5, int(self.cfg.restart_cooldown_sec))):
+            return False
+        with self._restart_lock:
+            now = time.time()
+            if now - float(self._last_restart_attempt) < float(max(5, int(self.cfg.restart_cooldown_sec))):
+                return False
+            self._last_restart_attempt = now
+            if self._probe_ollama_unlocked():
+                return True
+            try:
+                subprocess.Popen(
+                    ["ollama", "serve"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except Exception:
+                return False
+            time.sleep(max(0.25, float(self.cfg.restart_wait_ms) / 1000.0))
+            return self._probe_ollama_unlocked()
+
     def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         now = time.time()
-        if now < self._cooldown_until:
+        if (not self.cfg.required_mode) and now < self._cooldown_until:
             raise BrainUnavailable("brain_cooldown")
         url = f"{self.cfg.base_url.rstrip('/')}{path}"
         timeout = max(0.5, float(self.cfg.timeout_ms) / 1000.0)
         with self._sem:
             try:
-                with httpx.Client(timeout=timeout) as client:
-                    resp = client.post(url, json=payload)
-                    resp.raise_for_status()
-                    obj = resp.json()
-                    if not isinstance(obj, dict):
-                        raise BrainUnavailable("brain_non_object_response")
-                    self._last_chat_stats = {
-                        "prompt_eval_count": obj.get("prompt_eval_count"),
-                        "eval_count": obj.get("eval_count"),
-                        "total_duration": obj.get("total_duration"),
-                        "load_duration": obj.get("load_duration"),
-                        "eval_duration": obj.get("eval_duration"),
-                    }
-                    return obj
+                return self._post_once(url=url, payload=payload, timeout=timeout)
             except BrainUnavailable:
-                self._cooldown_until = time.time() + 8.0
+                if not self.cfg.required_mode:
+                    self._cooldown_until = time.time() + 8.0
                 raise
-            except (httpx.HTTPError, TimeoutError, json.JSONDecodeError, OSError) as e:
-                self._cooldown_until = time.time() + 8.0
+            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, OSError, TimeoutError) as e:
+                recovered = self._try_restart_ollama()
+                if recovered:
+                    try:
+                        return self._post_once(url=url, payload=payload, timeout=timeout)
+                    except Exception as e2:
+                        if not self.cfg.required_mode:
+                            self._cooldown_until = time.time() + 8.0
+                        raise BrainUnavailable(f"brain_http_error:{type(e2).__name__}") from e2
+                if not self.cfg.required_mode:
+                    self._cooldown_until = time.time() + 8.0
+                raise BrainUnavailable(f"brain_http_error:{type(e).__name__}") from e
+            except (httpx.HTTPError, json.JSONDecodeError) as e:
+                if not self.cfg.required_mode:
+                    self._cooldown_until = time.time() + 8.0
                 raise BrainUnavailable(f"brain_http_error:{type(e).__name__}") from e
             except Exception as e:
-                self._cooldown_until = time.time() + 8.0
+                if not self.cfg.required_mode:
+                    self._cooldown_until = time.time() + 8.0
                 raise BrainUnavailable(str(e)) from e
 
     @property
@@ -213,10 +324,11 @@ class OllamaBrainClient:
 
     def get_ps_snapshot(self) -> Dict[str, Any]:
         url = f"{self.cfg.base_url.rstrip('/')}/api/ps"
-        timeout = max(0.5, float(self.cfg.timeout_ms) / 1000.0)
+        timeout = min(5.0, max(0.5, float(self.cfg.timeout_ms) / 1000.0))
         with self._sem:
             try:
-                with httpx.Client(timeout=timeout) as client:
+                t = httpx.Timeout(timeout=timeout, connect=min(2.0, timeout), read=timeout, write=timeout, pool=min(2.0, timeout))
+                with httpx.Client(timeout=t) as client:
                     resp = client.get(url)
                     resp.raise_for_status()
                     obj = resp.json()
@@ -248,9 +360,31 @@ class OllamaBrainClient:
             except Exception as e:
                 raise BrainUnavailable(f"brain_ps_error:{type(e).__name__}") from e
 
+    def ensure_runtime(self) -> Dict[str, Any]:
+        ps = self.get_ps_snapshot()
+        if bool(ps.get("seen")):
+            return ps
+        warmed = self._warm_model()
+        if warmed:
+            ps2 = self.get_ps_snapshot()
+            if bool(ps2.get("seen")):
+                return ps2
+        restarted = self._try_restart_ollama()
+        if restarted:
+            self._warm_model()
+            return self.get_ps_snapshot()
+        return ps
+
     def _build_chat_payload(
-        self, *, user_payload: Dict[str, Any], system_prompt: str, schema: Optional[Dict[str, Any]]
+        self,
+        *,
+        user_payload: Dict[str, Any],
+        system_prompt: str,
+        schema: Optional[Dict[str, Any]],
+        num_predict: Optional[int] = None,
     ) -> Dict[str, Any]:
+        np = int(num_predict if num_predict is not None else self.cfg.max_tokens)
+        np = max(64, min(2048, np))
         msg: Dict[str, Any] = {
             "model": self.cfg.model,
             "stream": False,
@@ -258,7 +392,7 @@ class OllamaBrainClient:
             "think": False,
             "options": {
                 "temperature": float(self.cfg.temperature),
-                "num_predict": int(self.cfg.max_tokens),
+                "num_predict": np,
                 # Reduce "thinking-only" responses on local reasoning models.
                 "reasoning": "none",
             },
@@ -272,43 +406,43 @@ class OllamaBrainClient:
         return msg
 
     def _parse_chat_json(self, res: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        content = ""
+        candidates: list[str] = []
         message = res.get("message")
         if isinstance(message, dict):
-            raw_content = message.get("content")
-            if isinstance(raw_content, dict):
-                return raw_content
-            if isinstance(raw_content, list):
-                parts: list[str] = []
-                for item in raw_content:
-                    if isinstance(item, dict):
-                        if isinstance(item.get("text"), str):
-                            parts.append(str(item.get("text") or ""))
-                        elif isinstance(item.get("content"), str):
-                            parts.append(str(item.get("content") or ""))
-                    elif isinstance(item, str):
-                        parts.append(item)
-                content = "\n".join(parts).strip()
-            elif isinstance(raw_content, str):
-                content = str(raw_content or "")
-            else:
-                content = ""
-            if not content and isinstance(message.get("thinking"), str):
-                content = str(message.get("thinking") or "")
-        if not content and isinstance(res.get("response"), str):
-            content = str(res.get("response") or "")
-        if not content:
-            return None
-        try:
-            parsed = json.loads(_extract_json(content))
-            if isinstance(parsed, dict):
-                return parsed
-            return None
-        except Exception:
-            return None
+            for key in ("content", "text", "thinking"):
+                c = _extract_text(message.get(key)).strip()
+                if c:
+                    candidates.append(c)
+        for key in ("response", "content", "text", "thinking"):
+            c2 = _extract_text(res.get(key)).strip()
+            if c2:
+                candidates.append(c2)
+        full = _extract_text(res).strip()
+        if full:
+            candidates.append(full)
 
-    def _chat_json(self, *, user_payload: Dict[str, Any], schema: Dict[str, Any], system_prompt: str) -> Dict[str, Any]:
-        msg = self._build_chat_payload(user_payload=user_payload, system_prompt=system_prompt, schema=schema)
+        seen: set[str] = set()
+        for c3 in candidates:
+            if not c3 or c3 in seen:
+                continue
+            seen.add(c3)
+            try:
+                parsed = json.loads(_extract_json(c3))
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                continue
+        return None
+
+    def _chat_json(
+        self,
+        *,
+        user_payload: Dict[str, Any],
+        schema: Dict[str, Any],
+        system_prompt: str,
+        num_predict: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        msg = self._build_chat_payload(user_payload=user_payload, system_prompt=system_prompt, schema=schema, num_predict=num_predict)
         res = self._post("/api/chat", msg)
         parsed = self._parse_chat_json(res)
         if parsed is not None:
@@ -320,24 +454,18 @@ class OllamaBrainClient:
             "Return one minified JSON object only. "
             "No prose. No markdown. No explanations."
         )
-        msg2 = self._build_chat_payload(user_payload=user_payload, system_prompt=relaxed_system, schema=None)
+        relaxed_np = int(num_predict if num_predict is not None else self.cfg.max_tokens)
+        relaxed_np = max(64, min(relaxed_np, 160))
+        msg2 = self._build_chat_payload(
+            user_payload=user_payload,
+            system_prompt=relaxed_system,
+            schema=None,
+            num_predict=relaxed_np,
+        )
         res2 = self._post("/api/chat", msg2)
         parsed2 = self._parse_chat_json(res2)
         if parsed2 is not None:
             return parsed2
-
-        # Final retry with a larger generation cap to reduce truncation-driven empty JSON.
-        msg3 = self._build_chat_payload(user_payload=user_payload, system_prompt=relaxed_system, schema=None)
-        try:
-            opts = msg3.get("options") if isinstance(msg3.get("options"), dict) else {}
-            opts["num_predict"] = int(max(1024, min(4096, int(self.cfg.max_tokens) * 2)))
-            msg3["options"] = opts
-        except Exception:
-            pass
-        res3 = self._post("/api/chat", msg3)
-        parsed3 = self._parse_chat_json(res3)
-        if parsed3 is not None:
-            return parsed3
         raise BrainUnavailable("brain_empty_content")
 
     def _repair_payload(self, *, model_cls: Type[T], data: Dict[str, Any], user_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -523,9 +651,16 @@ class OllamaBrainClient:
             }
         return None
 
-    def _call_schema(self, *, model_cls: Type[T], user_payload: Dict[str, Any], system_prompt: str) -> T:
+    def _call_schema(
+        self,
+        *,
+        model_cls: Type[T],
+        user_payload: Dict[str, Any],
+        system_prompt: str,
+        num_predict: Optional[int] = None,
+    ) -> T:
         schema = model_cls.model_json_schema()
-        data = self._chat_json(user_payload=user_payload, schema=schema, system_prompt=system_prompt)
+        data = self._chat_json(user_payload=user_payload, schema=schema, system_prompt=system_prompt, num_predict=num_predict)
         try:
             return model_cls.model_validate(data)
         except ValidationError as e:
@@ -538,6 +673,7 @@ class OllamaBrainClient:
             raise BrainUnavailable(f"brain_schema_validation:{e}") from e
 
     def build_ingest_plan(self, *, session_key: str, user_text: str, assistant_text: str, ts: int, metadata: Optional[Dict[str, Any]]) -> BrainIngestPlan:
+        ingest_np = max(96, min(int(self.cfg.max_tokens), 192))
         payload = {
             "session_key": session_key,
             "ts": int(ts),
@@ -551,7 +687,12 @@ class OllamaBrainClient:
                 "fact_key_prefix_allow": ["profile.", "pref.", "policy.", "project.", "relationship.", "timeline.", "rule.", "memory."],
             },
         }
-        return self._call_schema(model_cls=BrainIngestPlan, user_payload=payload, system_prompt=self._ingest_system)
+        return self._call_schema(
+            model_cls=BrainIngestPlan,
+            user_payload=payload,
+            system_prompt=self._ingest_system,
+            num_predict=ingest_np,
+        )
 
     def build_recall_plan(
         self,
@@ -564,10 +705,17 @@ class OllamaBrainClient:
         surface_threshold: float,
         deep_enabled: bool,
     ) -> BrainRecallPlan:
+        recall_np = max(96, min(int(self.cfg.max_tokens), 160))
+        compact_recent: list[dict[str, Any]] = []
+        for m in (recent_messages or [])[:6]:
+            role = str((m or {}).get("role") or "")
+            text = " ".join(str((m or {}).get("text") or "").split()).strip()[:220]
+            ts = (m or {}).get("ts")
+            compact_recent.append({"role": role, "text": text, "ts": ts})
         payload = {
             "session_key": session_key,
             "prompt": prompt or "",
-            "recent_messages": recent_messages[:8],
+            "recent_messages": compact_recent,
             "budgets": budgets,
             "retrieval_defaults": {
                 "top_k": int(top_k),
@@ -580,7 +728,12 @@ class OllamaBrainClient:
                 "must_emit_nonempty_queries": True,
             },
         }
-        return self._call_schema(model_cls=BrainRecallPlan, user_payload=payload, system_prompt=self._recall_system)
+        return self._call_schema(
+            model_cls=BrainRecallPlan,
+            user_payload=payload,
+            system_prompt=self._recall_system,
+            num_predict=recall_np,
+        )
 
     def build_merge_plan(
         self,
@@ -589,6 +742,7 @@ class OllamaBrainClient:
         memory_candidates: list[dict[str, Any]],
         stats: Optional[dict[str, Any]] = None,
     ) -> BrainMergePlan:
+        merge_np = max(96, min(int(self.cfg.max_tokens), 144))
         payload = {
             "session_key": session_key,
             "memory_candidates": memory_candidates[:120],
@@ -599,7 +753,12 @@ class OllamaBrainClient:
                 "merge_only_from_input_ids": True,
             },
         }
-        return self._call_schema(model_cls=BrainMergePlan, user_payload=payload, system_prompt=self._merge_system)
+        return self._call_schema(
+            model_cls=BrainMergePlan,
+            user_payload=payload,
+            system_prompt=self._merge_system,
+            num_predict=merge_np,
+        )
 
     def build_audit_patch_plan(
         self,
@@ -608,6 +767,7 @@ class OllamaBrainClient:
         allowed_languages: list[str],
         reasons: Optional[list[str]] = None,
     ) -> BrainAuditPatchPlan:
+        audit_np = max(64, min(int(self.cfg.max_tokens), 128))
         payload = {
             "text": text,
             "allowed_languages": allowed_languages,
@@ -622,4 +782,5 @@ class OllamaBrainClient:
             model_cls=BrainAuditPatchPlan,
             user_payload=payload,
             system_prompt=self._audit_patch_system,
+            num_predict=audit_np,
         )
