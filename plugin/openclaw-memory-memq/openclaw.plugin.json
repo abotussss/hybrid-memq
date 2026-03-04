@@ -10,6 +10,7 @@
     "properties": {
       "memq.sidecarUrl": { "type": "string", "default": "http://127.0.0.1:7781" },
       "memq.workspaceRoot": { "type": "string", "default": "" },
+      "memq.brain.mode": { "type": "string", "default": "best_effort" },
 
       "memq.budgets.memctxTokens": { "type": "number", "default": 120 },
       "memq.budgets.rulesTokens": { "type": "number", "default": 80 },

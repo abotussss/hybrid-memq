@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import time
+import uuid
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional
 
 from ..config import MemqConfig
 from ..db import MemqDB
@@ -31,8 +35,14 @@ class BrainResult:
 class BrainService:
     def __init__(self, cfg: MemqConfig) -> None:
         self.enabled = bool(cfg.brain_enabled and cfg.brain_provider.lower() == "ollama")
+        self.required = str(cfg.brain_mode or "best_effort").lower() == "required"
+        self.mode = str(cfg.brain_mode or "best_effort").lower()
+        if self.mode == "off":
+            self.enabled = False
+        self.provider = str(cfg.brain_provider or "disabled")
+        self.model = str(cfg.brain_model or "")
         self.client: Optional[OllamaBrainClient] = None
-        self._retry_after_sec = max(5, min(300, int(cfg.brain_timeout_ms / 1000) * 6))
+        self._retry_after_sec = max(5, min(20, int(max(1000, cfg.brain_timeout_ms) / 1000)))
         if self.enabled:
             self.client = OllamaBrainClient(
                 OllamaConfig(
@@ -45,29 +55,288 @@ class BrainService:
                     concurrent=cfg.brain_concurrent,
                 )
             )
+        self.trace_path = (cfg.db_path.parent / "brain_trace.jsonl").resolve()
+        self.trace_path.parent.mkdir(parents=True, exist_ok=True)
         self._last_error: str = ""
+        self._last_error_type: str = ""
         self._last_error_ts: int = 0
+        self._last_trace_id: str = ""
+        self._last_trace_by_op: Dict[str, str] = {}
+        self._last_ps_seen_model: str = ""
+        self._last_ps_seen_ts: int = 0
+        self._stats: Dict[str, Any] = {
+            "total_calls": 0,
+            "ok_calls": 0,
+            "err_calls": 0,
+            "ops": {},
+        }
 
     def _can_attempt(self) -> bool:
+        if self.required:
+            return True
         if not self._last_error_ts:
             return True
         return (int(time.time()) - int(self._last_error_ts)) >= int(self._retry_after_sec)
 
-    def _mark_error(self, err: str) -> None:
+    def _mark_error(self, err: str, *, err_type: str = "brain_error", trace_id: str = "") -> None:
         self._last_error = str(err or "brain_error")
+        self._last_error_type = str(err_type or "brain_error")
         self._last_error_ts = int(time.time())
+        if trace_id:
+            self._last_trace_id = trace_id
+
+    def _append_trace(self, row: Dict[str, Any]) -> None:
+        try:
+            with self.trace_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+        except Exception:
+            pass
+
+    def _record_call_stats(self, op: str, *, ok: bool, trace_id: str) -> None:
+        self._stats["total_calls"] = int(self._stats.get("total_calls", 0)) + 1
+        if ok:
+            self._stats["ok_calls"] = int(self._stats.get("ok_calls", 0)) + 1
+            self._stats["last_ok_ts"] = int(time.time())
+        else:
+            self._stats["err_calls"] = int(self._stats.get("err_calls", 0)) + 1
+            self._stats["last_err_ts"] = int(time.time())
+        self._stats["last_trace_id"] = trace_id
+        ops = self._stats.setdefault("ops", {})
+        o = ops.setdefault(op, {"total": 0, "ok": 0, "err": 0})
+        o["total"] = int(o.get("total", 0)) + 1
+        if ok:
+            o["ok"] = int(o.get("ok", 0)) + 1
+        else:
+            o["err"] = int(o.get("err", 0)) + 1
+
+    def _proof_ps(self) -> Dict[str, Any]:
+        if not self.client:
+            raise BrainUnavailable("brain_client_missing")
+        ps = self.client.get_ps_snapshot()
+        if bool(ps.get("seen")):
+            self._last_ps_seen_model = self.model
+            self._last_ps_seen_ts = int(time.time())
+        return ps
+
+    def _call_plan(
+        self,
+        *,
+        op: str,
+        session_key: str,
+        payload: Dict[str, Any],
+        call: Callable[[], Any],
+        schema_version: str = "memq_brain_v1",
+    ) -> Optional[Any]:
+        trace_id = str(uuid.uuid4())
+        t0 = int(time.time() * 1000)
+        self._last_trace_by_op[op] = trace_id
+        self._last_trace_id = trace_id
+        prompt_sha = hashlib.sha256(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8", errors="ignore")
+        ).hexdigest()
+
+        if not self.client:
+            err = "brain_disabled_or_no_client"
+            self._mark_error(err, err_type="brain_unavailable", trace_id=trace_id)
+            self._record_call_stats(op, ok=False, trace_id=trace_id)
+            self._append_trace(
+                {
+                    "ts": int(time.time()),
+                    "trace_id": trace_id,
+                    "session_key": session_key,
+                    "op": op,
+                    "provider": self.provider,
+                    "model": self.model,
+                    "ok": False,
+                    "latency_ms": max(0, int(time.time() * 1000) - t0),
+                    "prompt_sha256": prompt_sha,
+                    "schema_version": schema_version,
+                    "err_type": "brain_unavailable",
+                    "err_msg": err,
+                    "ps_snapshot": {"ok": False, "seen": False, "matched": None},
+                }
+            )
+            if self.required:
+                raise BrainUnavailable(err)
+            return None
+
+        if not self._can_attempt():
+            err = "brain_cooldown"
+            self._mark_error(err, err_type="brain_cooldown", trace_id=trace_id)
+            self._record_call_stats(op, ok=False, trace_id=trace_id)
+            self._append_trace(
+                {
+                    "ts": int(time.time()),
+                    "trace_id": trace_id,
+                    "session_key": session_key,
+                    "op": op,
+                    "provider": self.provider,
+                    "model": self.model,
+                    "ok": False,
+                    "latency_ms": max(0, int(time.time() * 1000) - t0),
+                    "prompt_sha256": prompt_sha,
+                    "schema_version": schema_version,
+                    "err_type": "brain_cooldown",
+                    "err_msg": err,
+                    "ps_snapshot": {"ok": False, "seen": False, "matched": None},
+                }
+            )
+            if self.required:
+                raise BrainUnavailable(err)
+            return None
+
+        try:
+            out = call()
+            ps = self._proof_ps()
+            if self.required and not bool(ps.get("seen")):
+                raise BrainUnavailable("brain_proof_failed")
+            latency_ms = max(0, int(time.time() * 1000) - t0)
+            self._record_call_stats(op, ok=True, trace_id=trace_id)
+            self._append_trace(
+                {
+                    "ts": int(time.time()),
+                    "trace_id": trace_id,
+                    "session_key": session_key,
+                    "op": op,
+                    "provider": self.provider,
+                    "model": self.model,
+                    "ok": True,
+                    "latency_ms": latency_ms,
+                    "prompt_sha256": prompt_sha,
+                    "schema_version": schema_version,
+                    "ollama_response_stats": self.client.last_chat_stats,
+                    "ps_snapshot": ps,
+                }
+            )
+            return out
+        except BrainUnavailable as e:
+            msg = str(e) or "brain_unavailable"
+            self._mark_error(msg, err_type=type(e).__name__, trace_id=trace_id)
+            latency_ms = max(0, int(time.time() * 1000) - t0)
+            self._record_call_stats(op, ok=False, trace_id=trace_id)
+            self._append_trace(
+                {
+                    "ts": int(time.time()),
+                    "trace_id": trace_id,
+                    "session_key": session_key,
+                    "op": op,
+                    "provider": self.provider,
+                    "model": self.model,
+                    "ok": False,
+                    "latency_ms": latency_ms,
+                    "prompt_sha256": prompt_sha,
+                    "schema_version": schema_version,
+                    "err_type": type(e).__name__,
+                    "err_msg": msg,
+                    "ollama_response_stats": self.client.last_chat_stats if self.client else {},
+                    "ps_snapshot": {"ok": False, "seen": False, "matched": None},
+                }
+            )
+            if self.required:
+                raise
+            return None
+        except Exception as e:
+            msg = str(e) or "brain_unknown_error"
+            self._mark_error(msg, err_type=type(e).__name__, trace_id=trace_id)
+            latency_ms = max(0, int(time.time() * 1000) - t0)
+            self._record_call_stats(op, ok=False, trace_id=trace_id)
+            self._append_trace(
+                {
+                    "ts": int(time.time()),
+                    "trace_id": trace_id,
+                    "session_key": session_key,
+                    "op": op,
+                    "provider": self.provider,
+                    "model": self.model,
+                    "ok": False,
+                    "latency_ms": latency_ms,
+                    "prompt_sha256": prompt_sha,
+                    "schema_version": schema_version,
+                    "err_type": type(e).__name__,
+                    "err_msg": msg,
+                    "ps_snapshot": {"ok": False, "seen": False, "matched": None},
+                }
+            )
+            if self.required:
+                raise BrainUnavailable(msg) from e
+            return None
+
+    def last_trace_id(self, op: str) -> str:
+        return str(self._last_trace_by_op.get(op) or "")
+
+    def record_apply(self, *, op: str, session_key: str, trace_id: str, apply_summary: Dict[str, Any]) -> None:
+        if not trace_id:
+            trace_id = str(uuid.uuid4())
+        self._append_trace(
+            {
+                "ts": int(time.time()),
+                "trace_id": trace_id,
+                "session_key": session_key,
+                "op": f"{op}_apply",
+                "provider": self.provider,
+                "model": self.model,
+                "ok": True,
+                "latency_ms": 0,
+                "prompt_sha256": "",
+                "schema_version": "memq_brain_v1",
+                "apply_summary": dict(apply_summary or {}),
+                "ps_snapshot": {"ok": True, "seen": bool(self._last_ps_seen_model), "matched": {"model": self._last_ps_seen_model or self.model}},
+            }
+        )
+
+    def recent_traces(self, n: int = 50) -> List[Dict[str, Any]]:
+        n = max(1, min(500, int(n)))
+        if not self.trace_path.exists():
+            return []
+        try:
+            lines = self.trace_path.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            return []
+        out: List[Dict[str, Any]] = []
+        for ln in lines[-n:]:
+            try:
+                obj = json.loads(ln)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                out.append(obj)
+        return out
+
+    @property
+    def stats(self) -> Dict[str, Any]:
+        return {
+            **self._stats,
+            "enabled": self.enabled,
+            "required": self.required,
+            "mode": self.mode,
+            "provider": self.provider,
+            "model": self.model,
+            "last_error": self._last_error,
+            "last_error_type": self._last_error_type,
+            "last_error_ts": self._last_error_ts,
+            "last_trace_id": self._last_trace_id,
+            "last_ps_seen_model": self._last_ps_seen_model,
+            "last_ps_seen_ts": self._last_ps_seen_ts,
+            "trace_path": str(self.trace_path),
+        }
 
     @property
     def status(self) -> Dict[str, Any]:
         next_retry_at = 0
-        if self._last_error_ts:
+        if self._last_error_ts and not self.required:
             next_retry_at = int(self._last_error_ts) + int(self._retry_after_sec)
         return {
             "enabled": self.enabled,
+            "required": self.required,
+            "mode": self.mode,
             "provider": "ollama" if self.enabled else "disabled",
+            "model": self.model,
             "last_error": self._last_error,
             "last_error_ts": self._last_error_ts,
             "next_retry_at": next_retry_at,
+            "last_trace_id": self._last_trace_id,
+            "last_ps_seen_model": self._last_ps_seen_model,
+            "last_ps_seen_ts": self._last_ps_seen_ts,
         }
 
     def build_ingest_plan(
@@ -79,21 +348,25 @@ class BrainService:
         ts: int,
         metadata: Optional[Dict[str, Any]],
     ) -> Optional[BrainIngestPlan]:
-        if not self.client:
-            return None
-        if not self._can_attempt():
-            return None
-        try:
-            return self.client.build_ingest_plan(
+        payload = {
+            "session_key": session_key,
+            "ts": int(ts),
+            "user_text": user_text or "",
+            "assistant_text": assistant_text or "",
+            "metadata": metadata or {},
+        }
+        return self._call_plan(
+            op="ingest_plan",
+            session_key=session_key,
+            payload=payload,
+            call=lambda: self.client.build_ingest_plan(
                 session_key=session_key,
                 user_text=user_text,
                 assistant_text=assistant_text,
                 ts=ts,
                 metadata=metadata,
-            )
-        except BrainUnavailable as e:
-            self._mark_error(str(e))
-            return None
+            ) if self.client else None,
+        )
 
     def build_recall_plan(
         self,
@@ -106,12 +379,20 @@ class BrainService:
         surface_threshold: float,
         deep_enabled: bool,
     ) -> Optional[BrainRecallPlan]:
-        if not self.client:
-            return None
-        if not self._can_attempt():
-            return None
-        try:
-            return self.client.build_recall_plan(
+        payload = {
+            "session_key": session_key,
+            "prompt": prompt or "",
+            "recent_messages": recent_messages[:8],
+            "budgets": budgets,
+            "top_k": int(top_k),
+            "surface_threshold": float(surface_threshold),
+            "deep_enabled": bool(deep_enabled),
+        }
+        return self._call_plan(
+            op="recall_plan",
+            session_key=session_key,
+            payload=payload,
+            call=lambda: self.client.build_recall_plan(
                 session_key=session_key,
                 prompt=prompt,
                 recent_messages=recent_messages,
@@ -119,10 +400,8 @@ class BrainService:
                 top_k=top_k,
                 surface_threshold=surface_threshold,
                 deep_enabled=deep_enabled,
-            )
-        except BrainUnavailable as e:
-            self._mark_error(str(e))
-            return None
+            ) if self.client else None,
+        )
 
     def build_merge_plan(
         self,
@@ -131,19 +410,21 @@ class BrainService:
         memory_candidates: List[Dict[str, Any]],
         stats: Optional[Dict[str, Any]] = None,
     ) -> Optional[BrainMergePlan]:
-        if not self.client:
-            return None
-        if not self._can_attempt():
-            return None
-        try:
-            return self.client.build_merge_plan(
+        payload = {
+            "session_key": session_key,
+            "memory_candidates": memory_candidates[:120],
+            "stats": stats or {},
+        }
+        return self._call_plan(
+            op="merge_plan",
+            session_key=session_key,
+            payload=payload,
+            call=lambda: self.client.build_merge_plan(
                 session_key=session_key,
                 memory_candidates=memory_candidates,
                 stats=stats or {},
-            )
-        except BrainUnavailable as e:
-            self._mark_error(str(e))
-            return None
+            ) if self.client else None,
+        )
 
     def build_audit_patch_plan(
         self,
@@ -152,19 +433,81 @@ class BrainService:
         allowed_languages: List[str],
         reasons: Optional[List[str]] = None,
     ) -> Optional[BrainAuditPatchPlan]:
-        if not self.client:
-            return None
-        if not self._can_attempt():
-            return None
-        try:
-            return self.client.build_audit_patch_plan(
+        payload = {
+            "text": text,
+            "allowed_languages": allowed_languages,
+            "reasons": reasons or [],
+        }
+        return self._call_plan(
+            op="audit_patch_plan",
+            session_key="audit",
+            payload=payload,
+            call=lambda: self.client.build_audit_patch_plan(
                 text=text,
                 allowed_languages=allowed_languages,
                 reasons=reasons or [],
-            )
-        except BrainUnavailable as e:
-            self._mark_error(str(e))
-            return None
+            ) if self.client else None,
+        )
+
+    def apply_merge_plan(self, *, db: MemqDB, session_key: str, plan: BrainMergePlan) -> Dict[str, int]:
+        now = int(time.time())
+        stats = {"merged": 0, "pruned": 0, "quarantined": 0}
+
+        for p in plan.prunes or []:
+            rid = str(p.id or "").strip()
+            if not rid:
+                continue
+            rc = db.conn.execute("DELETE FROM memory_items WHERE id=?", (rid,)).rowcount
+            stats["pruned"] += int(rc or 0)
+
+        for m in plan.merges or []:
+            target_id = str(m.target_id or "").strip()
+            if not target_id:
+                continue
+            row = db.conn.execute("SELECT * FROM memory_items WHERE id=?", (target_id,)).fetchone()
+            if not row:
+                continue
+            text = " ".join(str(m.merged_text or row["text"] or "").split()).strip()[:1200]
+            summary = " ".join(str(m.merged_summary or row["summary"] or text).split()).strip()[:420]
+            try:
+                tags = json.loads(str(row["tags"] or "{}"))
+            except Exception:
+                tags = {}
+            if not isinstance(tags, dict):
+                tags = {}
+            new_tags = m.new_tags or {}
+            for k, v in new_tags.items():
+                tags[str(k)] = str(v)
+
+            quarantine_flag = str(new_tags.get("quarantine") or "").strip().lower() in {"1", "true", "yes", "on"}
+            if quarantine_flag:
+                db.add_quarantine(
+                    trace_id=target_id,
+                    raw_text=summary[:500],
+                    reason=str(new_tags.get("reason") or "merge_quarantine")[:80],
+                    risk_score=0.8,
+                )
+                stats["quarantined"] += 1
+                db.conn.execute("DELETE FROM memory_items WHERE id=?", (target_id,))
+            else:
+                db.conn.execute(
+                    "UPDATE memory_items SET text=?,summary=?,tags=?,updated_at=? WHERE id=?",
+                    (text, summary, json.dumps(tags, ensure_ascii=False), now, target_id),
+                )
+                stats["merged"] += 1
+
+            source_ids = [str(x).strip() for x in (m.source_ids or []) if str(x).strip() and str(x).strip() != target_id]
+            if bool(m.drop_source) and source_ids:
+                for sid in source_ids:
+                    db.conn.execute("DELETE FROM memory_items WHERE id=?", (sid,))
+                    stats["pruned"] += 1
+
+        db.conn.commit()
+        # Re-sync derived indices after merge application.
+        db.backfill_fact_keys(layer="deep", limit=30000)
+        db.backfill_fact_index(layer="deep", limit=30000)
+        db.cleanup_stale_fact_index()
+        return stats
 
     def apply_ingest_plan(
         self,

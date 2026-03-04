@@ -24,15 +24,19 @@ from sidecar.memq.timeline import day_key_from_ts, detect_timeline_range
 from sidecar.memq.tokens import lexical_overlap, tokenize_lexical
 
 try:
-    from sidecar.memq.brain.schemas import BrainIngestPlan
+    from sidecar.memq.brain.schemas import BrainIngestPlan, BrainRecallPlan
     from sidecar.memq.brain.service import BrainService
     from sidecar.memq.config import load_config
+    from sidecar.memq.brain.ollama_client import OllamaBrainClient, OllamaConfig
 
     HAVE_BRAIN_DEPS = True
 except Exception:
     BrainIngestPlan = None  # type: ignore[assignment]
+    BrainRecallPlan = None  # type: ignore[assignment]
     BrainService = None  # type: ignore[assignment]
     load_config = None  # type: ignore[assignment]
+    OllamaBrainClient = None  # type: ignore[assignment]
+    OllamaConfig = None  # type: ignore[assignment]
     HAVE_BRAIN_DEPS = False
 
 
@@ -271,6 +275,56 @@ class RegressionGuardsTest(unittest.TestCase):
         self.assertEqual("ヒロ", style2.get("callUser"))
         rules2 = [str(r["body"]) for r in self.db.list_rules()]
         self.assertTrue(any(b.startswith("language.allowed=ja,en") for b in rules2))
+
+    @unittest.skipUnless(HAVE_BRAIN_DEPS, "brain deps unavailable in this python env")
+    def test_brain_recall_repair_accepts_partial_payload(self) -> None:
+        client = OllamaBrainClient(
+            OllamaConfig(
+                base_url="http://127.0.0.1:11434",
+                model="gpt-oss:20b",
+                timeout_ms=60000,
+                keep_alive="30m",
+                temperature=0.0,
+                max_tokens=1024,
+                concurrent=1,
+            )
+        )
+        repaired = client._repair_payload(  # type: ignore[attr-defined]
+            model_cls=BrainRecallPlan,
+            data={"retrieval": {"allow_deep": True}},
+            user_payload={
+                "prompt": "昨日何した？",
+                "budgets": {"memctxTokens": 120},
+                "retrieval_defaults": {"top_k": 5, "deep_enabled": True},
+            },
+        )
+        self.assertIsInstance(repaired, dict)
+        plan = BrainRecallPlan.model_validate(repaired)
+        self.assertGreaterEqual(len(plan.fts_queries), 1)
+        self.assertTrue(bool(plan.retrieval.allow_deep))
+
+    @unittest.skipUnless(HAVE_BRAIN_DEPS, "brain deps unavailable in this python env")
+    def test_brain_ingest_repair_accepts_compact_string_facts(self) -> None:
+        client = OllamaBrainClient(
+            OllamaConfig(
+                base_url="http://127.0.0.1:11434",
+                model="gpt-oss:20b",
+                timeout_ms=60000,
+                keep_alive="30m",
+                temperature=0.0,
+                max_tokens=1024,
+                concurrent=1,
+            )
+        )
+        repaired = client._repair_payload(  # type: ignore[attr-defined]
+            model_cls=BrainIngestPlan,
+            data={"facts": "家族構成は妻ミナと子ども2人"},
+            user_payload={},
+        )
+        self.assertIsInstance(repaired, dict)
+        plan = BrainIngestPlan.model_validate(repaired)
+        self.assertGreaterEqual(len(plan.facts), 1)
+        self.assertEqual("memory.note.generic", plan.facts[0].fact_key)
 
     def test_memrules_memstyle_compact_and_non_overlapping(self) -> None:
         self.db.upsert_rule("r_lang", 90, True, "language", "language.allowed=ja,en")

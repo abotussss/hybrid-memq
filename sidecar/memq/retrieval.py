@@ -99,7 +99,9 @@ def retrieve_candidates_with_plan(
     _ = dim
     _ = bits_per_dim
     retrieval = plan.get("retrieval") if isinstance(plan, dict) else {}
-    fact_keys = set(plan.get("fact_keys") or []) if isinstance(plan, dict) else set()
+    fact_keys = set(infer_query_fact_keys(prompt))
+    if isinstance(plan, dict):
+        fact_keys.update(str(k).strip() for k in (plan.get("fact_keys") or []) if str(k).strip())
     queries = [str(q).strip() for q in (plan.get("fts_queries") or []) if str(q).strip()] if isinstance(plan, dict) else []
     if not queries:
         queries = [prompt]
@@ -115,9 +117,17 @@ def retrieve_candidates_with_plan(
     for q in queries:
         for row in search_surface(db, session_key, q, top_k=topk_surface):
             rid = str(row.get("id"))
+            cand = dict(row)
+            if fact_keys:
+                tag_keys = set(cand.get("tag_keys") or [])
+                row_keys = set(cand.get("fact_keys") or [])
+                overlap = len(fact_keys & (tag_keys | row_keys))
+                if overlap > 0:
+                    cand["score"] = float(cand.get("score", 0.0)) + min(0.36, 0.14 * overlap)
+                    cand["key_overlap"] = overlap
             prev = surface_by_id.get(rid)
-            if prev is None or float(row.get("score", 0.0)) > float(prev.get("score", 0.0)):
-                surface_by_id[rid] = row
+            if prev is None or float(cand.get("score", 0.0)) > float(prev.get("score", 0.0)):
+                surface_by_id[rid] = cand
         if allow_deep:
             for row in search_deep(db, session_key, q, top_k=topk_deep):
                 rid = str(row.get("id"))

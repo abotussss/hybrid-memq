@@ -60,6 +60,7 @@ class MemqConfig:
     brain_temperature: float
     brain_max_tokens: int
     brain_concurrent: int
+    brain_mode: str
 
 
 def load_config() -> MemqConfig:
@@ -71,6 +72,10 @@ def load_config() -> MemqConfig:
     bits = _env_int("MEMQ_BITS_PER_DIM", 8)
     if bits not in {6, 7, 8}:
         bits = 8
+
+    brain_mode = os.getenv("MEMQ_BRAIN_MODE", "best_effort").strip().lower()
+    if brain_mode not in {"off", "best_effort", "required"}:
+        brain_mode = "best_effort"
 
     return MemqConfig(
         db_path=db_path,
@@ -94,9 +99,12 @@ def load_config() -> MemqConfig:
         brain_provider=os.getenv("MEMQ_BRAIN_PROVIDER", "ollama"),
         brain_base_url=os.getenv("MEMQ_BRAIN_BASE_URL", "http://127.0.0.1:11434"),
         brain_model=os.getenv("MEMQ_BRAIN_MODEL", "gpt-oss:20b"),
-        brain_timeout_ms=max(500, _env_int("MEMQ_BRAIN_TIMEOUT_MS", 8000)),
+        # gpt-oss:20b on local CPUs/consumer GPUs can exceed 120s on structured JSON plans.
+        brain_timeout_ms=max(500, _env_int("MEMQ_BRAIN_TIMEOUT_MS", 240000)),
         brain_keep_alive=os.getenv("MEMQ_BRAIN_KEEP_ALIVE", "30m"),
         brain_temperature=max(0.0, min(1.0, _env_float("MEMQ_BRAIN_TEMPERATURE", 0.0))),
-        brain_max_tokens=max(64, _env_int("MEMQ_BRAIN_MAX_TOKENS", 512)),
+        # Keep JSON plan generation bounded while avoiding frequent truncation on 20B models.
+        brain_max_tokens=max(64, _env_int("MEMQ_BRAIN_MAX_TOKENS", 1024)),
         brain_concurrent=max(1, _env_int("MEMQ_BRAIN_CONCURRENT", 1)),
+        brain_mode=brain_mode,
     )

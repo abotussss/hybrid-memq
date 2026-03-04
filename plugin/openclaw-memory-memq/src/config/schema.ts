@@ -1,6 +1,17 @@
+import { appendFileSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+
 export const defaults = {
   "memq.sidecarUrl": "http://127.0.0.1:7781",
   "memq.workspaceRoot": process.cwd(),
+  "memq.brain.mode": "best_effort",
+  "memq.brain.provider": "ollama",
+  "memq.brain.baseUrl": "http://127.0.0.1:11434",
+  "memq.brain.model": "gpt-oss:20b",
+  "memq.brain.keepAlive": "30m",
+  "memq.brain.timeoutMs": 240000,
+  "memq.brain.maxTokens": 1024,
   "memq.budgets.memctxTokens": 120,
   "memq.budgets.rulesTokens": 80,
   "memq.budgets.styleTokens": 120,
@@ -46,4 +57,13 @@ export function logInfo(api: any, msg: string): void {
   const logger = api?.logger;
   if (logger?.info) logger.info(msg);
   else console.log(msg);
+  if (String(msg).includes("[memq][brain-proof]")) {
+    try {
+      const p = join(homedir(), ".openclaw", "logs", "gateway.log");
+      mkdirSync(dirname(p), { recursive: true });
+      appendFileSync(p, `${new Date().toISOString()} ${msg}\n`, "utf-8");
+    } catch {
+      // ignore file logging failures
+    }
+  }
 }

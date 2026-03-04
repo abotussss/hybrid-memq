@@ -7,9 +7,11 @@ from threading import Lock
 from typing import Any, Dict, List
 
 from fastapi import FastAPI, Query
+from fastapi.responses import JSONResponse
 
 from memq.audit import audit_output
 from memq.brain import BrainService
+from memq.brain.ollama_client import BrainUnavailable
 from memq.config import MemqConfig, load_config
 from memq.conv_summarize import deep_summary_candidates, merge_summary, summarize_for_deep, summarize_for_surface
 from memq.db import MemqDB
@@ -59,6 +61,47 @@ state: Dict[str, Any] = {
     "last_session_key": "default",
     "idle_runs": 0,
 }
+
+
+def _brain_mode_required() -> bool:
+    return str(cfg.brain_mode or "best_effort").lower() == "required"
+
+
+def _brain_error_response(
+    *,
+    code: str,
+    op: str,
+    session_key: str,
+    trace_id: str,
+    err: Exception | str,
+) -> JSONResponse:
+    err_msg = str(err or code)
+    err_type = type(err).__name__ if isinstance(err, Exception) else "BrainError"
+    return JSONResponse(
+        status_code=503,
+        content={
+            "ok": False,
+            "code": code,
+            "op": op,
+            "session_key": session_key,
+            "provider": cfg.brain_provider,
+            "model": cfg.brain_model,
+            "trace_id": trace_id,
+            "err_type": err_type,
+            "err_msg": err_msg,
+        },
+    )
+
+
+def _brain_code(default: str, err: Exception | str) -> str:
+    msg = str(err or "")
+    if "brain_proof_failed" in msg:
+        return "brain_proof_failed"
+    if "brain_cooldown" in msg:
+        return "brain_cooldown"
+    if "brain_apply_failed" in msg:
+        return "brain_apply_failed"
+    return default
 
 def _has_fact(session_key: str, fact_key: str, value: str, limit: int = 6000) -> bool:
     value_l = normalize_fact_value(value).lower()
@@ -140,6 +183,38 @@ def _touch(session_key: str) -> None:
         state["last_session_key"] = session_key
 
 
+def _idle_merge_with_brain(session_key: str, *, required: bool) -> Dict[str, Any]:
+    candidates: List[Dict[str, Any]] = []
+    rows = db.list_memory_items("deep", session_key, limit=800)
+    if len(rows) < 240:
+        rows = db.list_memory_items_any("deep", limit=1200)
+    for r in rows[:1200]:
+        candidates.append(
+            {
+                "id": str(r["id"]),
+                "session_key": str(r["session_key"]),
+                "layer": str(r["layer"]),
+                "summary": str(r["summary"] or ""),
+                "updated_at": int(r["updated_at"] or 0),
+                "importance": float(r["importance"] or 0.0),
+                "usage_count": int(r["usage_count"] or 0),
+            }
+        )
+    plan = brain.build_merge_plan(
+        session_key=session_key,
+        memory_candidates=candidates,
+        stats=db.memory_stats(),
+    )
+    trace_id = brain.last_trace_id("merge_plan")
+    if plan is None:
+        if required:
+            raise BrainUnavailable("required_mode_no_merge_plan")
+        return {"trace_id": trace_id, "applied": {"merged": 0, "pruned": 0, "quarantined": 0}}
+    applied = brain.apply_merge_plan(db=db, session_key=session_key, plan=plan)
+    brain.record_apply(op="merge_plan", session_key=session_key, trace_id=trace_id, apply_summary=applied)
+    return {"trace_id": trace_id, "applied": applied}
+
+
 async def _idle_loop() -> None:
     sleep_sec = max(5, min(30, cfg.idle_seconds // 2))
     while True:
@@ -156,6 +231,20 @@ async def _idle_loop() -> None:
         if now - last_run < max(30, cfg.idle_seconds // 2):
             continue
         res = run_idle_consolidation(db, session_key=session_key, dim=cfg.dim, bits_per_dim=cfg.bits_per_dim)
+        try:
+            merge = _idle_merge_with_brain(session_key, required=_brain_mode_required())
+            res.setdefault("stats", {})
+            res["stats"]["brain_merge"] = merge.get("applied", {})
+            res["stats"]["brain_merge_trace_id"] = str(merge.get("trace_id") or "")
+            did = list(res.get("did", []))
+            if "brain_merge_plan" not in did:
+                did.append("brain_merge_plan")
+            res["did"] = did
+        except Exception as e:
+            if _brain_mode_required():
+                with state_lock:
+                    state["last_idle_error"] = str(e)
+                continue
         with state_lock:
             state["last_consolidation_at"] = now
             state["idle_runs"] = int(state.get("idle_runs", 0)) + 1
@@ -184,10 +273,21 @@ def health() -> Dict[str, Any]:
             "brainEnabled": cfg.brain_enabled,
             "brainProvider": cfg.brain_provider,
             "brainModel": cfg.brain_model,
+            "brainMode": cfg.brain_mode,
         },
         "brain": brain.status,
         "state": snapshot,
     }
+
+
+@app.get("/brain/stats")
+def brain_stats() -> Dict[str, Any]:
+    return {"ok": True, **brain.stats}
+
+
+@app.get("/brain/trace/recent")
+def brain_trace_recent(n: int = Query(default=50, ge=1, le=500)) -> Dict[str, Any]:
+    return {"ok": True, "items": brain.recent_traces(n)}
 
 
 @app.post("/idle_tick")
@@ -229,13 +329,24 @@ def memory_ingest_turn(req: IngestTurnRequest) -> IngestTurnResponse:
     _touch(req.sessionKey)
     wrote: Dict[str, int] | None = None
     brain_used = False
-    plan = brain.build_ingest_plan(
-        session_key=req.sessionKey,
-        user_text=req.userText,
-        assistant_text=req.assistantText,
-        ts=req.ts,
-        metadata=req.metadata,
-    )
+    required = _brain_mode_required()
+    try:
+        plan = brain.build_ingest_plan(
+            session_key=req.sessionKey,
+            user_text=req.userText,
+            assistant_text=req.assistantText,
+            ts=req.ts,
+            metadata=req.metadata,
+        )
+    except Exception as e:
+        return _brain_error_response(
+            code=_brain_code("brain_unavailable", e),
+            op="ingest_plan",
+            session_key=req.sessionKey,
+            trace_id=brain.last_trace_id("ingest_plan"),
+            err=e,
+        )
+
     if plan is not None:
         try:
             wrote = brain.apply_ingest_plan(
@@ -247,10 +358,41 @@ def memory_ingest_turn(req: IngestTurnRequest) -> IngestTurnResponse:
                 assistant_text=req.assistantText,
                 metadata=req.metadata,
             )
+            brain.record_apply(
+                op="ingest_plan",
+                session_key=req.sessionKey,
+                trace_id=brain.last_trace_id("ingest_plan"),
+                apply_summary=wrote,
+            )
             brain_used = True
-        except Exception:
+        except Exception as e:
+            if required:
+                return _brain_error_response(
+                    code=_brain_code("brain_apply_failed", e),
+                    op="ingest_apply",
+                    session_key=req.sessionKey,
+                    trace_id=brain.last_trace_id("ingest_plan"),
+                    err=e,
+                )
             wrote = None
+    elif required:
+        return _brain_error_response(
+            code="brain_unavailable",
+            op="ingest_plan",
+            session_key=req.sessionKey,
+            trace_id=brain.last_trace_id("ingest_plan"),
+            err="required_mode_no_plan",
+        )
+
     if wrote is None:
+        if required:
+            return _brain_error_response(
+                code="brain_unavailable",
+                op="ingest_plan",
+                session_key=req.sessionKey,
+                trace_id=brain.last_trace_id("ingest_plan"),
+                err="required_mode_fallback_blocked",
+            )
         wrote = ingest_turn(
             db=db,
             session_key=req.sessionKey,
@@ -263,7 +405,7 @@ def memory_ingest_turn(req: IngestTurnRequest) -> IngestTurnResponse:
         )
     refresh_preference_profiles(db, int(time.time()))
     wrote["brain"] = 1 if brain_used else 0
-    return IngestTurnResponse(ok=True, wrote=wrote)
+    return IngestTurnResponse(ok=True, wrote=wrote, traceId=brain.last_trace_id("ingest_plan"))
 
 
 @app.post("/memctx/query", response_model=MemctxQueryResponse)
@@ -276,23 +418,33 @@ def memctx_query(req: MemctxQueryRequest) -> MemctxQueryResponse:
     deep_enabled = bool(req.deepEnabled if req.deepEnabled is not None else cfg.deep_enabled)
     timeline_range = detect_timeline_range(req.prompt)
     timeline_first = bool(timeline_range and timeline_range.explicit)
+    required = _brain_mode_required()
     recent_messages = [
         {"role": str(m.role), "text": str(m.text), "ts": int(m.ts) if m.ts is not None else None}
         for m in (req.recentMessages or [])
     ]
-    brain_plan_obj = brain.build_recall_plan(
-        session_key=req.sessionKey,
-        prompt=req.prompt,
-        recent_messages=recent_messages,
-        budgets={
-            "memctxTokens": max(16, int(req.budgets.memctxTokens)),
-            "rulesTokens": max(8, int(req.budgets.rulesTokens)),
-            "styleTokens": max(8, int(req.budgets.styleTokens)),
-        },
-        top_k=top_k,
-        surface_threshold=surface_threshold,
-        deep_enabled=deep_enabled,
-    )
+    try:
+        brain_plan_obj = brain.build_recall_plan(
+            session_key=req.sessionKey,
+            prompt=req.prompt,
+            recent_messages=recent_messages,
+            budgets={
+                "memctxTokens": max(16, int(req.budgets.memctxTokens)),
+                "rulesTokens": max(8, int(req.budgets.rulesTokens)),
+                "styleTokens": max(8, int(req.budgets.styleTokens)),
+            },
+            top_k=top_k,
+            surface_threshold=surface_threshold,
+            deep_enabled=deep_enabled,
+        )
+    except Exception as e:
+        return _brain_error_response(
+            code=_brain_code("brain_unavailable", e),
+            op="recall_plan",
+            session_key=req.sessionKey,
+            trace_id=brain.last_trace_id("recall_plan"),
+            err=e,
+        )
     brain_plan: Dict[str, Any] | None = brain_plan_obj.model_dump() if brain_plan_obj is not None else None
 
     if brain_plan is not None:
@@ -310,6 +462,14 @@ def memctx_query(req: MemctxQueryRequest) -> MemctxQueryResponse:
             plan=brain_plan,
         )
     else:
+        if required:
+            return _brain_error_response(
+                code="brain_unavailable",
+                op="recall_plan",
+                session_key=req.sessionKey,
+                trace_id=brain.last_trace_id("recall_plan"),
+                err="required_mode_no_plan",
+            )
         # Keep deep fallback available even for explicit timeline prompts.
         # Timeline blocks are prioritized in MEMCTX packing, but deep can rescue
         # missing/immature digests so "昨日何した？" does not return empty context.
@@ -330,7 +490,10 @@ def memctx_query(req: MemctxQueryRequest) -> MemctxQueryResponse:
     dbg["timeline_route"] = 1 if timeline_first else 0
     dbg["timeline_label"] = timeline_range.label if timeline_range else ""
     dbg["brain_enabled"] = 1 if brain.enabled else 0
+    dbg["brain_required"] = 1 if required else 0
     dbg["brain_plan"] = 1 if brain_plan is not None else 0
+    dbg["trace_id"] = brain.last_trace_id("recall_plan")
+    dbg["ps_seen"] = 1 if bool(brain.status.get("last_ps_seen_model")) else 0
     if brain_plan and isinstance(brain_plan.get("intent"), dict):
         for k, v in brain_plan["intent"].items():
             dbg[f"brain_intent_{k}"] = v
@@ -364,7 +527,9 @@ def memctx_query(req: MemctxQueryRequest) -> MemctxQueryResponse:
             deepCalled=bool(meta.get("deepCalled")),
             usedMemoryIds=used_ids,
             debug=dict(meta.get("debug") or {}),
+            traceId=brain.last_trace_id("recall_plan"),
         ),
+        traceId=brain.last_trace_id("recall_plan"),
     )
 
 
@@ -373,12 +538,35 @@ def idle_run_once(req: IdleRunRequest) -> IdleRunResponse:
     now = int(req.nowTs or time.time())
     with state_lock:
         session_key = str(state.get("last_session_key", "default"))
+    required = _brain_mode_required()
     res = run_idle_consolidation(db, session_key=session_key, dim=cfg.dim, bits_per_dim=cfg.bits_per_dim)
+    try:
+        merge = _idle_merge_with_brain(session_key, required=required)
+    except Exception as e:
+        return _brain_error_response(
+            code=_brain_code("brain_unavailable", e),
+            op="merge_plan",
+            session_key=session_key,
+            trace_id=brain.last_trace_id("merge_plan"),
+            err=e,
+        )
+    res.setdefault("stats", {})
+    res["stats"]["brain_merge"] = merge.get("applied", {})
+    res["stats"]["brain_merge_trace_id"] = str(merge.get("trace_id") or "")
+    did = list(res.get("did", []))
+    if "brain_merge_plan" not in did:
+        did.append("brain_merge_plan")
+    res["did"] = did
     with state_lock:
         state["last_consolidation_at"] = now
         state["idle_runs"] = int(state.get("idle_runs", 0)) + 1
         state["last_idle_result"] = res
-    return IdleRunResponse(ok=True, did=list(res.get("did", [])), stats=dict(res.get("stats", {})))
+    return IdleRunResponse(
+        ok=True,
+        did=list(res.get("did", [])),
+        stats=dict(res.get("stats", {})),
+        traceId=str(merge.get("trace_id") or ""),
+    )
 
 
 @app.post("/audit/output", response_model=AuditResponse)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+import json
 from typing import Any, Dict, List
 
 from .db import MemqDB
@@ -55,6 +56,10 @@ def search_surface(db: MemqDB, session_key: str, query_text: str, top_k: int) ->
             lex = 0.01
         age = int(now - int(r["last_access_at"]))
         s = _score(lex, float(r["importance"]), int(r["usage_count"]), age)
+        try:
+            tags = json.loads(str(r["tags"] or "{}"))
+        except Exception:
+            tags = {}
         scored.append(
             {
                 "id": str(r["id"]),
@@ -64,6 +69,8 @@ def search_surface(db: MemqDB, session_key: str, query_text: str, top_k: int) ->
                 "summary": summary_raw,
                 "layer": "surface",
                 "importance": float(r["importance"]),
+                "tag_keys": list(tags.get("fact_keys") or []),
+                "fact_keys": list(tags.get("fact_keys") or []),
             }
         )
     scored.sort(key=lambda x: x["score"], reverse=True)

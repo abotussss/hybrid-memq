@@ -4,7 +4,29 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 
 export class SidecarClient {
+  private runtimeBrainTimeoutMs?: number;
+
   constructor(private readonly baseUrl: string) {}
+
+  private normalizeBrainMode(v: string | undefined): "off" | "best_effort" | "required" {
+    const s = String(v || "").trim().toLowerCase();
+    if (s === "off") return "off";
+    if (s === "required") return "required";
+    return "best_effort";
+  }
+
+  private parseTimeout(v: string | undefined, fallbackMs: number): number {
+    const n = Number(v || "");
+    if (!Number.isFinite(n) || n <= 0) return fallbackMs;
+    return Math.max(5000, Math.floor(n));
+  }
+
+  private brainTimeoutMs(): number {
+    if (this.runtimeBrainTimeoutMs && Number.isFinite(this.runtimeBrainTimeoutMs)) {
+      return Math.max(5000, Math.floor(this.runtimeBrainTimeoutMs));
+    }
+    return this.parseTimeout(process.env.MEMQ_BRAIN_TIMEOUT_MS, 120000);
+  }
 
   private async req<T>(path: string, body?: unknown, method = "POST", timeoutMs = 6000): Promise<T> {
     const ctrl = new AbortController();
@@ -16,7 +38,16 @@ export class SidecarClient {
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: ctrl.signal,
       });
-      if (!r.ok) throw new Error(`sidecar ${path} status=${r.status}`);
+      if (!r.ok) {
+        let detail = "";
+        try {
+          const t = await r.text();
+          if (t) detail = t.slice(0, 400);
+        } catch {
+          // ignore
+        }
+        throw new Error(`sidecar ${path} status=${r.status}${detail ? ` body=${detail}` : ""}`);
+      }
       return (await r.json()) as T;
     } finally {
       clearTimeout(timer);
@@ -32,7 +63,23 @@ export class SidecarClient {
     }
   }
 
-  async ensureUp(workspaceRoot: string): Promise<boolean> {
+  async ensureUp(
+    workspaceRoot: string,
+    opts?: {
+      brainMode?: string;
+      brainProvider?: string;
+      brainBaseUrl?: string;
+      brainModel?: string;
+      brainKeepAlive?: string;
+      brainTimeoutMs?: string | number;
+      brainMaxTokens?: string | number;
+    }
+  ): Promise<boolean> {
+    const configuredTimeout = this.parseTimeout(
+      opts?.brainTimeoutMs !== undefined ? String(opts.brainTimeoutMs) : process.env.MEMQ_BRAIN_TIMEOUT_MS,
+      120000
+    );
+    this.runtimeBrainTimeoutMs = configuredTimeout;
     if (await this.health()) return true;
     const root = String(workspaceRoot || "").trim();
     if (!root) return false;
@@ -41,7 +88,20 @@ export class SidecarClient {
     const venvPy = join(root, "sidecar", ".venv", "bin", "python");
     const py = existsSync(venvPy) ? venvPy : "python3";
     try {
-      const env = { ...process.env, MEMQ_ROOT: root, MEMQ_DB_PATH: ".memq/sidecar.sqlite3" };
+      const brainMode = this.normalizeBrainMode(opts?.brainMode || process.env.MEMQ_BRAIN_MODE);
+      const env = {
+        ...process.env,
+        MEMQ_ROOT: root,
+        MEMQ_DB_PATH: ".memq/sidecar.sqlite3",
+        MEMQ_BRAIN_ENABLED: process.env.MEMQ_BRAIN_ENABLED || "1",
+        MEMQ_BRAIN_MODE: brainMode,
+        MEMQ_BRAIN_PROVIDER: opts?.brainProvider || process.env.MEMQ_BRAIN_PROVIDER || "ollama",
+        MEMQ_BRAIN_BASE_URL: opts?.brainBaseUrl || process.env.MEMQ_BRAIN_BASE_URL || "http://127.0.0.1:11434",
+        MEMQ_BRAIN_MODEL: opts?.brainModel || process.env.MEMQ_BRAIN_MODEL || "gpt-oss:20b",
+        MEMQ_BRAIN_KEEP_ALIVE: opts?.brainKeepAlive || process.env.MEMQ_BRAIN_KEEP_ALIVE || "30m",
+        MEMQ_BRAIN_TIMEOUT_MS: String(opts?.brainTimeoutMs || process.env.MEMQ_BRAIN_TIMEOUT_MS || "240000"),
+        MEMQ_BRAIN_MAX_TOKENS: String(opts?.brainMaxTokens || process.env.MEMQ_BRAIN_MAX_TOKENS || "1024"),
+      };
       const child = spawn(py, [app], {
         cwd: root,
         detached: true,
@@ -69,19 +129,34 @@ export class SidecarClient {
   }
 
   async memctxQuery(req: MemqQueryRequest): Promise<MemqQueryResponse> {
-    return await this.req<MemqQueryResponse>("/memctx/query", req);
+    return await this.req<MemqQueryResponse>("/memctx/query", req, "POST", this.brainTimeoutMs());
   }
 
   async summarizeConversation(sessionKey: string, prunedMessages: MemqMessage[], retentionScope: "surface_only" | "deep"): Promise<void> {
-    await this.req<{ ok: boolean }>("/conversation/summarize", { sessionKey, prunedMessages, retentionScope });
+    await this.req<{ ok: boolean }>(
+      "/conversation/summarize",
+      { sessionKey, prunedMessages, retentionScope },
+      "POST",
+      this.brainTimeoutMs()
+    );
   }
 
-  async ingestTurn(payload: { sessionKey: string; userText: string; assistantText: string; ts: number; metadata?: Record<string, unknown> }): Promise<void> {
-    await this.req<{ ok: boolean }>("/memory/ingest_turn", payload);
+  async ingestTurn(payload: { sessionKey: string; userText: string; assistantText: string; ts: number; metadata?: Record<string, unknown> }): Promise<{ ok: boolean; wrote?: Record<string, number>; traceId?: string }> {
+    return await this.req<{ ok: boolean; wrote?: Record<string, number>; traceId?: string }>(
+      "/memory/ingest_turn",
+      payload,
+      "POST",
+      this.brainTimeoutMs()
+    );
   }
 
-  async idleRunOnce(payload?: { nowTs?: number; maxWorkMs?: number }): Promise<void> {
-    await this.req<{ ok: boolean }>("/idle/run_once", payload ?? {});
+  async idleRunOnce(payload?: { nowTs?: number; maxWorkMs?: number }): Promise<{ ok: boolean; did?: string[]; stats?: Record<string, unknown>; traceId?: string }> {
+    return await this.req<{ ok: boolean; did?: string[]; stats?: Record<string, unknown>; traceId?: string }>(
+      "/idle/run_once",
+      payload ?? {},
+      "POST",
+      this.brainTimeoutMs()
+    );
   }
 
   async auditOutput(payload: { sessionKey: string; text: string; mode: "primary" | "dual"; thresholds?: Record<string, number> }): Promise<{

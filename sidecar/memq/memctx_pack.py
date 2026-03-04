@@ -20,6 +20,13 @@ def estimate_tokens(text: str) -> int:
     return max(1, (len(text) + 3) // 4)
 
 
+_DAY_KEY_RE = re.compile(r"^20\d{2}-\d{2}-\d{2}$")
+
+
+def _is_day_key(v: str) -> bool:
+    return bool(_DAY_KEY_RE.fullmatch(str(v or "").strip()))
+
+
 def fit_budget(lines: Sequence[str], budget: int) -> List[str]:
     out: List[str] = []
     used = 0
@@ -466,7 +473,11 @@ def build_memctx(
         for k in ("timeline", "profile", "state", "fact_lookup", "meta", "overview"):
             if k in p_intent:
                 try:
-                    intent[k] = max(0.0, min(1.0, float(p_intent.get(k, intent.get(k, 0.0)))))
+                    # Do not let weak/empty brain intent erase deterministic intent inference.
+                    intent[k] = max(
+                        float(intent.get(k, 0.0)),
+                        max(0.0, min(1.0, float(p_intent.get(k, 0.0)))),
+                    )
                 except Exception:
                     pass
         for fk in (brain_plan.get("fact_keys") or []):
@@ -616,11 +627,38 @@ def build_memctx(
             sd = str(tr.get("startDay") or "").strip()
             ed = str(tr.get("endDay") or "").strip()
             label = str(tr.get("label") or "brain")
+            rel_label = bool(re.search(r"(yesterday|today|recent|last_week|last_month|先週|先月|昨日|今日|最近)", label, re.IGNORECASE))
             if sd and ed:
-                timeline_range = detect_timeline_range(f"{sd}") or timeline_range
                 from .timeline import TimelineRange  # local import to avoid cycle at module load
+                use_sd_ed = _is_day_key(sd) and _is_day_key(ed) and not rel_label
+                if use_sd_ed and timeline_range is not None:
+                    # Guard against clearly wrong year ranges from model plans.
+                    try:
+                        from .timeline import day_key_to_date
 
-                timeline_range = TimelineRange(start_day=sd, end_day=ed, label=label, explicit=True)
+                        pd = day_key_to_date(sd)
+                        cur = day_key_to_date(timeline_range.start_day)
+                        if abs((pd - cur).days) > 62:
+                            use_sd_ed = False
+                    except Exception:
+                        pass
+                if use_sd_ed:
+                    timeline_range = TimelineRange(start_day=sd, end_day=ed, label=label, explicit=True)
+                else:
+                    # Normalize relative or suspicious ranges with deterministic parser.
+                    parsed = (
+                        detect_timeline_range(prompt)
+                        or detect_timeline_range(label)
+                        or detect_timeline_range(f"{sd} {ed} {label}")
+                        or detect_timeline_range(sd)
+                    )
+                    if parsed is not None:
+                        timeline_range = TimelineRange(
+                            start_day=parsed.start_day,
+                            end_day=parsed.end_day,
+                            label=label or parsed.label,
+                            explicit=True,
+                        )
     time_scoped = bool(timeline_range and timeline_range.explicit)
     query_memory_overview = bool(
         intent["overview"] >= 0.55
@@ -750,7 +788,13 @@ def build_memctx(
             break
         summary = _clean_summary(item.get("summary", ""), 140)
         rel = _lex_rel(summary)
-        if _allow_ctx_line(summary) and (rel >= 0.10 or (query_memory_overview and durable_like.search(summary))):
+        key_overlap = int(item.get("key_overlap", 0) or 0)
+        has_intent_match = bool(q_fact_keys) and key_overlap > 0
+        if _allow_ctx_line(summary) and (
+            has_intent_match
+            or rel >= 0.10
+            or (query_memory_overview and durable_like.search(summary))
+        ):
             s_count += 1
             _push_kv(lines, f"s{s_count}", summary)
 

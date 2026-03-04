@@ -4,8 +4,10 @@ import { logInfo } from "../config/schema.js";
 export function createBeforeCompaction(api: any, sidecar: SidecarClient) {
   return async (): Promise<void> => {
     try {
-      await sidecar.idleRunOnce({ nowTs: Math.floor(Date.now() / 1000), maxWorkMs: 800 });
-      logInfo(api, "[memq-v2] before_compaction idle_run_once=ok");
+      const res = await sidecar.idleRunOnce({ nowTs: Math.floor(Date.now() / 1000), maxWorkMs: 800 });
+      const traceId = String(res?.traceId || "");
+      logInfo(api, `[memq-v2] before_compaction idle_run_once=ok trace_id=${traceId}`);
+      logInfo(api, `[memq][brain-proof] op=merge_plan trace_id=${traceId} model=gpt-oss:20b`);
     } catch {
       // best effort
     }

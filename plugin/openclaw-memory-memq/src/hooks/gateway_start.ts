@@ -4,10 +4,25 @@ import { defaults, getCfg, logInfo } from "../config/schema.js";
 export function createGatewayStart(api: any, sidecar: SidecarClient) {
   return async (): Promise<void> => {
     const workspaceRoot = getCfg(api, "memq.workspaceRoot", defaults["memq.workspaceRoot"]);
+    const brainMode = String(getCfg(api, "memq.brain.mode", defaults["memq.brain.mode"]) || "best_effort").toLowerCase();
+    const brainProvider = String(getCfg(api, "memq.brain.provider", defaults["memq.brain.provider"]));
+    const brainBaseUrl = String(getCfg(api, "memq.brain.baseUrl", defaults["memq.brain.baseUrl"]));
+    const brainModel = String(getCfg(api, "memq.brain.model", defaults["memq.brain.model"]));
+    const brainKeepAlive = String(getCfg(api, "memq.brain.keepAlive", defaults["memq.brain.keepAlive"]));
+    const brainTimeoutMs = Number(getCfg(api, "memq.brain.timeoutMs", defaults["memq.brain.timeoutMs"]));
+    const brainMaxTokens = Number(getCfg(api, "memq.brain.maxTokens", defaults["memq.brain.maxTokens"]));
     logInfo(api, `[memq-v2] gateway_start workspace_root=${workspaceRoot}`);
     let healthy = await sidecar.health();
     if (!healthy) {
-      healthy = await sidecar.ensureUp(workspaceRoot);
+      healthy = await sidecar.ensureUp(workspaceRoot, {
+        brainMode,
+        brainProvider,
+        brainBaseUrl,
+        brainModel,
+        brainKeepAlive,
+        brainTimeoutMs,
+        brainMaxTokens,
+      });
     }
     if (!healthy) {
       logInfo(api, "[memq-v2] gateway_start sidecar_unhealthy");

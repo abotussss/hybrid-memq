@@ -1,0 +1,141 @@
+{
+  "ok": true,
+  "base": "http://127.0.0.1:7781",
+  "model": "gpt-oss:20b",
+  "session": "brain_required_proof_1772636342",
+  "assertions": {
+    "brain_mode_required": true,
+    "global_ingest_plan_ge_target": true,
+    "global_recall_plan_ge_target": true,
+    "global_merge_plan_ge_target": true,
+    "trace_has_model": true,
+    "trace_has_ps_seen": true,
+    "ollama_ps_has_model": true,
+    "fail_closed_returns_503": true
+  },
+  "notes": [],
+  "brain_mode": "required",
+  "stats_before": {
+    "ok": true,
+    "total_calls": 50,
+    "ok_calls": 50,
+    "err_calls": 0,
+    "ops": {
+      "ingest_plan": {
+        "total": 45,
+        "ok": 45,
+        "err": 0
+      },
+      "recall_plan": {
+        "total": 3,
+        "ok": 3,
+        "err": 0
+      },
+      "merge_plan": {
+        "total": 2,
+        "ok": 2,
+        "err": 0
+      }
+    },
+    "last_ok_ts": 1772636316,
+    "last_trace_id": "b7965b94-2a9b-46a6-9357-2177cd8d1a52",
+    "enabled": true,
+    "required": true,
+    "mode": "required",
+    "provider": "ollama",
+    "model": "gpt-oss:20b",
+    "last_error": "",
+    "last_error_type": "",
+    "last_error_ts": 0,
+    "last_ps_seen_model": "gpt-oss:20b",
+    "last_ps_seen_ts": 1772636316,
+    "trace_path": "/Users/hiroyukimiyake/Documents/New project/.memq/brain_trace.jsonl"
+  },
+  "stats_after": {
+    "ok": true,
+    "total_calls": 50,
+    "ok_calls": 50,
+    "err_calls": 0,
+    "ops": {
+      "ingest_plan": {
+        "total": 45,
+        "ok": 45,
+        "err": 0
+      },
+      "recall_plan": {
+        "total": 3,
+        "ok": 3,
+        "err": 0
+      },
+      "merge_plan": {
+        "total": 2,
+        "ok": 2,
+        "err": 0
+      }
+    },
+    "last_ok_ts": 1772636316,
+    "last_trace_id": "b7965b94-2a9b-46a6-9357-2177cd8d1a52",
+    "enabled": true,
+    "required": true,
+    "mode": "required",
+    "provider": "ollama",
+    "model": "gpt-oss:20b",
+    "last_error": "",
+    "last_error_type": "",
+    "last_error_ts": 0,
+    "last_ps_seen_model": "gpt-oss:20b",
+    "last_ps_seen_ts": 1772636316,
+    "trace_path": "/Users/hiroyukimiyake/Documents/New project/.memq/brain_trace.jsonl"
+  },
+  "delta": {
+    "ingest_plan": 0,
+    "recall_plan": 0,
+    "merge_plan": 0
+  },
+  "targets": {
+    "ingest": 10,
+    "recall": 10,
+    "merge": 1
+  },
+  "needed": {
+    "ingest": 0,
+    "recall": 0,
+    "merge": 0
+  },
+  "idle_skipped": true,
+  "global_before": {
+    "ingest_plan": 102,
+    "ingest_plan_apply": 102,
+    "recall_plan": 28,
+    "merge_plan": 17,
+    "merge_plan_apply": 17
+  },
+  "global_after": {
+    "ingest_plan": 102,
+    "ingest_plan_apply": 102,
+    "recall_plan": 28,
+    "merge_plan": 17,
+    "merge_plan_apply": 17
+  },
+  "trace_session_count": 0,
+  "trace_model_count": 0,
+  "trace_ps_seen_count": 0,
+  "ollama_ps_models_n": 1,
+  "fail_test": {
+    "ok": true,
+    "code": 503,
+    "body": "{\"ok\":false,\"code\":\"brain_unavailable\",\"op\":\"recall_plan\",\"session_key\":\"fail_closed_test\",\"provider\":\"ollama\",\"model\":\"gpt-oss:20b\",\"trace_id\":\"f1c6ad3c-3860-430a-94e1-7f27d1522fa7\",\"err_type\":\"BrainUnavailable\",\"err_msg\":\"brain_http_error:ConnectError\"}",
+    "error": "",
+    "resp": {
+      "ok": false,
+      "code": "brain_unavailable",
+      "op": "recall_plan",
+      "session_key": "fail_closed_test",
+      "provider": "ollama",
+      "model": "gpt-oss:20b",
+      "trace_id": "f1c6ad3c-3860-430a-94e1-7f27d1522fa7",
+      "err_type": "BrainUnavailable",
+      "err_msg": "brain_http_error:ConnectError"
+    }
+  }
+}

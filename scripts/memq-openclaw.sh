@@ -120,6 +120,7 @@ import json
 cfg = {
   "memq.sidecarUrl": "http://127.0.0.1:7781",
   "memq.workspaceRoot": "__ROOT__",
+  "memq.brain.mode": "best_effort",
   "memq.budgets.memctxTokens": 120,
   "memq.budgets.rulesTokens": 80,
   "memq.budgets.styleTokens": 120,
@@ -189,8 +190,10 @@ PY
 
 load_sidecar_env() {
   if [[ -f "$SIDECAR_ENV" ]]; then
-    # shellcheck disable=SC1090
-    source "$SIDECAR_ENV"
+    while IFS='=' read -r k v; do
+      [[ -z "${k:-}" ]] && continue
+      export "$k=$v"
+    done < "$SIDECAR_ENV"
   fi
 }
 
@@ -224,6 +227,14 @@ cmd_start_sidecar() {
   nohup env \
     MEMQ_ROOT="$ROOT_DIR" \
     MEMQ_DB_PATH=".memq/sidecar.sqlite3" \
+    MEMQ_BRAIN_ENABLED="${MEMQ_BRAIN_ENABLED:-1}" \
+    MEMQ_BRAIN_MODE="${MEMQ_BRAIN_MODE:-best_effort}" \
+    MEMQ_BRAIN_PROVIDER="${MEMQ_BRAIN_PROVIDER:-ollama}" \
+    MEMQ_BRAIN_BASE_URL="${MEMQ_BRAIN_BASE_URL:-http://127.0.0.1:11434}" \
+    MEMQ_BRAIN_MODEL="${MEMQ_BRAIN_MODEL:-gpt-oss:20b}" \
+    MEMQ_BRAIN_KEEP_ALIVE="${MEMQ_BRAIN_KEEP_ALIVE:-30m}" \
+    MEMQ_BRAIN_TIMEOUT_MS="${MEMQ_BRAIN_TIMEOUT_MS:-240000}" \
+    MEMQ_BRAIN_MAX_TOKENS="${MEMQ_BRAIN_MAX_TOKENS:-1024}" \
     MEMQ_LLM_AUDIT_ENABLED="${MEMQ_LLM_AUDIT_ENABLED:-0}" \
     MEMQ_LLM_AUDIT_URL="${MEMQ_LLM_AUDIT_URL:-https://api.openai.com/v1/chat/completions}" \
     MEMQ_LLM_AUDIT_MODEL="${MEMQ_LLM_AUDIT_MODEL:-gpt-5.2}" \
@@ -277,6 +288,7 @@ cmd_status() {
   echo "memory_slot: $(openclaw config get plugins.slots.memory 2>/dev/null || echo '<unset>')"
   echo "plugin_config: $(openclaw config get "plugins.entries.$PLUGIN_ID.config" 2>/dev/null || echo '{}')"
   echo "sidecar_health: $(curl -sS http://127.0.0.1:7781/health 2>/dev/null || echo '{"ok":false}')"
+  echo "brain_stats: $(curl -sS http://127.0.0.1:7781/brain/stats 2>/dev/null || echo '{"ok":false}')"
 }
 
 cmd_audit_on() {
@@ -297,6 +309,14 @@ cmd_audit_on() {
   {
     echo "MEMQ_ROOT=$ROOT_DIR"
     echo "MEMQ_DB_PATH=.memq/sidecar.sqlite3"
+    echo "MEMQ_BRAIN_ENABLED=${MEMQ_BRAIN_ENABLED:-1}"
+    echo "MEMQ_BRAIN_MODE=${MEMQ_BRAIN_MODE:-best_effort}"
+    echo "MEMQ_BRAIN_PROVIDER=${MEMQ_BRAIN_PROVIDER:-ollama}"
+    echo "MEMQ_BRAIN_BASE_URL=${MEMQ_BRAIN_BASE_URL:-http://127.0.0.1:11434}"
+    echo "MEMQ_BRAIN_MODEL=${MEMQ_BRAIN_MODEL:-gpt-oss:20b}"
+    echo "MEMQ_BRAIN_KEEP_ALIVE=${MEMQ_BRAIN_KEEP_ALIVE:-30m}"
+    echo "MEMQ_BRAIN_TIMEOUT_MS=${MEMQ_BRAIN_TIMEOUT_MS:-240000}"
+    echo "MEMQ_BRAIN_MAX_TOKENS=${MEMQ_BRAIN_MAX_TOKENS:-1024}"
     echo "MEMQ_LLM_AUDIT_ENABLED=1"
     echo "MEMQ_LLM_AUDIT_URL=$url"
     echo "MEMQ_LLM_AUDIT_MODEL=$model"
@@ -313,6 +333,14 @@ cmd_audit_off() {
   {
     echo "MEMQ_ROOT=$ROOT_DIR"
     echo "MEMQ_DB_PATH=.memq/sidecar.sqlite3"
+    echo "MEMQ_BRAIN_ENABLED=${MEMQ_BRAIN_ENABLED:-1}"
+    echo "MEMQ_BRAIN_MODE=${MEMQ_BRAIN_MODE:-best_effort}"
+    echo "MEMQ_BRAIN_PROVIDER=${MEMQ_BRAIN_PROVIDER:-ollama}"
+    echo "MEMQ_BRAIN_BASE_URL=${MEMQ_BRAIN_BASE_URL:-http://127.0.0.1:11434}"
+    echo "MEMQ_BRAIN_MODEL=${MEMQ_BRAIN_MODEL:-gpt-oss:20b}"
+    echo "MEMQ_BRAIN_KEEP_ALIVE=${MEMQ_BRAIN_KEEP_ALIVE:-30m}"
+    echo "MEMQ_BRAIN_TIMEOUT_MS=${MEMQ_BRAIN_TIMEOUT_MS:-240000}"
+    echo "MEMQ_BRAIN_MAX_TOKENS=${MEMQ_BRAIN_MAX_TOKENS:-1024}"
     echo "MEMQ_LLM_AUDIT_ENABLED=0"
     echo "MEMQ_LLM_AUDIT_URL=https://api.openai.com/v1/chat/completions"
     echo "MEMQ_LLM_AUDIT_MODEL=gpt-5.2"
@@ -365,6 +393,66 @@ print("memstyle.enabled:", obj.get("memq.style.enabled", "<unset>"))
 PY
 }
 
+cmd_brain_required_on() {
+  set_plugin_cfg_key "memq.brain.mode" "\"required\""
+  load_sidecar_env
+  {
+    echo "MEMQ_ROOT=$ROOT_DIR"
+    echo "MEMQ_DB_PATH=.memq/sidecar.sqlite3"
+    echo "MEMQ_BRAIN_ENABLED=1"
+    echo "MEMQ_BRAIN_MODE=required"
+    echo "MEMQ_BRAIN_PROVIDER=${MEMQ_BRAIN_PROVIDER:-ollama}"
+    echo "MEMQ_BRAIN_BASE_URL=${MEMQ_BRAIN_BASE_URL:-http://127.0.0.1:11434}"
+    echo "MEMQ_BRAIN_MODEL=${MEMQ_BRAIN_MODEL:-gpt-oss:20b}"
+    echo "MEMQ_BRAIN_KEEP_ALIVE=${MEMQ_BRAIN_KEEP_ALIVE:-30m}"
+    echo "MEMQ_BRAIN_TIMEOUT_MS=${MEMQ_BRAIN_TIMEOUT_MS:-240000}"
+    echo "MEMQ_BRAIN_MAX_TOKENS=${MEMQ_BRAIN_MAX_TOKENS:-1024}"
+    echo "MEMQ_LLM_AUDIT_ENABLED=${MEMQ_LLM_AUDIT_ENABLED:-0}"
+    echo "MEMQ_LLM_AUDIT_URL=${MEMQ_LLM_AUDIT_URL:-https://api.openai.com/v1/chat/completions}"
+    echo "MEMQ_LLM_AUDIT_MODEL=${MEMQ_LLM_AUDIT_MODEL:-gpt-5.2}"
+    echo "MEMQ_LLM_AUDIT_TIMEOUT_SEC=${MEMQ_LLM_AUDIT_TIMEOUT_SEC:-20}"
+    echo "MEMQ_LLM_AUDIT_API_KEY=${MEMQ_LLM_AUDIT_API_KEY:-}"
+  } > "$SIDECAR_ENV"
+  cmd_restart_sidecar
+  echo "brain required mode enabled"
+}
+
+cmd_brain_required_off() {
+  set_plugin_cfg_key "memq.brain.mode" "\"best_effort\""
+  load_sidecar_env
+  {
+    echo "MEMQ_ROOT=$ROOT_DIR"
+    echo "MEMQ_DB_PATH=.memq/sidecar.sqlite3"
+    echo "MEMQ_BRAIN_ENABLED=1"
+    echo "MEMQ_BRAIN_MODE=best_effort"
+    echo "MEMQ_BRAIN_PROVIDER=${MEMQ_BRAIN_PROVIDER:-ollama}"
+    echo "MEMQ_BRAIN_BASE_URL=${MEMQ_BRAIN_BASE_URL:-http://127.0.0.1:11434}"
+    echo "MEMQ_BRAIN_MODEL=${MEMQ_BRAIN_MODEL:-gpt-oss:20b}"
+    echo "MEMQ_BRAIN_KEEP_ALIVE=${MEMQ_BRAIN_KEEP_ALIVE:-30m}"
+    echo "MEMQ_BRAIN_TIMEOUT_MS=${MEMQ_BRAIN_TIMEOUT_MS:-240000}"
+    echo "MEMQ_BRAIN_MAX_TOKENS=${MEMQ_BRAIN_MAX_TOKENS:-1024}"
+    echo "MEMQ_LLM_AUDIT_ENABLED=${MEMQ_LLM_AUDIT_ENABLED:-0}"
+    echo "MEMQ_LLM_AUDIT_URL=${MEMQ_LLM_AUDIT_URL:-https://api.openai.com/v1/chat/completions}"
+    echo "MEMQ_LLM_AUDIT_MODEL=${MEMQ_LLM_AUDIT_MODEL:-gpt-5.2}"
+    echo "MEMQ_LLM_AUDIT_TIMEOUT_SEC=${MEMQ_LLM_AUDIT_TIMEOUT_SEC:-20}"
+    echo "MEMQ_LLM_AUDIT_API_KEY=${MEMQ_LLM_AUDIT_API_KEY:-}"
+  } > "$SIDECAR_ENV"
+  cmd_restart_sidecar
+  echo "brain required mode disabled (best_effort)"
+}
+
+cmd_brain_proof() {
+  echo "brain stats:"
+  curl -sS http://127.0.0.1:7781/brain/stats || true
+  echo
+  echo "brain trace recent:"
+  curl -sS "http://127.0.0.1:7781/brain/trace/recent?n=10" || true
+  echo
+  echo "ollama /api/ps:"
+  curl -sS http://127.0.0.1:11434/api/ps || true
+  echo
+}
+
 cmd_setup() {
   print_banner
   cmd_install
@@ -402,6 +490,9 @@ commands:
   memstyle-on         enable MEMSTYLE injection
   memstyle-off        disable MEMSTYLE injection
   memstyle-status     print MEMSTYLE enabled status
+  brain-required-on   force brain required mode (fail-closed)
+  brain-required-off  return to best_effort mode
+  brain-proof         print /brain/stats + /brain/trace + ollama /api/ps
 EOF
 }
 
@@ -424,5 +515,8 @@ case "${1:-}" in
   memstyle-on) cmd_memstyle_on ;;
   memstyle-off) cmd_memstyle_off ;;
   memstyle-status) cmd_memstyle_status ;;
+  brain-required-on) cmd_brain_required_on ;;
+  brain-required-off) cmd_brain_required_off ;;
+  brain-proof) cmd_brain_proof ;;
   *) usage; exit 1 ;;
 esac

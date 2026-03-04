@@ -238,6 +238,14 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
       rules: Math.max(24, getCfg(api, "memq.budgets.rulesTokens", defaults["memq.budgets.rulesTokens"])),
       style: Math.min(styleMax, styleBudget),
     };
+    const brainMode = String(getCfg(api, "memq.brain.mode", defaults["memq.brain.mode"]) || "best_effort").toLowerCase();
+    const brainProvider = String(getCfg(api, "memq.brain.provider", defaults["memq.brain.provider"]));
+    const brainBaseUrl = String(getCfg(api, "memq.brain.baseUrl", defaults["memq.brain.baseUrl"]));
+    const brainModel = String(getCfg(api, "memq.brain.model", defaults["memq.brain.model"]));
+    const brainKeepAlive = String(getCfg(api, "memq.brain.keepAlive", defaults["memq.brain.keepAlive"]));
+    const brainTimeoutMs = Number(getCfg(api, "memq.brain.timeoutMs", defaults["memq.brain.timeoutMs"]));
+    const brainMaxTokens = Number(getCfg(api, "memq.brain.maxTokens", defaults["memq.brain.maxTokens"]));
+    const brainRequired = brainMode === "required";
 
     const recentMax = Math.max(800, getCfg(api, "memq.recent.maxTokens", defaults["memq.recent.maxTokens"]));
     const minKeep = Math.max(2, getCfg(api, "memq.recent.minKeepMessages", defaults["memq.recent.minKeepMessages"]));
@@ -267,7 +275,15 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
     const surfaceThreshold = Number(getCfg(api, "memq.retrieval.surfaceThreshold", defaults["memq.retrieval.surfaceThreshold"]));
     const deepEnabled = Boolean(getCfg(api, "memq.retrieval.deepEnabled", defaults["memq.retrieval.deepEnabled"]));
 
-    const ensured = await sidecar.ensureUp(workspaceRoot);
+    const ensured = await sidecar.ensureUp(workspaceRoot, {
+      brainMode,
+      brainProvider,
+      brainBaseUrl,
+      brainModel,
+      brainKeepAlive,
+      brainTimeoutMs,
+      brainMaxTokens,
+    });
     if (!ensured) {
       logInfo(api, `[memq-v2] before_prompt_build sidecar_unavailable session=${sessionKey}`);
     } else {
@@ -370,7 +386,16 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
       writeStyleCache(workspaceRoot, sessionKey, memstyle);
       surfaceHit = Boolean(q.meta?.surfaceHit);
       deepCalled = Boolean(q.meta?.deepCalled);
+      const traceId = String((q as any)?.traceId || (q as any)?.meta?.traceId || (q as any)?.meta?.debug?.trace_id || "");
+      const psSeen = Number((q as any)?.meta?.debug?.ps_seen || 0) > 0 ? 1 : 0;
+      logInfo(api, `[memq][brain-proof] session=${sessionKey} op=recall_plan trace_id=${traceId} model=gpt-oss:20b ps_seen=${psSeen} latency_ms=${Date.now() - t0}`);
     } catch (err) {
+      const em = String((err as Error)?.message || err || "unknown_error").replace(/\s+/g, " ").slice(0, 280);
+      logInfo(
+        api,
+        `[memq][brain-proof] session=${sessionKey} op=recall_plan trace_id= err=1 model=gpt-oss:20b ps_seen=0 error=${em}`
+      );
+      if (brainRequired) throw err;
       const degradedEnabled = getCfg(api, "memq.degraded.enabled", defaults["memq.degraded.enabled"]);
       if (!degradedEnabled) throw err;
       const d = buildDegradedBlocks(prompt, budgets);

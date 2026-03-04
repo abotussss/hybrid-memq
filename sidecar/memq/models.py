@@ -32,6 +32,7 @@ class MemctxMeta(BaseModel):
     deepCalled: bool
     usedMemoryIds: List[str] = Field(default_factory=list)
     debug: Dict[str, Any] = Field(default_factory=dict)
+    traceId: Optional[str] = None
 
 
 class MemctxQueryResponse(BaseModel):
@@ -40,6 +41,7 @@ class MemctxQueryResponse(BaseModel):
     memstyle: str = ""
     memctx: str = ""
     meta: MemctxMeta
+    traceId: Optional[str] = None
 
 
 class SummarizeRequest(BaseModel):
@@ -66,6 +68,7 @@ class IngestTurnRequest(BaseModel):
 class IngestTurnResponse(BaseModel):
     ok: bool = True
     wrote: Dict[str, int] = Field(default_factory=dict)
+    traceId: Optional[str] = None
 
 
 class IdleRunRequest(BaseModel):
@@ -77,6 +80,7 @@ class IdleRunResponse(BaseModel):
     ok: bool = True
     did: List[str] = Field(default_factory=list)
     stats: Dict[str, Any] = Field(default_factory=dict)
+    traceId: Optional[str] = None
 
 
 class IdleTickRequest(BaseModel):

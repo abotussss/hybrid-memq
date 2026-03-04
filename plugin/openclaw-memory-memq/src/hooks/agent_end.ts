@@ -79,9 +79,13 @@ export function createAgentEnd(api: any, sidecar: SidecarClient, rt: RuntimeStat
         ts: Math.floor(Date.now() / 1000),
         metadata: actionSummaries.length > 0 ? { actionSummaries } : undefined,
       };
-      await sidecar.ingestTurn(payload);
-      logInfo(api, `[memq-v2] agent_end session=${sessionKey} ingested=1`);
+      const res = await sidecar.ingestTurn(payload);
+      const traceId = String(res?.traceId || "");
+      const wrote = JSON.stringify(res?.wrote || {});
+      logInfo(api, `[memq-v2] agent_end session=${sessionKey} ingested=1 trace_id=${traceId} wrote=${wrote}`);
+      logInfo(api, `[memq][brain-proof] session=${sessionKey} op=ingest_plan trace_id=${traceId} model=gpt-oss:20b`);
     } catch (err) {
+      const em = String((err as Error)?.message || err || "unknown_error").replace(/\s+/g, " ").slice(0, 280);
       try {
         enqueueIngest(workspaceRoot, {
           sessionKey,
@@ -94,6 +98,7 @@ export function createAgentEnd(api: any, sidecar: SidecarClient, rt: RuntimeStat
         // best effort queue
       }
       logInfo(api, `[memq-v2] agent_end session=${sessionKey} ingest_failed=${(err as Error).message}`);
+      logInfo(api, `[memq][brain-proof] session=${sessionKey} op=ingest_plan trace_id= err=1 model=gpt-oss:20b error=${em}`);
     }
   };
 }
