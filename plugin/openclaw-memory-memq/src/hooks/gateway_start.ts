@@ -17,21 +17,18 @@ export function createGatewayStart(api: any, sidecar: SidecarClient) {
     );
     const brainRestartWaitMs = Number(getCfg(api, "memq.brain.restartWaitMs", defaults["memq.brain.restartWaitMs"]));
     logInfo(api, `[memq-v2] gateway_start workspace_root=${workspaceRoot}`);
-    let healthy = await sidecar.health();
-    if (!healthy) {
-      healthy = await sidecar.ensureUp(workspaceRoot, {
-        brainMode,
-        brainProvider,
-        brainBaseUrl,
-        brainModel,
-        brainKeepAlive,
-        brainTimeoutMs,
-        brainMaxTokens,
-        brainAutoRestart,
-        brainRestartCooldownSec,
-        brainRestartWaitMs,
-      });
-    }
+    const healthy = await sidecar.ensureUp(workspaceRoot, {
+      brainMode,
+      brainProvider,
+      brainBaseUrl,
+      brainModel,
+      brainKeepAlive,
+      brainTimeoutMs,
+      brainMaxTokens,
+      brainAutoRestart,
+      brainRestartCooldownSec,
+      brainRestartWaitMs,
+    });
     if (!healthy) {
       logInfo(api, "[memq-v2] gateway_start sidecar_unhealthy");
       return;

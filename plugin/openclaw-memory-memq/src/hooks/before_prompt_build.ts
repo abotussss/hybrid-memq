@@ -294,6 +294,9 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
     });
     if (!ensured) {
       logInfo(api, `[memq-v2] before_prompt_build sidecar_unavailable session=${sessionKey}`);
+      if (brainRequired) {
+        throw new Error("memq_required_sidecar_unavailable_or_mismatched");
+      }
     } else {
       try {
         const q = await flushIngestQueue(workspaceRoot, sidecar, 64);

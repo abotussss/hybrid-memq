@@ -466,6 +466,11 @@ cmd_brain_required_off() {
 }
 
 cmd_brain_proof() {
+  if ! curl -fsS http://127.0.0.1:7781/health >/dev/null 2>&1; then
+    echo "sidecar not healthy; starting..."
+    cmd_start_sidecar || true
+    sleep 1
+  fi
   echo "brain ensure:"
   curl -sS -X POST "http://127.0.0.1:7781/brain/ensure?sessionKey=brain-proof" || true
   echo

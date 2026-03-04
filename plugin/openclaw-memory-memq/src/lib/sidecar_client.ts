@@ -28,6 +28,14 @@ export class SidecarClient {
     return this.parseTimeout(process.env.MEMQ_BRAIN_TIMEOUT_MS, 60000);
   }
 
+  private async healthInfo(timeoutMs = 1500): Promise<any | null> {
+    try {
+      return await this.req<any>("/health", undefined, "GET", timeoutMs);
+    } catch {
+      return null;
+    }
+  }
+
   private async req<T>(path: string, body?: unknown, method = "POST", timeoutMs = 6000): Promise<T> {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -55,12 +63,8 @@ export class SidecarClient {
   }
 
   async health(): Promise<boolean> {
-    try {
-      const j = await this.req<{ ok?: boolean }>("/health", undefined, "GET", 1500);
-      return Boolean(j.ok);
-    } catch {
-      return false;
-    }
+    const j = await this.healthInfo(1500);
+    return Boolean(j?.ok);
   }
 
   async ensureUp(
@@ -78,12 +82,30 @@ export class SidecarClient {
       brainRestartWaitMs?: string | number;
     }
   ): Promise<boolean> {
+    const expectedBrainMode = this.normalizeBrainMode(opts?.brainMode || process.env.MEMQ_BRAIN_MODE);
+    const expectedBrainProvider = String(opts?.brainProvider || process.env.MEMQ_BRAIN_PROVIDER || "ollama")
+      .trim()
+      .toLowerCase();
+    const expectedBrainModel = String(opts?.brainModel || process.env.MEMQ_BRAIN_MODEL || "gpt-oss:20b").trim();
     const configuredTimeout = this.parseTimeout(
       opts?.brainTimeoutMs !== undefined ? String(opts.brainTimeoutMs) : process.env.MEMQ_BRAIN_TIMEOUT_MS,
       60000
     );
     this.runtimeBrainTimeoutMs = configuredTimeout;
-    if (await this.health()) return true;
+
+    const healthyInfo = await this.healthInfo(1500);
+    if (healthyInfo?.ok) {
+      if (expectedBrainMode !== "required") return true;
+      const cfg = (healthyInfo as any)?.config || {};
+      const runningMode = String(cfg?.brainMode || "").trim().toLowerCase();
+      const runningProvider = String(cfg?.brainProvider || "").trim().toLowerCase();
+      const runningModel = String(cfg?.brainModel || "").trim();
+      const modeOk = runningMode === "required";
+      const providerOk = !expectedBrainProvider || !runningProvider || runningProvider === expectedBrainProvider;
+      const modelOk = !expectedBrainModel || !runningModel || runningModel === expectedBrainModel;
+      return modeOk && providerOk && modelOk;
+    }
+
     const root = String(workspaceRoot || "").trim();
     if (!root) return false;
     const app = join(root, "sidecar", "minisidecar.py");
@@ -91,7 +113,7 @@ export class SidecarClient {
     const venvPy = join(root, "sidecar", ".venv", "bin", "python");
     const py = existsSync(venvPy) ? venvPy : "python3";
     try {
-      const brainMode = this.normalizeBrainMode(opts?.brainMode || process.env.MEMQ_BRAIN_MODE);
+      const brainMode = expectedBrainMode;
       const env = {
         ...process.env,
         MEMQ_ROOT: root,
@@ -127,7 +149,18 @@ export class SidecarClient {
 
     for (let i = 0; i < 12; i += 1) {
       await new Promise((r) => setTimeout(r, 300));
-      if (await this.health()) return true;
+      const h = await this.healthInfo(1500);
+      if (h?.ok) {
+        if (expectedBrainMode !== "required") return true;
+        const cfg = (h as any)?.config || {};
+        const runningMode = String(cfg?.brainMode || "").trim().toLowerCase();
+        const runningProvider = String(cfg?.brainProvider || "").trim().toLowerCase();
+        const runningModel = String(cfg?.brainModel || "").trim();
+        const modeOk = runningMode === "required";
+        const providerOk = !expectedBrainProvider || !runningProvider || runningProvider === expectedBrainProvider;
+        const modelOk = !expectedBrainModel || !runningModel || runningModel === expectedBrainModel;
+        if (modeOk && providerOk && modelOk) return true;
+      }
     }
     return false;
   }

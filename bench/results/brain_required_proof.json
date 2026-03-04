@@ -2,12 +2,15 @@
   "ok": true,
   "base": "http://127.0.0.1:7781",
   "model": "gpt-oss:20b",
-  "session": "brain_required_proof_1772638848",
+  "session": "brain_required_proof_1772668026",
   "assertions": {
     "brain_mode_required": true,
     "global_ingest_plan_ge_target": true,
     "global_recall_plan_ge_target": true,
     "global_merge_plan_ge_target": true,
+    "delta_ingest_ge_min": true,
+    "delta_recall_ge_min": true,
+    "delta_merge_ge_min": true,
     "trace_has_model": true,
     "trace_has_ps_seen": true,
     "ollama_ps_has_model": true,
@@ -36,8 +39,8 @@
   },
   "stats_after": {
     "ok": true,
-    "total_calls": 2,
-    "ok_calls": 2,
+    "total_calls": 3,
+    "ok_calls": 3,
     "err_calls": 0,
     "ops": {
       "ingest_plan": {
@@ -49,10 +52,15 @@
         "total": 1,
         "ok": 1,
         "err": 0
+      },
+      "merge_plan": {
+        "total": 1,
+        "ok": 1,
+        "err": 0
       }
     },
-    "last_ok_ts": 1772638860,
-    "last_trace_id": "1ea2ede3-dbf9-4ef3-8524-a48fdb8ca441",
+    "last_ok_ts": 1772668060,
+    "last_trace_id": "876f1121-17d8-4c19-9e61-c8b84164cb53",
     "enabled": true,
     "required": true,
     "mode": "required",
@@ -62,44 +70,49 @@
     "last_error_type": "",
     "last_error_ts": 0,
     "last_ps_seen_model": "gpt-oss:20b",
-    "last_ps_seen_ts": 1772638860,
+    "last_ps_seen_ts": 1772668060,
     "trace_path": "/Users/hiroyukimiyake/Documents/New project/.memq/brain_trace.jsonl"
   },
   "delta": {
     "ingest_plan": 1,
     "recall_plan": 1,
-    "merge_plan": 0
+    "merge_plan": 1
   },
   "targets": {
-    "ingest": 26,
-    "recall": 26,
-    "merge": 4
+    "ingest": 10,
+    "recall": 10,
+    "merge": 1
+  },
+  "min_delta": {
+    "ingest": 1,
+    "recall": 1,
+    "merge": 1
   },
   "needed": {
     "ingest": 1,
     "recall": 1,
-    "merge": 0
+    "merge": 1
   },
-  "idle_skipped": true,
+  "idle_skipped": false,
   "global_before": {
-    "runtime_ensure": 56,
-    "ingest_plan": 25,
-    "ingest_plan_apply": 25,
-    "recall_plan": 25,
-    "merge_plan": 4,
-    "merge_plan_apply": 4
+    "runtime_ensure": 145,
+    "ingest_plan": 67,
+    "ingest_plan_apply": 67,
+    "recall_plan": 66,
+    "merge_plan": 319,
+    "merge_plan_apply": 319
   },
   "global_after": {
-    "runtime_ensure": 58,
-    "ingest_plan": 26,
-    "ingest_plan_apply": 26,
-    "recall_plan": 26,
-    "merge_plan": 4,
-    "merge_plan_apply": 4
+    "runtime_ensure": 148,
+    "ingest_plan": 68,
+    "ingest_plan_apply": 68,
+    "recall_plan": 67,
+    "merge_plan": 320,
+    "merge_plan_apply": 320
   },
-  "trace_session_count": 5,
-  "trace_model_count": 5,
-  "trace_ps_seen_count": 5,
+  "trace_session_count": 8,
+  "trace_model_count": 8,
+  "trace_ps_seen_count": 8,
   "ollama_ps_models_n": 1,
   "fail_test": {
     "ok": true,

@@ -95,6 +95,9 @@ def main() -> int:
     target_ingest = int(os.getenv("MEMQ_PROOF_TARGET_INGEST", "10"))
     target_recall = int(os.getenv("MEMQ_PROOF_TARGET_RECALL", "10"))
     target_merge = int(os.getenv("MEMQ_PROOF_TARGET_MERGE", "1"))
+    min_delta_ingest = max(0, int(os.getenv("MEMQ_PROOF_MIN_DELTA_INGEST", "1")))
+    min_delta_recall = max(0, int(os.getenv("MEMQ_PROOF_MIN_DELTA_RECALL", "1")))
+    min_delta_merge = max(0, int(os.getenv("MEMQ_PROOF_MIN_DELTA_MERGE", "1")))
 
     result: Dict[str, Any] = {
         "ok": False,
@@ -134,9 +137,9 @@ def main() -> int:
         ("呼び方はヒロで固定して。", "呼称を維持する。"),
     ]
 
-    ingest_needed = max(0, target_ingest - int(global_before.get("ingest_plan", 0)))
-    recall_needed = max(0, target_recall - int(global_before.get("recall_plan", 0)))
-    merge_needed = max(0, target_merge - int(global_before.get("merge_plan", 0)))
+    ingest_needed = max(min_delta_ingest, max(0, target_ingest - int(global_before.get("ingest_plan", 0))))
+    recall_needed = max(min_delta_recall, max(0, target_recall - int(global_before.get("recall_plan", 0))))
+    merge_needed = max(min_delta_merge, max(0, target_merge - int(global_before.get("merge_plan", 0))))
 
     for i in range(ingest_needed):
         u, a = ingest_prompts[i % len(ingest_prompts)]
@@ -301,6 +304,9 @@ def main() -> int:
         "global_ingest_plan_ge_target": int(global_after.get("ingest_plan", 0)) >= target_ingest,
         "global_recall_plan_ge_target": int(global_after.get("recall_plan", 0)) >= target_recall,
         "global_merge_plan_ge_target": int(global_after.get("merge_plan", 0)) >= target_merge,
+        "delta_ingest_ge_min": ingest_delta >= min_delta_ingest,
+        "delta_recall_ge_min": recall_delta >= min_delta_recall,
+        "delta_merge_ge_min": merge_delta >= min_delta_merge,
         "trace_has_model": (len(trace_with_model) >= 1) if trace_required else True,
         "trace_has_ps_seen": (len(trace_with_ps) >= 1) if trace_required else True,
         "ollama_ps_has_model": model_seen_in_ps,
@@ -320,6 +326,11 @@ def main() -> int:
                 "ingest": target_ingest,
                 "recall": target_recall,
                 "merge": target_merge,
+            },
+            "min_delta": {
+                "ingest": min_delta_ingest,
+                "recall": min_delta_recall,
+                "merge": min_delta_merge,
             },
             "needed": {
                 "ingest": ingest_needed,
