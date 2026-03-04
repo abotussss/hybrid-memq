@@ -1,347 +1,64 @@
 {
-  "session": "runtime_required_1772638416",
-  "ts": 1772638416,
-  "required_mode_expected": true,
-  "model_expected": "gpt-oss:20b",
-  "ensure": {
-    "code": 200,
-    "ms": 44.9,
-    "obj": {
-      "ok": true,
-      "seen": true,
-      "trace_id": "74273d2e-20a0-424f-9a08-dc6d53d8db39",
-      "ps": {
-        "ok": true,
-        "seen": true,
-        "matched": {
-          "name": "gpt-oss:20b",
-          "model": "gpt-oss:20b",
-          "size": 14094668192,
-          "expires_at": "2026-03-05T01:17:47.706343+09:00"
-        },
-        "models_n": 1
-      }
-    }
-  },
-  "idle": {
-    "code": 200,
-    "ms": 13837.6,
-    "ok": true,
-    "obj": {
-      "ok": true,
-      "did": [
-        "decay",
-        "prune_expired_events",
-        "dedup_surface",
-        "dedup_surface_fuzzy",
-        "dedup_deep",
-        "dedup_deep_fuzzy",
-        "cleanup_noisy_memory",
-        "promote_structured_from_conv",
-        "promote_profile_facts",
-        "prune_invalid_profile_facts",
-        "backfill_fact_keys",
-        "backfill_fact_index",
-        "cleanup_stale_fact_index",
-        "profile_refresh",
-        "rule_override_prune",
-        "daily_digest_refresh",
-        "brain_merge_plan"
-      ],
-      "stats": {
-        "ephemeral_deleted": 0,
-        "expired_events_deleted": 0,
-        "dedup_surface_removed": 0,
-        "dedup_surface_fuzzy_removed": 0,
-        "dedup_deep_removed": 0,
-        "dedup_deep_fuzzy_removed": 0,
-        "removed_memory_items": 0,
-        "sanitized_conv_summaries": 0,
-        "cleanup_pattern_count": 23,
-        "cleanup_capped": 0,
-        "structured_promoted_from_conv": 28,
-        "profile_facts_promoted": 0,
-        "invalid_profile_facts_removed": 0,
-        "fact_keys_backfilled": 0,
-        "fact_index_backfilled": 37,
-        "fact_index_stale_removed": 14,
-        "profile_keys_updated": 4,
-        "stale_rule_overrides_disabled": 0,
-        "daily_digests_updated": 1,
-        "brain_merge": {
-          "merged": 0,
-          "pruned": 0,
-          "quarantined": 0
-        },
-        "brain_merge_trace_id": "fd920817-50ec-460c-88e4-8f332893968b"
-      },
-      "traceId": "fd920817-50ec-460c-88e4-8f332893968b"
-    }
-  },
-  "brain_stats": {
-    "code": 200,
-    "ms": 1.2,
-    "obj": {
-      "ok": true,
-      "total_calls": 11,
-      "ok_calls": 11,
-      "err_calls": 0,
-      "ops": {
-        "ingest_plan": {
-          "total": 5,
-          "ok": 5,
-          "err": 0
-        },
-        "recall_plan": {
-          "total": 5,
-          "ok": 5,
-          "err": 0
-        },
-        "merge_plan": {
-          "total": 1,
-          "ok": 1,
-          "err": 0
-        }
-      },
-      "last_ok_ts": 1772638489,
-      "last_trace_id": "fd920817-50ec-460c-88e4-8f332893968b",
-      "enabled": true,
-      "required": true,
-      "mode": "required",
-      "provider": "ollama",
-      "model": "gpt-oss:20b",
-      "last_error": "",
-      "last_error_type": "",
-      "last_error_ts": 0,
-      "last_ps_seen_model": "gpt-oss:20b",
-      "last_ps_seen_ts": 1772638489,
-      "trace_path": "/Users/hiroyukimiyake/Documents/New project/.memq/brain_trace.jsonl"
-    }
-  },
-  "trace_recent": {
-    "code": 200,
-    "ms": 2.4,
-    "rows_for_session": 29
-  },
-  "trace_ops": {
-    "runtime_ensure": 12,
-    "ingest_plan": 5,
-    "ingest_plan_apply": 5,
-    "recall_plan": 5,
-    "merge_plan": 1,
-    "merge_plan_apply": 1
-  },
-  "trace_sample": [
-    {
-      "ts": 1772638416,
-      "trace_id": "74273d2e-20a0-424f-9a08-dc6d53d8db39",
-      "session_key": "runtime_required_1772638416",
-      "op": "runtime_ensure",
-      "provider": "ollama",
-      "model": "gpt-oss:20b",
-      "ok": true,
-      "latency_ms": 0,
-      "prompt_sha256": "",
-      "schema_version": "memq_brain_v1",
-      "ps_snapshot": {
-        "ok": true,
-        "seen": true,
-        "matched": {
-          "name": "gpt-oss:20b",
-          "model": "gpt-oss:20b",
-          "size": 14094668192,
-          "expires_at": "2026-03-05T01:17:47.706343+09:00"
-        },
-        "models_n": 1
-      }
-    },
-    {
-      "ts": 1772638416,
-      "trace_id": "b198a565-560e-485f-9bc5-149a3c1cd324",
-      "session_key": "runtime_required_1772638416",
-      "op": "runtime_ensure",
-      "provider": "ollama",
-      "model": "gpt-oss:20b",
-      "ok": true,
-      "latency_ms": 0,
-      "prompt_sha256": "",
-      "schema_version": "memq_brain_v1",
-      "ps_snapshot": {
-        "ok": true,
-        "seen": true,
-        "matched": {
-          "name": "gpt-oss:20b",
-          "model": "gpt-oss:20b",
-          "size": 14094668192,
-          "expires_at": "2026-03-05T01:17:47.706343+09:00"
-        },
-        "models_n": 1
-      }
-    },
-    {
-      "ts": 1772638423,
-      "trace_id": "f8f5fff2-e29a-4907-960b-99df92065b24",
-      "session_key": "runtime_required_1772638416",
-      "op": "ingest_plan",
-      "provider": "ollama",
-      "model": "gpt-oss:20b",
-      "ok": true,
-      "latency_ms": 7049,
-      "prompt_sha256": "f7b046d6e81a91e8a240fcc4acbc11b83b205ec218af2fc66bde88a15bd35fa9",
-      "schema_version": "memq_brain_v1",
-      "ollama_response_stats": {
-        "prompt_eval_count": 380,
-        "eval_count": 192,
-        "total_duration": 7032773834,
-        "load_duration": 166628792,
-        "eval_duration": 5585831874
-      },
-      "ps_snapshot": {
-        "ok": true,
-        "seen": true,
-        "matched": {
-          "name": "gpt-oss:20b",
-          "model": "gpt-oss:20b",
-          "size": 14094668192,
-          "expires_at": "2026-03-05T01:18:43.122917+09:00"
-        },
-        "models_n": 1
-      }
-    },
-    {
-      "ts": 1772638423,
-      "trace_id": "f8f5fff2-e29a-4907-960b-99df92065b24",
-      "session_key": "runtime_required_1772638416",
-      "op": "ingest_plan_apply",
-      "provider": "ollama",
-      "model": "gpt-oss:20b",
-      "ok": true,
-      "latency_ms": 0,
-      "prompt_sha256": "",
-      "schema_version": "memq_brain_v1",
-      "apply_summary": {
-        "surface": 0,
-        "deep": 0,
-        "ephemeral": 0,
-        "quarantined": 0,
-        "events": 2
-      },
-      "ps_snapshot": {
-        "ok": true,
-        "seen": true,
-        "matched": {
-          "model": "gpt-oss:20b"
-        }
-      }
-    },
-    {
-      "ts": 1772638423,
-      "trace_id": "0710bed3-62b8-484d-83f6-72cdc3bae809",
-      "session_key": "runtime_required_1772638416",
-      "op": "runtime_ensure",
-      "provider": "ollama",
-      "model": "gpt-oss:20b",
-      "ok": true,
-      "latency_ms": 0,
-      "prompt_sha256": "",
-      "schema_version": "memq_brain_v1",
-      "ps_snapshot": {
-        "ok": true,
-        "seen": true,
-        "matched": {
-          "name": "gpt-oss:20b",
-          "model": "gpt-oss:20b",
-          "size": 14094668192,
-          "expires_at": "2026-03-05T01:18:43.122917+09:00"
-        },
-        "models_n": 1
-      }
-    },
-    {
-      "ts": 1772638429,
-      "trace_id": "892057b3-370c-446b-a2e5-738f465b0bcd",
-      "session_key": "runtime_required_1772638416",
-      "op": "ingest_plan",
-      "provider": "ollama",
-      "model": "gpt-oss:20b",
-      "ok": true,
-      "latency_ms": 6316,
-      "prompt_sha256": "94aa0ab503eaaaa8d2dfb12c96e84f8091f42f0d5fe56ee18fdc96ba68bf6547",
-      "schema_version": "memq_brain_v1",
-      "ollama_response_stats": {
-        "prompt_eval_count": 380,
-        "eval_count": 192,
-        "total_duration": 6299997666,
-        "load_duration": 150017666,
-        "eval_duration": 5565138204
-      },
-      "ps_snapshot": {
-        "ok": true,
-        "seen": true,
-        "matched": {
-          "name": "gpt-oss:20b",
-          "model": "gpt-oss:20b",
-          "size": 14094668192,
-          "expires_at": "2026-03-05T01:18:49.498952+09:00"
-        },
-        "models_n": 1
-      }
-    }
-  ],
-  "ollama_ps": {
-    "code": 200,
-    "ms": 0.5,
-    "seen_model": true,
-    "models_n": 1,
-    "models": [
-      {
-        "name": "gpt-oss:20b",
-        "model": "gpt-oss:20b",
-        "size": 14094668192,
-        "digest": "17052f91a42e97930aa6e28a6c6c06a983e6a58dbb00434885a0cf5313e376f7",
-        "details": {
-          "parent_model": "",
-          "format": "gguf",
-          "family": "gptoss",
-          "families": [
-            "gptoss"
-          ],
-          "parameter_size": "20.9B",
-          "quantization_level": "MXFP4"
-        },
-        "expires_at": "2026-03-05T01:19:49.628949+09:00",
-        "size_vram": 14094668192,
-        "context_length": 4096
-      }
-    ]
-  },
-  "latency_ms": {
-    "ingest_plan_path": {
-      "min": 6366.4,
-      "p50": 6394.9,
-      "p95": 6403.1,
-      "max": 7110.0,
-      "avg": 6529.2
-    },
-    "recall_plan_path": {
-      "min": 5335.8,
-      "p50": 5361.2,
-      "p95": 5367.2,
-      "max": 5673.1,
-      "avg": 5416.3
-    },
-    "idle_run_once": 13837.6
-  },
+  "session": "runtime_required_1772639000",
+  "required": true,
   "errors": [],
-  "assertions": {
-    "ensure_ok": true,
-    "required_mode": true,
-    "brain_model_match": true,
-    "ops_present": true,
-    "ps_seen": true,
-    "no_errors": true,
-    "ingest_under_30s": true,
-    "recall_under_30s": true
+  "ingest_ms": {
+    "avg": 7549.93,
+    "max": 12631.29,
+    "n": 5
   },
-  "ok": true
+  "recall_ms": {
+    "avg": 5084.89,
+    "max": 5638.55,
+    "n": 5
+  },
+  "idle_ms": 34779.17,
+  "brain_stats": {
+    "ok": true,
+    "total_calls": 12,
+    "ok_calls": 11,
+    "err_calls": 1,
+    "ops": {
+      "ingest_plan": {
+        "total": 5,
+        "ok": 5,
+        "err": 0
+      },
+      "recall_plan": {
+        "total": 5,
+        "ok": 5,
+        "err": 0
+      },
+      "merge_plan": {
+        "total": 2,
+        "ok": 1,
+        "err": 1
+      }
+    },
+    "last_ok_ts": 1772639098,
+    "last_trace_id": "3cae6361-f1b6-4ac8-8265-06674f55718f",
+    "last_err_ts": 1772639073,
+    "enabled": true,
+    "required": true,
+    "mode": "required",
+    "provider": "ollama",
+    "model": "gpt-oss:20b",
+    "last_error": "brain_http_error:HTTPStatusError",
+    "last_error_type": "BrainUnavailable",
+    "last_error_ts": 1772639073,
+    "last_ps_seen_model": "gpt-oss:20b",
+    "last_ps_seen_ts": 1772639098,
+    "trace_path": "/Users/hiroyukimiyake/Documents/New project/.memq/brain_trace.jsonl"
+  },
+  "trace_recent_n": 30,
+  "ps_has_model": true,
+  "assertions": {
+    "required_mode": true,
+    "model_match": true,
+    "ops_present": true,
+    "ps_model_seen": true,
+    "ingest_under_30s": true,
+    "recall_under_30s": true,
+    "no_call_errors": true
+  }
 }

@@ -2,7 +2,7 @@
   "ok": true,
   "base": "http://127.0.0.1:7781",
   "model": "gpt-oss:20b",
-  "session": "brain_required_proof_1772638134",
+  "session": "brain_required_proof_1772638848",
   "assertions": {
     "brain_mode_required": true,
     "global_ingest_plan_ge_target": true,
@@ -36,28 +36,23 @@
   },
   "stats_after": {
     "ok": true,
-    "total_calls": 11,
-    "ok_calls": 11,
+    "total_calls": 2,
+    "ok_calls": 2,
     "err_calls": 0,
     "ops": {
       "ingest_plan": {
-        "total": 5,
-        "ok": 5,
+        "total": 1,
+        "ok": 1,
         "err": 0
       },
       "recall_plan": {
-        "total": 5,
-        "ok": 5,
-        "err": 0
-      },
-      "merge_plan": {
         "total": 1,
         "ok": 1,
         "err": 0
       }
     },
-    "last_ok_ts": 1772638218,
-    "last_trace_id": "52bd695c-912b-4560-9c84-b71778d3f8ac",
+    "last_ok_ts": 1772638860,
+    "last_trace_id": "1ea2ede3-dbf9-4ef3-8524-a48fdb8ca441",
     "enabled": true,
     "required": true,
     "mode": "required",
@@ -67,37 +62,44 @@
     "last_error_type": "",
     "last_error_ts": 0,
     "last_ps_seen_model": "gpt-oss:20b",
-    "last_ps_seen_ts": 1772638218,
+    "last_ps_seen_ts": 1772638860,
     "trace_path": "/Users/hiroyukimiyake/Documents/New project/.memq/brain_trace.jsonl"
   },
   "delta": {
-    "ingest_plan": 5,
-    "recall_plan": 5,
-    "merge_plan": 1
+    "ingest_plan": 1,
+    "recall_plan": 1,
+    "merge_plan": 0
   },
   "targets": {
-    "ingest": 5,
-    "recall": 5,
-    "merge": 1
+    "ingest": 26,
+    "recall": 26,
+    "merge": 4
   },
   "needed": {
-    "ingest": 5,
-    "recall": 5,
-    "merge": 1
+    "ingest": 1,
+    "recall": 1,
+    "merge": 0
   },
-  "idle_skipped": false,
-  "global_before": {},
+  "idle_skipped": true,
+  "global_before": {
+    "runtime_ensure": 56,
+    "ingest_plan": 25,
+    "ingest_plan_apply": 25,
+    "recall_plan": 25,
+    "merge_plan": 4,
+    "merge_plan_apply": 4
+  },
   "global_after": {
-    "runtime_ensure": 11,
-    "ingest_plan": 5,
-    "ingest_plan_apply": 5,
-    "recall_plan": 5,
-    "merge_plan": 1,
-    "merge_plan_apply": 1
+    "runtime_ensure": 58,
+    "ingest_plan": 26,
+    "ingest_plan_apply": 26,
+    "recall_plan": 26,
+    "merge_plan": 4,
+    "merge_plan_apply": 4
   },
-  "trace_session_count": 28,
-  "trace_model_count": 28,
-  "trace_ps_seen_count": 28,
+  "trace_session_count": 5,
+  "trace_model_count": 5,
+  "trace_ps_seen_count": 5,
   "ollama_ps_models_n": 1,
   "fail_test": {
     "ok": true,
