@@ -1,0 +1,101 @@
+{
+  "ok": true,
+  "base": "http://127.0.0.1:7781",
+  "iters": 6,
+  "started_at": 1772673804,
+  "session": "brain_stability_1772673804",
+  "health": {
+    "brainMode": "required",
+    "brainModel": "gpt-oss:20b"
+  },
+  "ensure": {
+    "ok": true,
+    "seen": true,
+    "trace_id": "d63d65de-fc4a-4863-8568-b7a825b25de6",
+    "ps": {
+      "ok": true,
+      "seen": true,
+      "matched": {
+        "name": "gpt-oss:20b",
+        "model": "gpt-oss:20b",
+        "size": 14094668192,
+        "expires_at": "2026-03-05T10:53:02.159653+09:00"
+      },
+      "models_n": 1
+    }
+  },
+  "failures": [],
+  "stats_before": {
+    "ingest_plan": {
+      "ok": 37,
+      "err": 0,
+      "total": 37
+    },
+    "recall_plan": {
+      "ok": 22,
+      "err": 0,
+      "total": 22
+    },
+    "merge_plan": {
+      "ok": 9,
+      "err": 2,
+      "total": 11
+    }
+  },
+  "stats_after": {
+    "ingest_plan": {
+      "ok": 43,
+      "err": 0,
+      "total": 43
+    },
+    "recall_plan": {
+      "ok": 28,
+      "err": 0,
+      "total": 28
+    },
+    "merge_plan": {
+      "ok": 11,
+      "err": 2,
+      "total": 13
+    }
+  },
+  "deltas": {
+    "ingest_ok_delta": 6,
+    "recall_ok_delta": 6,
+    "merge_ok_delta": 2
+  },
+  "latency": {
+    "n": 6,
+    "avg_ms": 5732.67,
+    "p95_ms": 5729,
+    "max_ms": 5831
+  },
+  "trace_rows_scoped": 36,
+  "trace_ops": [
+    "ingest_plan",
+    "ingest_plan_apply",
+    "merge_plan",
+    "merge_plan_apply",
+    "recall_plan",
+    "runtime_ensure"
+  ],
+  "trace_ps_seen_count": 14,
+  "ingest_trace_ids": [
+    "89a1f454-c82a-4205-9835-cf5e515157e6",
+    "15bd30a4-9528-464e-8105-8dd8a9ddb242",
+    "af802b94-e133-45b6-8b8d-d9d56adb73e6",
+    "873861ce-d3a0-4b75-b75c-9ab2dcbf7895",
+    "08bf26c1-6aa1-46e7-9936-d22573d84d8f",
+    "4a43a4b5-750b-4f09-84f8-9bf58e7204a3"
+  ],
+  "recall_trace_ids": [
+    "440d625a-c728-40af-a8ff-2f3d18657443",
+    "7168f0e2-2d92-4507-a9e3-56347d3d4e58",
+    "b9116f74-8ad3-440f-bd8c-d8f43675842e",
+    "4c485ad2-8b4e-4c2d-a068-58711e6e0c33",
+    "4d7cdb10-f0c2-41a1-95a5-ec9ce089c575",
+    "36fb75dd-f06d-4aad-b923-9515de109e59"
+  ],
+  "finished_at": 1772673913,
+  "duration_sec": 109
+}

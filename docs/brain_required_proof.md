@@ -52,6 +52,23 @@ This writes:
 
 - `bench/results/brain_complex_required_validation.json`
 
+For repeated stability validation under `required + gpt-oss:20b`:
+
+```bash
+python3 bench/src/brain_required_stability.py
+```
+
+This writes:
+
+- `bench/results/brain_required_stability.json`
+
+The run is considered stable when:
+- `ok=true`
+- `failures=[]`
+- `deltas.ingest_ok_delta >= iters`
+- `deltas.recall_ok_delta >= iters`
+- `trace_ps_seen_count` is non-zero and `trace_ops` include ingest/recall/merge plan operations.
+
 To verify OpenClaw gateway integration markers:
 
 ```bash

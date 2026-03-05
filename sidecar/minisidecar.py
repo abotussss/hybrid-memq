@@ -224,19 +224,37 @@ def _idle_merge_with_brain(session_key: str, *, required: bool) -> Dict[str, Any
                 "usage_count": int(r["usage_count"] or 0),
             }
         )
-    plan = brain.build_merge_plan(
-        session_key=session_key,
-        memory_candidates=candidates,
-        stats=db.memory_stats(),
-    )
-    trace_id = brain.last_trace_id("merge_plan")
-    if plan is None:
-        if required:
-            raise BrainUnavailable("required_mode_no_merge_plan")
-        return {"trace_id": trace_id, "applied": {"merged": 0, "pruned": 0, "quarantined": 0}}
-    applied = brain.apply_merge_plan(db=db, session_key=session_key, plan=plan)
-    brain.record_apply(op="merge_plan", session_key=session_key, trace_id=trace_id, apply_summary=applied)
-    return {"trace_id": trace_id, "applied": applied}
+    attempts = 3 if required else 1
+    last_err: Exception | None = None
+    for i in range(attempts):
+        try:
+            plan = brain.build_merge_plan(
+                session_key=session_key,
+                memory_candidates=candidates,
+                stats=db.memory_stats(),
+            )
+            trace_id = brain.last_trace_id("merge_plan")
+            if plan is None:
+                if required:
+                    raise BrainUnavailable("required_mode_no_merge_plan")
+                return {"trace_id": trace_id, "applied": {"merged": 0, "pruned": 0, "quarantined": 0}}
+            applied = brain.apply_merge_plan(db=db, session_key=session_key, plan=plan)
+            brain.record_apply(op="merge_plan", session_key=session_key, trace_id=trace_id, apply_summary=applied)
+            return {"trace_id": trace_id, "applied": applied}
+        except BrainUnavailable as e:
+            last_err = e
+            # required mode must remain fail-closed, but allow short transient retries.
+            if i + 1 >= attempts:
+                break
+            try:
+                brain.ensure_runtime(session_key=session_key)
+            except Exception:
+                pass
+            time.sleep(0.6 * (i + 1))
+            continue
+    if last_err is not None:
+        raise last_err
+    raise BrainUnavailable("merge_plan_unknown_failure")
 
 
 async def _idle_loop() -> None:

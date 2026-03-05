@@ -1,8 +1,8 @@
 {
   "ok": true,
   "base": "http://127.0.0.1:7781",
-  "ts": 1772673288,
-  "session": "brain_complex_1772673288",
+  "ts": 1772673918,
+  "session": "brain_complex_1772673918",
   "health": {
     "brainMode": "required",
     "brainModel": "gpt-oss:20b"
@@ -10,7 +10,7 @@
   "ensure": {
     "ok": true,
     "seen": true,
-    "trace_id": "a742f558-6309-463e-aeba-6d0343fde021",
+    "trace_id": "55ff1b5f-72d0-4278-af9f-5127b86bc63c",
     "ps": {
       "ok": true,
       "seen": true,
@@ -18,7 +18,7 @@
         "name": "gpt-oss:20b",
         "model": "gpt-oss:20b",
         "size": 14094668192,
-        "expires_at": "2026-03-05T10:44:37.493326+09:00"
+        "expires_at": "2026-03-05T10:55:13.309274+09:00"
       },
       "models_n": 1
     }
@@ -26,7 +26,7 @@
   "ingest_rows": [
     {
       "idx": 0,
-      "traceId": "8d83a58e-8fe7-4bf9-bfa5-2f8a119f284b",
+      "traceId": "66f82ead-d856-4ecc-b266-65059442f5d0",
       "wrote": {
         "surface": 0,
         "deep": 0,
@@ -40,7 +40,7 @@
     },
     {
       "idx": 1,
-      "traceId": "5c25964f-b7d0-4875-846a-f9b3243c7c30",
+      "traceId": "26d5b613-3fce-4fca-b976-16a3cbd99b8d",
       "wrote": {
         "surface": 0,
         "deep": 0,
@@ -54,7 +54,7 @@
     },
     {
       "idx": 2,
-      "traceId": "bcf3b25f-9fc6-4302-87e1-9e2d8e03eb79",
+      "traceId": "64a6d54c-b5e9-44b0-8519-5c5dba8303bf",
       "wrote": {
         "surface": 0,
         "deep": 0,
@@ -68,7 +68,7 @@
     },
     {
       "idx": 3,
-      "traceId": "69a5d0e0-082f-4655-9494-3bc8a8173af7",
+      "traceId": "10802a76-92d2-4bd9-a32c-27677c846719",
       "wrote": {
         "surface": 0,
         "deep": 0,
@@ -82,7 +82,7 @@
     },
     {
       "idx": 4,
-      "traceId": "4f0d2e66-9a6f-4a41-831f-dd1bc8261a3f",
+      "traceId": "34b4d431-2ce3-4940-a5d1-09e5fa84b499",
       "wrote": {
         "surface": 0,
         "deep": 0,
@@ -115,12 +115,12 @@
       "daily_digest_refresh",
       "brain_merge_plan"
     ],
-    "traceId": "e20a1a95-48c7-4981-9438-315ac7012e4a"
+    "traceId": "890df51d-1053-479e-be90-922c789ede4b"
   },
   "queries": [
     {
       "name": "style_and_rules",
-      "traceId": "1b637bac-0212-4ea3-a9a5-451ca9c4cfb4",
+      "traceId": "2b1f40df-360d-4c56-926f-75613c043901",
       "memrules_head": "budget_tokens=80\nidentity.precedence=memstyle\nidentity.no_generic_assistant_label=true\nsecurity.never_output_secrets=true\noperation.allow_user_requested_local_config=true\nlanguage.allowed=ja,en\nprocedure.avoid_extra_suggestions=true",
       "memstyle_head": "budget_tokens=120\nfirstPerson=僕\ncallUser=ヒロ\ntone=polite\npersona=persona\nspeakingStyle=真面目で優しい。丁寧＋親しい口調で、自然な日本語で話す。語尾は「〜だね/〜だよ/〜かな？」を過剰にならない範囲で使う。",
       "memctx_head": "budget_tokens=120\nd1=人格: persona=persona | subject=assistant | conf=0.96 | src=profile_sync | ttl=3650d\np.snapshot=callUser:ヒロ | firstPerson:僕 | persona:persona | tone:polite | verbosity:low | language.primary:ja | policy.ttl.default_d\nwm.surf=none",
@@ -141,10 +141,10 @@
         "brain_enabled": 1,
         "brain_required": 1,
         "brain_plan": 1,
-        "trace_id": "1b637bac-0212-4ea3-a9a5-451ca9c4cfb4",
+        "trace_id": "2b1f40df-360d-4c56-926f-75613c043901",
         "ps_seen": 1,
         "brain_call_ok": 1,
-        "brain_latency_ms": 6318,
+        "brain_latency_ms": 6316,
         "brain_intent_timeline": 0.0,
         "brain_intent_profile": 0.0,
         "brain_intent_state": 0.0,
@@ -157,7 +157,7 @@
     },
     {
       "name": "deep_profile_project",
-      "traceId": "22f45316-eddf-4dd3-adb8-fe6eccfb0847",
+      "traceId": "2b12b0d1-340f-47f1-951a-6652329d88ac",
       "memrules_head": "budget_tokens=80\nidentity.precedence=memstyle\nidentity.no_generic_assistant_label=true\nsecurity.never_output_secrets=true\noperation.allow_user_requested_local_config=true\nlanguage.allowed=ja,en\nprocedure.avoid_extra_suggestions=true",
       "memstyle_head": "budget_tokens=120\nfirstPerson=僕\ncallUser=ヒロ\ntone=polite\npersona=persona\nspeakingStyle=真面目で優しい。丁寧＋親しい口調で、自然な日本語で話す。語尾は「〜だね/〜だよ/〜かな？」を過剰にならない範囲で使う。",
       "memctx_head": "budget_tokens=120\nd1=家族構成: ？ ctx.memory=surface_only_minimal </MEMCTX v1> 俺 | subject=user | conf=0.84 | src=user_msg | ttl=365d\np.snapshot=callUser:ヒロ | firstPerson:僕 | persona:persona | tone:polite | verbosity:low | language.primary:ja | policy.ttl.default_d\nwm.surf=none",
@@ -178,10 +178,10 @@
         "brain_enabled": 1,
         "brain_required": 1,
         "brain_plan": 1,
-        "trace_id": "22f45316-eddf-4dd3-adb8-fe6eccfb0847",
+        "trace_id": "2b12b0d1-340f-47f1-951a-6652329d88ac",
         "ps_seen": 1,
         "brain_call_ok": 1,
-        "brain_latency_ms": 5927,
+        "brain_latency_ms": 5838,
         "brain_intent_timeline": 0.0,
         "brain_intent_profile": 0.0,
         "brain_intent_state": 0.0,
@@ -194,7 +194,7 @@
     },
     {
       "name": "timeline_yesterday",
-      "traceId": "48f9b5c0-577e-4232-96a5-752f0a52316f",
+      "traceId": "732e4269-d5d8-4076-a1db-ff5d0f0aa9a5",
       "memrules_head": "budget_tokens=80\nidentity.precedence=memstyle\nidentity.no_generic_assistant_label=true\nsecurity.never_output_secrets=true\noperation.allow_user_requested_local_config=true\nlanguage.allowed=ja,en\nprocedure.avoid_extra_suggestions=true",
       "memstyle_head": "budget_tokens=120\nfirstPerson=僕\ncallUser=ヒロ\ntone=polite\npersona=persona\nspeakingStyle=真面目で優しい。丁寧＋親しい口調で、自然な日本語で話す。語尾は「〜だね/〜だよ/〜かな？」を過剰にならない範囲で使う。",
       "memctx_head": "budget_tokens=120\nt.range=2026-03-04..2026-03-04\nt.ev2=2026-03-04 assistant/chat: 了解。計画・期限・検索方針・未完タスクを記録する。\nwm.surf=none\nt.recent=2026-03-05:- [user/chat] 雑談: 昼ごはんはラーメン。これは長期記憶には要らない。 | - [user/chat] 昨日は仕様整理、今日",
@@ -215,10 +215,10 @@
         "brain_enabled": 1,
         "brain_required": 1,
         "brain_plan": 1,
-        "trace_id": "48f9b5c0-577e-4232-96a5-752f0a52316f",
+        "trace_id": "732e4269-d5d8-4076-a1db-ff5d0f0aa9a5",
         "ps_seen": 1,
         "brain_call_ok": 1,
-        "brain_latency_ms": 11559,
+        "brain_latency_ms": 11539,
         "brain_intent_timeline": 0.0,
         "brain_intent_profile": 0.0,
         "brain_intent_state": 0.0,

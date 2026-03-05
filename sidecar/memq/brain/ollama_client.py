@@ -309,6 +309,26 @@ class OllamaBrainClient:
                 if not self.cfg.required_mode:
                     self._cooldown_until = time.time() + 8.0
                 raise BrainUnavailable(f"brain_http_error:{type(e).__name__}") from e
+            except httpx.HTTPStatusError as e:
+                status = int(getattr(getattr(e, "response", None), "status_code", 0) or 0)
+                transient = status in {408, 409, 425, 429, 500, 502, 503, 504}
+                if transient:
+                    time.sleep(max(0.2, min(1.2, float(self.cfg.restart_wait_ms) / 2500.0)))
+                    try:
+                        return self._post_once(url=url, payload=payload, timeout=timeout)
+                    except Exception:
+                        # Last chance: restart ollama and retry once.
+                        recovered = self._try_restart_ollama()
+                        if recovered:
+                            try:
+                                return self._post_once(url=url, payload=payload, timeout=timeout)
+                            except Exception as e2:
+                                if not self.cfg.required_mode:
+                                    self._cooldown_until = time.time() + 8.0
+                                raise BrainUnavailable(f"brain_http_error:{type(e2).__name__}") from e2
+                if not self.cfg.required_mode:
+                    self._cooldown_until = time.time() + 8.0
+                raise BrainUnavailable(f"brain_http_error:{type(e).__name__}") from e
             except (httpx.HTTPError, json.JSONDecodeError) as e:
                 if not self.cfg.required_mode:
                     self._cooldown_until = time.time() + 8.0
