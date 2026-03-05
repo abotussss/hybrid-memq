@@ -151,6 +151,10 @@ class RegressionGuardsTest(unittest.TestCase):
         u2 = extract_style_updates(s2)
         self.assertEqual("ロックマン風", u2.get("persona"))
 
+        s2b = "今後はロックマンEXEのロックマンとして振る舞って"
+        u2b = extract_style_updates(s2b)
+        self.assertEqual("ロックマンEXEのロックマン", u2b.get("persona"))
+
         s3 = "ユーザーのことはヒロって呼んで"
         u3 = extract_style_updates(s3)
         self.assertEqual("ヒロ", u3.get("callUser"))

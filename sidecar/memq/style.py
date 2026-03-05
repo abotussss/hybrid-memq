@@ -67,6 +67,7 @@ def _normalize_persona(raw: str) -> str:
     v = _clean_style_value(raw, 120)
     if not v:
         return ""
+    v = re.sub(r"^(?:今後は|これからは|以後は|今後|これから|以後)\s*", "", v, flags=re.IGNORECASE).strip()
     v = re.sub(r"^(?:キャラ|人格|性格|口調|話し方)\s*(?:を|は)?\s*", "", v, flags=re.IGNORECASE).strip()
     # Drop update-control boilerplate but keep the actual persona description.
     v = re.sub(r"(?:memstyle\s*を?\s*更新して(?:ください|下さい)|style\s*update(?:\s*please)?)", " ", v, flags=re.IGNORECASE)
