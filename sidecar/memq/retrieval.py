@@ -99,9 +99,9 @@ def retrieve_candidates_with_plan(
     _ = dim
     _ = bits_per_dim
     retrieval = plan.get("retrieval") if isinstance(plan, dict) else {}
-    fact_keys = set(infer_query_fact_keys(prompt))
+    fact_keys = set()
     if isinstance(plan, dict):
-        fact_keys.update(str(k).strip() for k in (plan.get("fact_keys") or []) if str(k).strip())
+        fact_keys.update(str(k).strip().lower() for k in (plan.get("fact_keys") or []) if str(k).strip())
     queries = [str(q).strip() for q in (plan.get("fts_queries") or []) if str(q).strip()] if isinstance(plan, dict) else []
     if not queries:
         queries = [prompt]

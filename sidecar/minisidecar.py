@@ -46,7 +46,7 @@ from memq.structured_facts import (
     parse_fact_signature_from_row,
     structured_fact_summary,
 )
-from memq.timeline import detect_timeline_range
+from memq.timeline import TimelineRange, detect_timeline_range
 
 
 app = FastAPI(title="hybrid-memq-sidecar", version="2.0.0")
@@ -466,8 +466,8 @@ def memctx_query(req: MemctxQueryRequest) -> MemctxQueryResponse:
     top_k = max(1, int(req.topK or cfg.retrieval_top_k))
     surface_threshold = float(req.surfaceThreshold if req.surfaceThreshold is not None else cfg.surface_threshold)
     deep_enabled = bool(req.deepEnabled if req.deepEnabled is not None else cfg.deep_enabled)
-    timeline_range = detect_timeline_range(req.prompt)
-    timeline_first = bool(timeline_range and timeline_range.explicit)
+    timeline_range: TimelineRange | None = None
+    timeline_first = False
     required = _brain_mode_required()
     ensure_err = _ensure_brain_or_error(req.sessionKey, op="recall_plan", required=required)
     if ensure_err is not None:
@@ -499,6 +499,18 @@ def memctx_query(req: MemctxQueryRequest) -> MemctxQueryResponse:
             err=e,
         )
     brain_plan: Dict[str, Any] | None = brain_plan_obj.model_dump() if brain_plan_obj is not None else None
+    if isinstance(brain_plan, dict):
+        tr = brain_plan.get("time_range")
+        if isinstance(tr, dict):
+            sd = str(tr.get("startDay") or "").strip()
+            ed = str(tr.get("endDay") or "").strip()
+            label = str(tr.get("label") or "brain")
+            if sd and ed:
+                timeline_range = TimelineRange(start_day=sd, end_day=ed, label=label, explicit=True)
+                timeline_first = True
+    if timeline_range is None:
+        timeline_range = detect_timeline_range(req.prompt)
+        timeline_first = bool(timeline_range and timeline_range.explicit)
 
     if brain_plan is not None:
         from memq.retrieval import retrieve_candidates_with_plan

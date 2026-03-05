@@ -44,4 +44,15 @@ archive:
   maxFiles: 30
 
 degraded:
-  enabled: true
+  enabled: false
+brain:
+  mode: required
+  provider: ollama
+  baseUrl: http://127.0.0.1:11434
+  model: gpt-oss:20b
+  keepAlive: 30m
+  timeoutMs: 60000
+  maxTokens: 256
+  autoRestart: true
+  restartCooldownSec: 30
+  restartWaitMs: 2000

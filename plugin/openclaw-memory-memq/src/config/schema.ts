@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 export const defaults = {
   "memq.sidecarUrl": "http://127.0.0.1:7781",
   "memq.workspaceRoot": process.cwd(),
-  "memq.brain.mode": "best_effort",
+  "memq.brain.mode": "required",
   "memq.brain.provider": "ollama",
   "memq.brain.baseUrl": "http://127.0.0.1:11434",
   "memq.brain.model": "gpt-oss:20b",
@@ -30,7 +30,7 @@ export const defaults = {
   "memq.archive.enabled": true,
   "memq.archive.maxFileBytes": 8_000_000,
   "memq.archive.maxFiles": 30,
-  "memq.degraded.enabled": true,
+  "memq.degraded.enabled": false,
   "memq.security.primaryRulesEnabled": true,
   "memq.security.llmAuditEnabled": false,
   "memq.security.llmAuditThreshold": 0.2,

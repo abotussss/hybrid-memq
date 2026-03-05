@@ -247,7 +247,8 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
 
     try {
       await sidecar.idleTick(Math.floor(Date.now() / 1000));
-    } catch {
+    } catch (err) {
+      if (brainRequired) throw err;
       // best effort; degraded mode handles outage
     }
 
@@ -277,7 +278,8 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
         const prunedNorm = normalizeMessages(sliced.pruned).filter((m) => m.role === "user" || m.role === "assistant");
         await sidecar.summarizeConversation(sessionKey, prunedNorm, "surface_only");
         await sidecar.summarizeConversation(sessionKey, prunedNorm, "deep");
-      } catch {
+      } catch (err) {
+        if (brainRequired) throw err;
         // degraded path keeps running
       }
     }
@@ -377,7 +379,8 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
           const prunedNorm = normalizeMessages(emergencySlice.pruned).filter((m) => m.role === "user" || m.role === "assistant");
           await sidecar.summarizeConversation(sessionKey, prunedNorm, "surface_only");
           await sidecar.summarizeConversation(sessionKey, prunedNorm, "deep");
-        } catch {
+        } catch (err) {
+          if (brainRequired) throw err;
           // best effort
         }
       }

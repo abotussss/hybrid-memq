@@ -81,9 +81,9 @@ def load_config() -> MemqConfig:
     if bits not in {6, 7, 8}:
         bits = 8
 
-    brain_mode = os.getenv("MEMQ_BRAIN_MODE", "best_effort").strip().lower()
+    brain_mode = os.getenv("MEMQ_BRAIN_MODE", "required").strip().lower()
     if brain_mode not in {"off", "best_effort", "required"}:
-        brain_mode = "best_effort"
+        brain_mode = "required"
 
     return MemqConfig(
         db_path=db_path,

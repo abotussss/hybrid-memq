@@ -193,6 +193,7 @@ def _pack_memctx_payload(
     must_keys = {"wm.surf", "p.snapshot"}
     if time_scoped:
         must_keys.add("t.range")
+        must_keys.add("t.digest")
     else:
         must_keys.add("t.recent")
     for c in sorted(candidates, key=lambda x: x["idx"]):
@@ -308,6 +309,11 @@ def _finalize_memctx_lines(
         if k not in kv_map:
             order.append(k)
         kv_map[k] = vv
+
+    if ("t.range" in kv_map) and ("t.digest" not in kv_map):
+        kv_map["t.digest"] = kv_map.get("t.recent", "none")
+        if "t.digest" not in order:
+            order.append("t.digest")
 
     if time_scoped:
         priority = ["t.range", "t.digest", "t.ev1", "t.ev2", "wm.surf", "t.recent", "d1", "g1", "s1"]
@@ -466,24 +472,23 @@ def build_memctx(
         re.IGNORECASE,
     )
     q_tokens = tokenize_lexical(prompt or "")
-    q_fact_keys = set(infer_query_fact_keys(prompt))
-    intent = infer_intent(prompt)
-    if isinstance(brain_plan, dict):
+    has_brain_plan = isinstance(brain_plan, dict)
+    if has_brain_plan:
+        intent = {"timeline": 0.0, "profile": 0.0, "state": 0.0, "fact_lookup": 0.0, "meta": 0.0, "overview": 0.0}
         p_intent = brain_plan.get("intent") if isinstance(brain_plan.get("intent"), dict) else {}
         for k in ("timeline", "profile", "state", "fact_lookup", "meta", "overview"):
-            if k in p_intent:
-                try:
-                    # Do not let weak/empty brain intent erase deterministic intent inference.
-                    intent[k] = max(
-                        float(intent.get(k, 0.0)),
-                        max(0.0, min(1.0, float(p_intent.get(k, 0.0)))),
-                    )
-                except Exception:
-                    pass
-        for fk in (brain_plan.get("fact_keys") or []):
-            fks = str(fk or "").strip().lower()
-            if fks:
-                q_fact_keys.add(fks)
+            try:
+                intent[k] = max(0.0, min(1.0, float(p_intent.get(k, 0.0))))
+            except Exception:
+                intent[k] = 0.0
+        q_fact_keys = {
+            str(fk or "").strip().lower()
+            for fk in (brain_plan.get("fact_keys") or [])
+            if str(fk or "").strip()
+        }
+    else:
+        q_fact_keys = set(infer_query_fact_keys(prompt))
+        intent = infer_intent(prompt)
 
     def _lex_rel(s: str) -> float:
         tks = set(re.findall(r"[a-z0-9_]{2,}", (s or "").lower()))
@@ -620,51 +625,31 @@ def build_memctx(
         return " || ".join(ev_parts)[:220]
 
     lines: List[str] = [f"budget_tokens={budget_tokens}"]
-    timeline_range = detect_timeline_range(prompt)
-    if isinstance(brain_plan, dict):
+    timeline_range = None
+    if has_brain_plan:
         tr = brain_plan.get("time_range")
         if isinstance(tr, dict):
             sd = str(tr.get("startDay") or "").strip()
             ed = str(tr.get("endDay") or "").strip()
             label = str(tr.get("label") or "brain")
-            rel_label = bool(re.search(r"(yesterday|today|recent|last_week|last_month|先週|先月|昨日|今日|最近)", label, re.IGNORECASE))
             if sd and ed:
                 from .timeline import TimelineRange  # local import to avoid cycle at module load
-                use_sd_ed = _is_day_key(sd) and _is_day_key(ed) and not rel_label
-                if use_sd_ed and timeline_range is not None:
-                    # Guard against clearly wrong year ranges from model plans.
-                    try:
-                        from .timeline import day_key_to_date
-
-                        pd = day_key_to_date(sd)
-                        cur = day_key_to_date(timeline_range.start_day)
-                        if abs((pd - cur).days) > 62:
-                            use_sd_ed = False
-                    except Exception:
-                        pass
-                if use_sd_ed:
+                if _is_day_key(sd) and _is_day_key(ed):
                     timeline_range = TimelineRange(start_day=sd, end_day=ed, label=label, explicit=True)
-                else:
-                    # Normalize relative or suspicious ranges with deterministic parser.
-                    parsed = (
-                        detect_timeline_range(prompt)
-                        or detect_timeline_range(label)
-                        or detect_timeline_range(f"{sd} {ed} {label}")
-                        or detect_timeline_range(sd)
-                    )
-                    if parsed is not None:
-                        timeline_range = TimelineRange(
-                            start_day=parsed.start_day,
-                            end_day=parsed.end_day,
-                            label=label or parsed.label,
-                            explicit=True,
-                        )
+    if timeline_range is None:
+        timeline_range = detect_timeline_range(prompt)
     time_scoped = bool(timeline_range and timeline_range.explicit)
     query_memory_overview = bool(
         intent["overview"] >= 0.55
-        or re.search(r"(記憶|覚えてる|これまで|要点|summary|what.*remember|memory overview)", prompt, re.IGNORECASE)
+        or (
+            not has_brain_plan
+            and re.search(r"(記憶|覚えてる|これまで|要点|summary|what.*remember|memory overview)", prompt, re.IGNORECASE)
+        )
     )
-    need_meta = bool(intent["meta"] >= 0.60 or re.search(r"(件数|count|pool|stats?)", prompt, re.IGNORECASE))
+    need_meta = bool(
+        intent["meta"] >= 0.60
+        or (not has_brain_plan and re.search(r"(件数|count|pool|stats?)", prompt, re.IGNORECASE))
+    )
     # Tiny observability hints to avoid "memory is only 1-2 lines" misconceptions.
     surface_pool = len(db.list_memory_items("surface", session_key, limit=5000))
     deep_pool = len(db.list_memory_items("deep", session_key, limit=5000))
@@ -732,6 +717,10 @@ def build_memctx(
             ev_count += 1
             _push_kv(lines, f"t.ev{ev_count}", f"{day_key} {actor}/{kind}: {summary}")
 
+        if not digest_parts and ev_count == 0:
+            fallback = _clean_summary(_recent_timeline_line(), digest_item_limit)
+            _push_kv(lines, "t.digest", fallback or "none", dedupe_by_value=False)
+
     # For explicit time-scoped queries, prioritize timeline recall before anchors.
     if time_scoped:
         _push_timeline_block()
@@ -745,7 +734,7 @@ def build_memctx(
     profile_anchor = _clean_summary(_profile_snapshot_line(), anchor_limit)
     recent_anchor = _clean_summary(_recent_timeline_line(), anchor_limit)
 
-    need_profile_anchor = bool(intent["profile"] >= 0.30 or bool(q_fact_keys))
+    need_profile_anchor = True
     need_timeline_anchor = bool(time_scoped or intent["timeline"] >= 0.25 or query_memory_overview)
     need_deep_anchor = bool(intent["overview"] >= 0.55 or intent["fact_lookup"] >= 0.45 or bool(q_fact_keys))
 
@@ -921,7 +910,13 @@ def build_memctx(
         _push_kv(lines, "memory.fact_status", "weak_or_missing", dedupe_by_value=False)
 
     # Mark ephemeral only for directly relevant prompts.
-    if re.search(r"(直近|recent|temporary|一時|ephemeral)", prompt, re.IGNORECASE):
+    plan_budget_split = brain_plan.get("budget_split") if has_brain_plan and isinstance(brain_plan.get("budget_split"), dict) else {}
+    eph_budget = 0
+    try:
+        eph_budget = int(plan_budget_split.get("ephemeral", 0))
+    except Exception:
+        eph_budget = 0
+    if eph_budget > 0 or (not has_brain_plan and re.search(r"(直近|recent|temporary|一時|ephemeral)", prompt, re.IGNORECASE)):
         eph = db.list_memory_items("ephemeral", session_key, limit=2)
         for idx, row in enumerate(eph):
             summary = str(row["summary"])[:120].replace("\n", " ")
@@ -937,7 +932,7 @@ def build_memctx(
         intent=intent,
         time_scoped=time_scoped,
         query_memory_overview=query_memory_overview,
-        budget_split=(brain_plan.get("budget_split") if isinstance(brain_plan, dict) else None),
+        budget_split=(plan_budget_split if plan_budget_split else None),
     )
     finalized = _finalize_memctx_lines(
         packed_lines=packed,

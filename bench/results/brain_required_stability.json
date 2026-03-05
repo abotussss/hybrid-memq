@@ -2,8 +2,8 @@
   "ok": true,
   "base": "http://127.0.0.1:7781",
   "iters": 6,
-  "started_at": 1772673804,
-  "session": "brain_stability_1772673804",
+  "started_at": 1772691536,
+  "session": "brain_stability_1772691536",
   "health": {
     "brainMode": "required",
     "brainModel": "gpt-oss:20b"
@@ -11,64 +11,64 @@
   "ensure": {
     "ok": true,
     "seen": true,
-    "trace_id": "d63d65de-fc4a-4863-8568-b7a825b25de6",
+    "trace_id": "1b9f1a81-b3ac-4340-a6b4-6b482a920968",
     "ps": {
       "ok": true,
       "seen": true,
       "matched": {
         "name": "gpt-oss:20b",
         "model": "gpt-oss:20b",
-        "size": 14094668192,
-        "expires_at": "2026-03-05T10:53:02.159653+09:00"
+        "size": 14000296352,
+        "expires_at": "2026-03-05T16:02:58.329337+09:00"
       },
-      "models_n": 1
+      "models_n": 2
     }
   },
   "failures": [],
   "stats_before": {
     "ingest_plan": {
-      "ok": 37,
+      "ok": 0,
       "err": 0,
-      "total": 37
+      "total": 0
     },
     "recall_plan": {
-      "ok": 22,
+      "ok": 0,
       "err": 0,
-      "total": 22
+      "total": 0
     },
     "merge_plan": {
-      "ok": 9,
-      "err": 2,
-      "total": 11
+      "ok": 0,
+      "err": 0,
+      "total": 0
     }
   },
   "stats_after": {
     "ingest_plan": {
-      "ok": 43,
+      "ok": 6,
       "err": 0,
-      "total": 43
+      "total": 6
     },
     "recall_plan": {
-      "ok": 28,
+      "ok": 7,
       "err": 0,
-      "total": 28
+      "total": 7
     },
     "merge_plan": {
-      "ok": 11,
-      "err": 2,
-      "total": 13
+      "ok": 2,
+      "err": 0,
+      "total": 2
     }
   },
   "deltas": {
     "ingest_ok_delta": 6,
-    "recall_ok_delta": 6,
+    "recall_ok_delta": 7,
     "merge_ok_delta": 2
   },
   "latency": {
     "n": 6,
-    "avg_ms": 5732.67,
-    "p95_ms": 5729,
-    "max_ms": 5831
+    "avg_ms": 10456.67,
+    "p95_ms": 12377,
+    "max_ms": 12416
   },
   "trace_rows_scoped": 36,
   "trace_ops": [
@@ -81,21 +81,21 @@
   ],
   "trace_ps_seen_count": 14,
   "ingest_trace_ids": [
-    "89a1f454-c82a-4205-9835-cf5e515157e6",
-    "15bd30a4-9528-464e-8105-8dd8a9ddb242",
-    "af802b94-e133-45b6-8b8d-d9d56adb73e6",
-    "873861ce-d3a0-4b75-b75c-9ab2dcbf7895",
-    "08bf26c1-6aa1-46e7-9936-d22573d84d8f",
-    "4a43a4b5-750b-4f09-84f8-9bf58e7204a3"
+    "3e1880d4-9b35-44da-89cc-3520a05ff530",
+    "ea60e291-fb2c-49db-ab71-1ad2d576f2a6",
+    "2cd90b46-5a0d-48a3-9c8b-9d5462921086",
+    "693d0080-e6b9-4542-a86a-22b64bb62073",
+    "4652cf6d-1d25-450d-a2b6-a4ac10b6bef4",
+    "22ac3cb7-fb0b-4201-9554-5a58b8e8259e"
   ],
   "recall_trace_ids": [
-    "440d625a-c728-40af-a8ff-2f3d18657443",
-    "7168f0e2-2d92-4507-a9e3-56347d3d4e58",
-    "b9116f74-8ad3-440f-bd8c-d8f43675842e",
-    "4c485ad2-8b4e-4c2d-a068-58711e6e0c33",
-    "4d7cdb10-f0c2-41a1-95a5-ec9ce089c575",
-    "36fb75dd-f06d-4aad-b923-9515de109e59"
+    "e51d9e44-55e2-4cfc-baf0-717bd52bf710",
+    "3ade0b45-84b9-4a9a-8f42-7913c7ce5279",
+    "607285cf-c515-4ead-a648-5a16cc0e8bed",
+    "ffc08be3-04f8-49fd-a6f5-af76cc3e90c8",
+    "3dbb24ba-09d3-4c49-ada4-fe4ea22d63c0",
+    "01139d8f-42e4-42ef-a132-8df717b770c6"
   ],
-  "finished_at": 1772673913,
-  "duration_sec": 109
+  "finished_at": 1772691725,
+  "duration_sec": 189
 }

@@ -19,8 +19,8 @@ Each turn injects three bounded channels in fixed order:
 - `MEMSTYLE` budget default is fixed to `120` tokens (`styleTokens=120`, `maxBudgetTokens=120`).
 - Output language audit default is `ja,en` when no explicit language rule exists.
 - Timeline memory is persisted as `events` + `daily_digests` for time-scoped prompts like “yesterday/recent”.
-- Optional local Brain path (`Ollama`, default model `gpt-oss:20b`) can generate schema-validated ingest/recall plans.
-- If Brain is unavailable or times out, sidecar falls back to deterministic heuristics without stopping the turn.
+- Local Brain path (`Ollama`, default model `gpt-oss:20b`) generates schema-validated ingest/recall/merge plans.
+- Default runtime is `brain.mode=required` + `degraded=false` (fail-closed). If Brain proof fails, the turn is blocked.
 
 ## Why This Plugin Exists
 
@@ -36,7 +36,7 @@ Each turn injects three bounded channels in fixed order:
 - Local sidecar (`FastAPI + SQLite`) with persistent memory state.
 - Surface-first retrieval with Deep fallback gating.
 - Embedding-free scalable candidate generation via SQLite FTS5/BM25 (with lexical/fact-key reranking).
-- Optional Brain-assisted ingest/recall planning (JSON schema validated, deterministic DB apply).
+- Brain-assisted ingest/recall/merge planning (JSON schema validated, deterministic DB apply).
 - Deep fact indexing (`fact_key`) to improve long-lag recall beyond recent-item limits.
 - Conversation pruning by token budget, archive of pruned history, and sidecar reconstruction summaries.
 - Episodic timeline pipeline: turn/action events -> idle daily digest -> compact `t.*` MEMCTX injection.
@@ -44,7 +44,7 @@ Each turn injects three bounded channels in fixed order:
 - Idle sleep-style consolidation (decay, dedup, promotion, profile refresh, cleanup).
 - Quarantine for suspicious memory candidates (prompt-injection-like inputs).
 - Primary rule-based output audit + optional secondary LLM audit.
-- Degraded mode if sidecar is unavailable.
+- `required` mode fail-closed path for sidecar/brain outages (no silent degraded continuation by default).
 
 ## Repository Layout
 
@@ -141,7 +141,7 @@ These are configured in:
 - update memory/profile/rule/style state
 
 3. `before_compaction`
-- trigger sidecar idle consolidation (`best effort`)
+- trigger sidecar idle consolidation (`required` mode: fail-closed, otherwise best effort)
 
 4. `gateway_start`
 - sidecar health probe
@@ -224,7 +224,7 @@ Hybrid MEMQ は、OpenClaw向けの記憶プラグインです。
 - アイドル時の睡眠整理（減衰、重複統合、昇格、プロファイル更新、クリーンアップ）。
 - 汚染疑い入力の隔離（quarantine）。
 - 一次監査（ルールベース）+ 任意の二次LLM監査。
-- sidecar障害時のdegraded継続。
+- 既定は `brain.mode=required` + `degraded=false`（Brain証跡が取れない場合は継続せず失敗）。
 
 ## リポジトリ構成
 

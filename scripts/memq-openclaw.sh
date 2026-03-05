@@ -120,7 +120,7 @@ import json
 cfg = {
   "memq.sidecarUrl": "http://127.0.0.1:7781",
   "memq.workspaceRoot": "__ROOT__",
-  "memq.brain.mode": "best_effort",
+  "memq.brain.mode": "required",
   "memq.brain.provider": "ollama",
   "memq.brain.baseUrl": "http://127.0.0.1:11434",
   "memq.brain.model": "gpt-oss:20b",
@@ -144,7 +144,7 @@ cfg = {
   "memq.archive.enabled": True,
   "memq.archive.maxFileBytes": 8000000,
   "memq.archive.maxFiles": 30,
-  "memq.degraded.enabled": True,
+  "memq.degraded.enabled": False,
   "memq.security.primaryRulesEnabled": True,
   "memq.security.llmAuditEnabled": False,
   "memq.security.llmAuditThreshold": 0.2,
@@ -237,7 +237,7 @@ cmd_start_sidecar() {
     MEMQ_ROOT="$ROOT_DIR" \
     MEMQ_DB_PATH=".memq/sidecar.sqlite3" \
     MEMQ_BRAIN_ENABLED="${MEMQ_BRAIN_ENABLED:-1}" \
-    MEMQ_BRAIN_MODE="${MEMQ_BRAIN_MODE:-best_effort}" \
+    MEMQ_BRAIN_MODE="${MEMQ_BRAIN_MODE:-required}" \
     MEMQ_BRAIN_PROVIDER="${MEMQ_BRAIN_PROVIDER:-ollama}" \
     MEMQ_BRAIN_BASE_URL="${MEMQ_BRAIN_BASE_URL:-http://127.0.0.1:11434}" \
     MEMQ_BRAIN_MODEL="${MEMQ_BRAIN_MODEL:-gpt-oss:20b}" \
@@ -413,6 +413,7 @@ PY
 
 cmd_brain_required_on() {
   set_plugin_cfg_key "memq.brain.mode" "\"required\""
+  set_plugin_cfg_key "memq.degraded.enabled" "false"
   load_sidecar_env
   {
     echo "MEMQ_ROOT=$ROOT_DIR"
@@ -440,6 +441,7 @@ cmd_brain_required_on() {
 
 cmd_brain_required_off() {
   set_plugin_cfg_key "memq.brain.mode" "\"best_effort\""
+  set_plugin_cfg_key "memq.degraded.enabled" "true"
   load_sidecar_env
   {
     echo "MEMQ_ROOT=$ROOT_DIR"
