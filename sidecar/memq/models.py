@@ -113,6 +113,7 @@ class BootstrapImportRequest(BaseModel):
 
 class ProfileResponse(BaseModel):
     ok: bool = True
+    style_profile: Dict[str, str] = Field(default_factory=dict)
     preference_profile: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     memory_policy_profile: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 

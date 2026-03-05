@@ -11,9 +11,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..config import MemqConfig
 from ..db import MemqDB
-from ..rules import apply_rule_updates, extract_rule_updates
+from ..rules import apply_rule_updates
 from ..structured_facts import normalize_fact_value, plausible_fact_value, structured_fact_summary
-from ..style import apply_style_updates, extract_style_updates
+from ..style import apply_style_updates
 from ..style import sanitize_style_profile
 from .ollama_client import BrainUnavailable, OllamaBrainClient, OllamaConfig
 from .schemas import BrainAuditPatchPlan, BrainIngestPlan, BrainMergePlan, BrainRecallPlan
@@ -26,7 +26,6 @@ SECRET_RE = re.compile(
     r"(sk-[A-Za-z0-9_\-]{10,}|BEGIN (?:RSA|OPENSSH|PRIVATE) KEY|eyJ[A-Za-z0-9_\-]{12,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,})",
     re.IGNORECASE,
 )
-
 
 @dataclass
 class BrainResult:
@@ -811,27 +810,12 @@ class BrainService:
 
         wrote["events"] += event_written
 
-        # Style/rules updates are allowed when either:
-        # - Brain marks explicit=true, or
-        # - deterministic parser finds explicit user directives in this turn.
-        det_style = extract_style_updates(user_text or "")
-        det_rules = extract_rule_updates(user_text or "")
-
+        # Brain-orchestrated updates only:
+        # style/rules are applied from the Brain plan (with whitelist + secret guards).
         su = plan.style_update
-        allow_style_update = bool(det_style) or bool(su and su.explicit)
-        if allow_style_update:
+        if su and su.apply:
             style_updates: Dict[str, str] = {}
-            if su and su.apply:
-                for k, v in (su.keys or {}).items():
-                    kk = str(k or "").strip()
-                    if kk not in SAFE_STYLE_KEYS:
-                        continue
-                    vv = " ".join(str(v or "").split()).strip()
-                    if not vv or SECRET_RE.search(vv):
-                        continue
-                    style_updates[kk] = vv[:180]
-            # Deterministic parser is the source of truth for explicit user directives.
-            for k, v in (det_style or {}).items():
+            for k, v in (su.keys or {}).items():
                 kk = str(k or "").strip()
                 vv = " ".join(str(v or "").split()).strip()
                 if kk in SAFE_STYLE_KEYS and vv and not SECRET_RE.search(vv):
@@ -841,31 +825,22 @@ class BrainService:
                 sanitize_style_profile(db)
 
         ru = plan.rules_update
-        allow_rule_update = bool(det_rules) or bool(ru and ru.explicit)
-        if allow_rule_update:
+        if ru and ru.apply:
             rule_updates: List[tuple[str, str, int, str]] = []
-            if ru and ru.apply:
-                for i, line in enumerate(ru.rules or []):
-                    t = " ".join(str(line or "").split()).strip()
-                    if "=" not in t:
-                        continue
-                    k, v = t.split("=", 1)
-                    k = k.strip()
-                    v = v.strip()
-                    if not k or not k.startswith(SAFE_RULE_PREFIX):
-                        continue
-                    if SECRET_RE.search(v):
-                        continue
-                    kind = k.split(".", 1)[0]
-                    # Brain updates are conservative priority; deterministic updates can override by key.
-                    rule_updates.append((k, v[:200], 75, kind))
-            # Deterministic parser yields explicit, whitelist-filtered rules.
-            for k, v, prio, kind in det_rules:
-                if not str(k or "").startswith(SAFE_RULE_PREFIX):
+            for i, line in enumerate(ru.rules or []):
+                t = " ".join(str(line or "").split()).strip()
+                if "=" not in t:
                     continue
-                if SECRET_RE.search(str(v or "")):
+                k, v = t.split("=", 1)
+                k = k.strip()
+                v = v.strip()
+                if not k or not k.startswith(SAFE_RULE_PREFIX):
                     continue
-                rule_updates.append((str(k), str(v)[:200], int(prio), str(kind)))
+                if SECRET_RE.search(v):
+                    continue
+                kind = k.split(".", 1)[0]
+                # Brain updates are conservative priority.
+                rule_updates.append((k, v[:200], 75, kind))
             if rule_updates:
                 # De-duplicate by key keeping the highest priority update.
                 by_key: Dict[str, tuple[str, str, int, str]] = {}

@@ -17,8 +17,13 @@ from sidecar.memq.retrieval_deep import search_deep
 from sidecar.memq.retrieval_deep import NOISE_SUMMARY_RE as DEEP_NOISE_RE
 from sidecar.memq.retrieval_surface import NOISE_SUMMARY_RE as SURFACE_NOISE_RE
 from sidecar.memq.fact_keys import infer_query_fact_keys
-from sidecar.memq.rules import extract_allowed_languages_from_rules, extract_preference_events, refresh_preference_profiles
-from sidecar.memq.style import sanitize_style_profile
+from sidecar.memq.rules import (
+    extract_allowed_languages_from_rules,
+    extract_preference_events,
+    extract_rule_updates,
+    refresh_preference_profiles,
+)
+from sidecar.memq.style import extract_style_updates, sanitize_style_profile
 from sidecar.memq.structured_facts import plausible_fact_value
 from sidecar.memq.timeline import day_key_from_ts, detect_timeline_range
 from sidecar.memq.tokens import lexical_overlap, tokenize_lexical
@@ -136,6 +141,30 @@ class RegressionGuardsTest(unittest.TestCase):
         i2 = infer_intent("昨日何した？")
         self.assertGreaterEqual(float(i2.get("timeline", 0.0)), 0.8)
 
+    def test_style_extracts_natural_japanese_persona_and_call_user(self) -> None:
+        s1 = "こういうキャラになって: 真面目で礼儀正しい"
+        u1 = extract_style_updates(s1)
+        self.assertIn("persona", u1)
+        self.assertIn("真面目", str(u1.get("persona")))
+
+        s2 = "人格をロックマン風にして"
+        u2 = extract_style_updates(s2)
+        self.assertEqual("ロックマン風", u2.get("persona"))
+
+        s3 = "ユーザーのことはヒロって呼んで"
+        u3 = extract_style_updates(s3)
+        self.assertEqual("ヒロ", u3.get("callUser"))
+        self.assertEqual("ヒロ、", u3.get("prefix"))
+
+    def test_rules_extract_japanese_secret_and_bullets(self) -> None:
+        r1 = extract_rule_updates("APIキーは絶対に出力しないで")
+        keys1 = [k for k, _, _, _ in r1]
+        self.assertIn("security.never_output_secrets", keys1)
+
+        r2 = extract_rule_updates("出力は箇条書きで")
+        keys2 = [k for k, _, _, _ in r2]
+        self.assertIn("procedure.format", keys2)
+
     def test_retrieval_lean_mode_skips_deep_for_plain_coding_turn(self) -> None:
         self.db.add_memory_item(
             session_key="s1",
@@ -202,7 +231,7 @@ class RegressionGuardsTest(unittest.TestCase):
         self.assertTrue(any(int(x.get("key_overlap", 0)) > 0 for x in deep))
 
     @unittest.skipUnless(HAVE_BRAIN_DEPS, "brain deps unavailable in this python env")
-    def test_brain_apply_ingest_plan_explicit_gate(self) -> None:
+    def test_brain_apply_ingest_plan_apply_gate(self) -> None:
         cfg = load_config()
         svc = BrainService(cfg)
         now = int(time.time())
@@ -249,9 +278,9 @@ class RegressionGuardsTest(unittest.TestCase):
         self.assertGreaterEqual(int(wrote.get("deep", 0)), 1)
         self.assertGreaterEqual(int(wrote.get("events", 0)), 1)
         style = self.db.get_style_profile()
-        self.assertNotIn("callUser", style)
+        self.assertEqual("ヒロ", style.get("callUser"))
         rules = [str(r["body"]) for r in self.db.list_rules()]
-        self.assertFalse(any(b.startswith("language.allowed=") for b in rules))
+        self.assertTrue(any(b.startswith("language.allowed=ja,en") for b in rules))
 
         plan_explicit = BrainIngestPlan.model_validate(
             {

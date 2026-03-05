@@ -58,6 +58,12 @@ def _normalize_persona(raw: str) -> str:
     v = _clean_style_value(raw, 120)
     if not v:
         return ""
+    v = re.sub(
+        r"(?:として振る舞(?:って|う)|になりき(?:って|る)|を演じ(?:て|る)|にして(?:ください|下さい)?|でお願い(?:します)?|で統一|で話して)$",
+        "",
+        v,
+        flags=re.IGNORECASE,
+    ).strip()
     if re.search(r"(memstyle|スタイル|更新してください|維持|余計な提案|一人称|ユーザー呼称|文頭は|以後)", v, re.IGNORECASE):
         return ""
     if re.search(r"(?:^|[ ,。])(?:must|always|禁止|しない|するな)(?:[ ,。]|$)", v, re.IGNORECASE):
@@ -72,7 +78,7 @@ def extract_style_updates(user_text: str) -> Dict[str, str]:
         if pat.search(text):
             out[kv[0]] = kv[1]
 
-    if re.search(r"(persona|キャラ|性格|話し方|口調|なりき|模倣|として振る舞|act as|roleplay)", text, re.IGNORECASE):
+    if re.search(r"(persona|キャラ|人格|性格|話し方|口調|なりき|模倣|として振る舞|act as|roleplay)", text, re.IGNORECASE):
         persona = None
         m_persona_named = re.search(
             r"(?:キャラ|人格|persona)\s*(?:は|=|:|：)\s*([A-Za-z0-9ぁ-んァ-ヶ一-龠ー._\- ]{1,64})",
@@ -92,6 +98,25 @@ def extract_style_updates(user_text: str) -> Dict[str, str]:
             )
             if m_persona_as:
                 persona = m_persona_as.group(1)
+        if not persona:
+            # Examples:
+            # - こういうキャラになって: 真面目で礼儀正しい
+            # - 人格をロックマン風にして
+            m_persona_colon = re.search(
+                r"(?:こういう|この)?(?:キャラ|人格|性格|口調|話し方)(?:\s*になって)?\s*(?:は|を|:|：)\s*([^。\n]{2,120})",
+                text,
+                re.IGNORECASE,
+            )
+            if m_persona_colon:
+                persona = m_persona_colon.group(1).strip()
+        if not persona:
+            m_persona_to = re.search(
+                r"(?:キャラ|人格|性格|口調|話し方)\s*(?:を|は)?\s*([A-Za-z0-9ぁ-んァ-ヶ一-龠ー._\- ]{2,72}?)\s*(?:にして|にしてください|でお願い|でお願いします|で統一|で話して)",
+                text,
+                re.IGNORECASE,
+            )
+            if m_persona_to:
+                persona = m_persona_to.group(1).strip()
         if persona:
             normalized = _normalize_persona(persona)
             if normalized:
@@ -123,6 +148,14 @@ def extract_style_updates(user_text: str) -> Dict[str, str]:
             )
             if m_call_imperative:
                 out["callUser"] = _normalize_call_user(m_call_imperative.group(1))
+            else:
+                m_call_user_generic = re.search(
+                    r"(?:ユーザー|あなた)のことは\s*[「\"]?([^」\"\n。]{1,24}?)(?:[」\"]?\s*(?:って|と)?\s*呼(?:んで|べ|んでね)?)",
+                    text,
+                    re.IGNORECASE,
+                )
+                if m_call_user_generic:
+                    out["callUser"] = _normalize_call_user(m_call_user_generic.group(1))
 
     m_prefix = re.search(r"文頭(?:は|を)?[「\"]?([^」\"。\\n]{1,24})", text)
     if m_prefix:

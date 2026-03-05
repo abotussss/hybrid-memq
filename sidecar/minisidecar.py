@@ -650,6 +650,7 @@ def audit_output_ep(req: AuditRequest) -> AuditResponse:
 def profile() -> ProfileResponse:
     return ProfileResponse(
         ok=True,
+        style_profile=db.get_style_profile(),
         preference_profile=db.get_preference_profile(),
         memory_policy_profile=db.get_memory_policy_profile(),
     )

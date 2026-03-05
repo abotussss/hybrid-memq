@@ -29,69 +29,6 @@ function buildDegradedBlocks(prompt: string, budgets: { memctx: number; rules: n
   return { memrules, memstyle, memctx };
 }
 
-function parseImmediateStyleOverrides(prompt: string): Record<string, string> {
-  const s = String(prompt || "");
-  const out: Record<string, string> = {};
-  const normalizeCallUser = (raw: string): string => {
-    return raw
-      .trim()
-      .replace(/^["「]|["」]$/g, "")
-      .replace(/\s+/g, " ")
-      .replace(/(?:って)$/u, "")
-      .replace(/[。.!！?？]+$/u, "")
-      .trim();
-  };
-
-  const mCallQuoted = s.match(
-    /(?:呼び方は|ユーザー呼称は|あなたの呼び方は|call me(?: as)?|refer to me as)\s*[「"]?([^」"\n。]{1,24})[」"]?/i
-  );
-  if (mCallQuoted) out.callUser = normalizeCallUser(mCallQuoted[1]);
-
-  const mCallJp = s.match(
-    /(?:俺|ぼく|僕|私|わたし|オレ)のことは\s*[「"]?([^」"\n。]{1,24}?)(?:[」"]?\s*(?:って|と)?\s*呼(?:んで|べ|んでね)?)/i
-  );
-  if (mCallJp) out.callUser = normalizeCallUser(mCallJp[1]);
-
-  const mPrefix = s.match(/文頭(?:は|を)?\s*[「"]([^」"\n]{1,24})[」"]/i);
-  if (mPrefix) out.prefix = mPrefix[1].trim();
-
-  if (out.callUser && !out.prefix) out.prefix = `${out.callUser}、`;
-  return out;
-}
-
-function mergeMemstyle(base: string, overrides: Record<string, string>, budgetTokens: number): string {
-  const lines = String(base || "")
-    .split("\n")
-    .map((x) => x.trim())
-    .filter(Boolean);
-
-  let budgetLine = `budget_tokens=${budgetTokens}`;
-  const order: string[] = [];
-  const kv = new Map<string, string>();
-  for (const ln of lines) {
-    if (ln.startsWith("budget_tokens=")) {
-      budgetLine = ln;
-      continue;
-    }
-    const i = ln.indexOf("=");
-    if (i <= 0) continue;
-    const k = ln.slice(0, i).trim();
-    const v = ln.slice(i + 1).trim();
-    if (!k) continue;
-    if (!kv.has(k)) order.push(k);
-    kv.set(k, v);
-  }
-
-  for (const [k, v] of Object.entries(overrides)) {
-    if (!v) continue;
-    if (!kv.has(k)) order.push(k);
-    kv.set(k, v);
-  }
-
-  const merged = [budgetLine, ...order.map((k) => `${k}=${kv.get(k) || ""}`)].join("\n");
-  return ensureBudget(merged, budgetTokens);
-}
-
 function toolCallIdsInMessage(m: any): string[] {
   const ids = new Set<string>();
   if (!m || typeof m !== "object") return [];
@@ -387,12 +324,6 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
       memrules = ensureBudget(q.memrules || "", budgets.rules);
       memstyle = styleEnabled ? ensureBudget(q.memstyle || "", budgets.style) : "";
       memctx = ensureBudget(q.memctx || "", budgets.memctx);
-      if (styleEnabled) {
-        const overrides = parseImmediateStyleOverrides(prompt);
-        if (Object.keys(overrides).length > 0) {
-          memstyle = mergeMemstyle(memstyle, overrides, budgets.style);
-        }
-      }
       rt.lastMemstyleBySession.set(sessionKey, memstyle);
       writeStyleCache(workspaceRoot, sessionKey, memstyle);
       surfaceHit = Boolean(q.meta?.surfaceHit);
