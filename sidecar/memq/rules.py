@@ -231,7 +231,13 @@ def refresh_preference_profiles(db: MemqDB, now_sec: int) -> Dict[str, Dict[str,
             return ""
         if re.search(r"(budget_tokens=|identity\.precedence=|security\.|procedure\.|<MEM(?:RULES|STYLE|CTX)|\[MEM(?:RULES|STYLE|CTX))", t, re.IGNORECASE):
             return ""
-        if re.search(r"(memstyle|スタイル|更新してください|維持|余計な提案|一人称|ユーザー呼称|文頭は|以後)", t, re.IGNORECASE):
+        if re.search(r"(memstyle\s*を?\s*更新して(?:ください|下さい)|style\s*update(?:\s*please)?)", t, re.IGNORECASE):
+            return ""
+        t = re.sub(r"(?:memstyle\s*を?\s*更新して(?:ください|下さい)|style\s*update(?:\s*please)?)", " ", t, flags=re.IGNORECASE)
+        t = re.sub(r"(?:一人称|ユーザー呼称|文頭(?:は|を)?|prefix)\s*(?:は|:|：|=)\s*[^。,\n]{0,28}", " ", t, flags=re.IGNORECASE)
+        t = re.sub(r"(?:余計な提案[^。,\n]{0,30})", " ", t, flags=re.IGNORECASE)
+        t = " ".join(t.split()).strip()
+        if not t:
             return ""
         return t[:220]
 

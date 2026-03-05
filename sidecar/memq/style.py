@@ -54,19 +54,34 @@ def _normalize_call_user(raw: str) -> str:
     return v.strip()
 
 
+def _normalize_prefix(raw: str) -> str:
+    v = (raw or "").strip()
+    v = re.sub(r'^[「『"\']+|[」』"\']+$', "", v)
+    v = re.sub(r"(?:で統一して(?:ください|下さい)?|で統一|でお願い(?:します)?|で話して(?:ください|下さい)?|にして(?:ください|下さい)?).*$", "", v, flags=re.IGNORECASE)
+    v = re.sub(r"\s+$", "", v)
+    v = re.sub(r"\s+", " ", v).strip()
+    return v[:24]
+
+
 def _normalize_persona(raw: str) -> str:
     v = _clean_style_value(raw, 120)
     if not v:
         return ""
+    v = re.sub(r"^(?:キャラ|人格|性格|口調|話し方)\s*(?:を|は)?\s*", "", v, flags=re.IGNORECASE).strip()
+    # Drop update-control boilerplate but keep the actual persona description.
+    v = re.sub(r"(?:memstyle\s*を?\s*更新して(?:ください|下さい)|style\s*update(?:\s*please)?)", " ", v, flags=re.IGNORECASE)
+    v = re.sub(r"(?:一人称|ユーザー呼称|文頭(?:は|を)?|prefix)\s*(?:は|:|：|=)\s*[^。,\n]{0,28}", " ", v, flags=re.IGNORECASE)
+    v = re.sub(r"(?:余計な提案[^。,\n]{0,30})", " ", v, flags=re.IGNORECASE)
     v = re.sub(
         r"(?:として振る舞(?:って|う)|になりき(?:って|る)|を演じ(?:て|る)|にして(?:ください|下さい)?|でお願い(?:します)?|で統一|で話して)$",
         "",
         v,
         flags=re.IGNORECASE,
     ).strip()
-    if re.search(r"(memstyle|スタイル|更新してください|維持|余計な提案|一人称|ユーザー呼称|文頭は|以後)", v, re.IGNORECASE):
+    v = " ".join(v.split()).strip()
+    if not v:
         return ""
-    if re.search(r"(?:^|[ ,。])(?:must|always|禁止|しない|するな)(?:[ ,。]|$)", v, re.IGNORECASE):
+    if v in {"更新", "変更", "設定", "スタイル", "口調", "人格", "キャラ"}:
         return ""
     return v[:120]
 
@@ -80,6 +95,13 @@ def extract_style_updates(user_text: str) -> Dict[str, str]:
 
     if re.search(r"(persona|キャラ|人格|性格|話し方|口調|なりき|模倣|として振る舞|act as|roleplay)", text, re.IGNORECASE):
         persona = None
+        m_persona_fuu_any = re.search(
+            r"([A-Za-z0-9ぁ-んァ-ヶ一-龠ー._\-]{2,48}風)(?=(?:で|の|に|、|,|\s|$))",
+            text,
+            re.IGNORECASE,
+        )
+        if m_persona_fuu_any:
+            persona = m_persona_fuu_any.group(1).strip()
         m_persona_named = re.search(
             r"(?:キャラ|人格|persona)\s*(?:は|=|:|：)\s*([A-Za-z0-9ぁ-んァ-ヶ一-龠ー._\- ]{1,64})",
             text,
@@ -117,6 +139,15 @@ def extract_style_updates(user_text: str) -> Dict[str, str]:
             )
             if m_persona_to:
                 persona = m_persona_to.group(1).strip()
+        if not persona:
+            # Generic "X風" style/persona request (e.g. ロックマン風の口調で話して)
+            m_persona_fuu = re.search(
+                r"([A-Za-z0-9ぁ-んァ-ヶ一-龠ー._\-]{2,48}風)\s*(?:の)?\s*(?:口調|話し方|人格|キャラ)?\s*(?:で|に)?\s*(?:話して|振る舞って|お願いします|して)",
+                text,
+                re.IGNORECASE,
+            )
+            if m_persona_fuu:
+                persona = m_persona_fuu.group(1).strip()
         if persona:
             normalized = _normalize_persona(persona)
             if normalized:
@@ -159,11 +190,11 @@ def extract_style_updates(user_text: str) -> Dict[str, str]:
 
     m_prefix = re.search(r"文頭(?:は|を)?[「\"]?([^」\"。\\n]{1,24})", text)
     if m_prefix:
-        out["prefix"] = m_prefix.group(1).strip()
+        out["prefix"] = _normalize_prefix(m_prefix.group(1))
     else:
         m_prefix2 = _extract_quoted(text, r"(?:文頭|prefix)", 24)
         if m_prefix2:
-            out["prefix"] = m_prefix2
+            out["prefix"] = _normalize_prefix(m_prefix2)
 
     # Generic role-play request captures.
     m_role = re.search(
@@ -225,7 +256,7 @@ def sanitize_style_profile(db: MemqDB) -> int:
         elif key == "persona":
             cleaned = _normalize_persona(cleaned)
         elif key == "prefix" and cleaned:
-            cleaned = cleaned[:24]
+            cleaned = _normalize_prefix(cleaned)
 
         if cleaned == str(raw or ""):
             continue

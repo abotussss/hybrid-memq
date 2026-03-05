@@ -306,6 +306,58 @@ class RegressionGuardsTest(unittest.TestCase):
         self.assertTrue(any(b.startswith("language.allowed=ja,en") for b in rules2))
 
     @unittest.skipUnless(HAVE_BRAIN_DEPS, "brain deps unavailable in this python env")
+    def test_brain_style_update_survives_preference_refresh(self) -> None:
+        cfg = load_config()
+        svc = BrainService(cfg)
+        now = int(time.time())
+
+        # Seed an older persona preference/profile to ensure new explicit update can override.
+        self.db.add_preference_event(
+            key="style.persona",
+            value="calm helper",
+            weight=1.0,
+            explicit=True,
+            source="seed",
+            evidence_uri="seed:1",
+            created_at=now - 3600,
+        )
+        refresh_preference_profiles(self.db, now)
+        self.assertIn("persona", self.db.get_style_profile())
+
+        plan = BrainIngestPlan.model_validate(
+            {
+                "version": "memq_brain_v1",
+                "facts": [],
+                "events": [],
+                "style_update": {
+                    "apply": True,
+                    "explicit": True,
+                    "keys": {
+                        "character": "ロックマンのように、礼儀正しく優しい口調",
+                        "first_person": "僕",
+                        "call_user": "ヒロ",
+                    },
+                },
+                "rules_update": {"apply": False, "explicit": False, "rules": []},
+            }
+        )
+        wrote = svc.apply_ingest_plan(
+            db=self.db,
+            session_key="s1",
+            ts=now + 1,
+            plan=plan,
+            user_text="ロックマン口調で。僕をヒロって呼んで。",
+            assistant_text="了解",
+            metadata=None,
+        )
+        self.assertGreaterEqual(int(wrote.get("style", 0)), 2)
+        refresh_preference_profiles(self.db, now + 1)
+        style = self.db.get_style_profile()
+        self.assertIn("ロックマン", str(style.get("persona") or ""))
+        self.assertEqual("僕", style.get("firstPerson"))
+        self.assertEqual("ヒロ", style.get("callUser"))
+
+    @unittest.skipUnless(HAVE_BRAIN_DEPS, "brain deps unavailable in this python env")
     def test_brain_recall_repair_accepts_partial_payload(self) -> None:
         client = OllamaBrainClient(
             OllamaConfig(

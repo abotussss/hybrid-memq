@@ -397,6 +397,34 @@ def memory_ingest_turn(req: IngestTurnRequest) -> IngestTurnResponse:
             err=e,
         )
 
+    style_plan = None
+    try:
+        style_plan = brain.build_style_update_plan(
+            session_key=req.sessionKey,
+            user_text=req.userText,
+            assistant_text=req.assistantText,
+            ts=req.ts,
+            metadata=req.metadata,
+        )
+    except Exception as e:
+        return _brain_error_response(
+            code=_brain_code("brain_unavailable", e),
+            op="style_plan",
+            session_key=req.sessionKey,
+            trace_id=brain.last_trace_id("style_plan"),
+            err=e,
+        )
+
+    if plan is not None and style_plan is not None and bool(getattr(style_plan, "apply", False)):
+        if plan.style_update is None:
+            plan.style_update = style_plan
+        else:
+            merged_keys = dict(plan.style_update.keys or {})
+            merged_keys.update(dict(style_plan.keys or {}))
+            plan.style_update.apply = bool(plan.style_update.apply or style_plan.apply or bool(merged_keys))
+            plan.style_update.explicit = bool(plan.style_update.explicit or style_plan.explicit)
+            plan.style_update.keys = merged_keys
+
     if plan is not None:
         try:
             wrote = brain.apply_ingest_plan(
@@ -476,6 +504,63 @@ def memctx_query(req: MemctxQueryRequest) -> MemctxQueryResponse:
         {"role": str(m.role), "text": str(m.text), "ts": int(m.ts) if m.ts is not None else None}
         for m in (req.recentMessages or [])
     ]
+    style_trace_id = ""
+    style_applied = 0
+    style_plan_obj = None
+    last_assistant_text = ""
+    for m in reversed(recent_messages):
+        if str(m.get("role") or "").lower() == "assistant":
+            last_assistant_text = str(m.get("text") or "")
+            break
+    try:
+        style_plan_obj = brain.build_style_update_plan(
+            session_key=req.sessionKey,
+            user_text=req.prompt,
+            assistant_text=last_assistant_text,
+            ts=int(time.time()),
+            metadata={"source": "memctx_query"},
+        )
+        style_trace_id = brain.last_trace_id("style_plan")
+    except Exception as e:
+        if required:
+            return _brain_error_response(
+                code=_brain_code("brain_unavailable", e),
+                op="style_plan",
+                session_key=req.sessionKey,
+                trace_id=brain.last_trace_id("style_plan"),
+                err=e,
+            )
+        style_plan_obj = None
+
+    if style_plan_obj is not None and bool(getattr(style_plan_obj, "apply", False)) and bool(
+        getattr(style_plan_obj, "explicit", False)
+    ):
+        try:
+            style_wrote = int(
+                brain.apply_style_update_plan(
+                    db=db,
+                    session_key=req.sessionKey,
+                    ts=int(time.time()),
+                    style_plan=style_plan_obj,
+                )
+            )
+            style_applied = 1 if style_wrote > 0 else 0
+            brain.record_apply(
+                op="style_plan",
+                session_key=req.sessionKey,
+                trace_id=style_trace_id,
+                apply_summary={"style": style_wrote},
+            )
+        except Exception as e:
+            if required:
+                return _brain_error_response(
+                    code=_brain_code("brain_apply_failed", e),
+                    op="style_apply",
+                    session_key=req.sessionKey,
+                    trace_id=style_trace_id,
+                    err=e,
+                )
+
     try:
         brain_plan_obj = brain.build_recall_plan(
             session_key=req.sessionKey,
@@ -508,7 +593,7 @@ def memctx_query(req: MemctxQueryRequest) -> MemctxQueryResponse:
             if sd and ed:
                 timeline_range = TimelineRange(start_day=sd, end_day=ed, label=label, explicit=True)
                 timeline_first = True
-    if timeline_range is None:
+    if timeline_range is None and not required:
         timeline_range = detect_timeline_range(req.prompt)
         timeline_first = bool(timeline_range and timeline_range.explicit)
 
@@ -562,6 +647,8 @@ def memctx_query(req: MemctxQueryRequest) -> MemctxQueryResponse:
     dbg["ps_seen"] = 1 if bool(call_meta.get("ps_seen")) else 0
     dbg["brain_call_ok"] = 1 if bool(call_meta.get("ok")) else 0
     dbg["brain_latency_ms"] = int(call_meta.get("latency_ms") or 0)
+    dbg["style_plan_applied"] = int(style_applied)
+    dbg["style_trace_id"] = style_trace_id
     if brain_plan and isinstance(brain_plan.get("intent"), dict):
         for k, v in brain_plan["intent"].items():
             dbg[f"brain_intent_{k}"] = v

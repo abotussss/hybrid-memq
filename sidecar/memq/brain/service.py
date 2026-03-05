@@ -16,12 +16,42 @@ from ..structured_facts import normalize_fact_value, plausible_fact_value, struc
 from ..style import apply_style_updates
 from ..style import sanitize_style_profile
 from .ollama_client import BrainUnavailable, OllamaBrainClient, OllamaConfig
-from .schemas import BrainAuditPatchPlan, BrainIngestPlan, BrainMergePlan, BrainRecallPlan
+from .schemas import BrainAuditPatchPlan, BrainIngestPlan, BrainMergePlan, BrainRecallPlan, StyleUpdatePlan
 
 
 SAFE_FACT_KEY_PREFIX = ("profile.", "pref.", "policy.", "project.", "relationship.", "timeline.", "rule.", "memory.")
 SAFE_RULE_PREFIX = ("language.", "security.", "procedure.", "compliance.", "output.", "operation.", "identity.")
 SAFE_STYLE_KEYS = {"tone", "persona", "verbosity", "firstPerson", "callUser", "prefix", "speakingStyle", "avoid"}
+STYLE_KEY_ALIASES = {
+    "tone": "tone",
+    "persona": "persona",
+    "character": "persona",
+    "role": "persona",
+    "voice": "persona",
+    "verbosity": "verbosity",
+    "firstperson": "firstPerson",
+    "first_person": "firstPerson",
+    "first-person": "firstPerson",
+    "calluser": "callUser",
+    "call_user": "callUser",
+    "call-user": "callUser",
+    "username": "callUser",
+    "user_name": "callUser",
+    "user-name": "callUser",
+    "prefix": "prefix",
+    "speakingstyle": "speakingStyle",
+    "speaking_style": "speakingStyle",
+    "speaking-style": "speakingStyle",
+    "speechstyle": "speakingStyle",
+    "speech_style": "speakingStyle",
+    "speech-style": "speakingStyle",
+    "avoid": "avoid",
+}
+STYLE_PREF_KEYS = {
+    "tone": "style.tone",
+    "verbosity": "style.verbosity",
+    "persona": "style.persona",
+}
 SECRET_RE = re.compile(
     r"(sk-[A-Za-z0-9_\-]{10,}|BEGIN (?:RSA|OPENSSH|PRIVATE) KEY|eyJ[A-Za-z0-9_\-]{12,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,})",
     re.IGNORECASE,
@@ -95,6 +125,16 @@ class BrainService:
             ts = (m or {}).get("ts")
             out.append({"role": role, "text": text, "ts": ts})
         return out
+
+    def _canonical_style_key(self, key: str) -> str:
+        k = str(key or "").strip()
+        if not k:
+            return ""
+        if k in SAFE_STYLE_KEYS:
+            return k
+        low = k.lower()
+        low = low.replace(" ", "").replace(".", "_")
+        return STYLE_KEY_ALIASES.get(low, "")
 
     def _can_attempt(self) -> bool:
         if self.required:
@@ -420,6 +460,38 @@ class BrainService:
             session_key=session_key,
             payload=payload,
             call=lambda: self.client.build_ingest_plan(
+                session_key=session_key,
+                user_text=user_compact,
+                assistant_text=assistant_compact,
+                ts=ts,
+                metadata=md,
+            ) if self.client else None,
+        )
+
+    def build_style_update_plan(
+        self,
+        *,
+        session_key: str,
+        user_text: str,
+        assistant_text: str,
+        ts: int,
+        metadata: Optional[Dict[str, Any]],
+    ) -> Optional[StyleUpdatePlan]:
+        user_compact = self._compact_text(user_text, int(self.cfg.brain_ingest_user_chars))
+        assistant_compact = self._compact_text(assistant_text, int(self.cfg.brain_ingest_assistant_chars))
+        md = dict(metadata or {})
+        payload = {
+            "session_key": session_key,
+            "ts": int(ts),
+            "user_text": user_compact,
+            "assistant_text": assistant_compact,
+            "metadata": md,
+        }
+        return self._call_plan(
+            op="style_plan",
+            session_key=session_key,
+            payload=payload,
+            call=lambda: self.client.build_style_update_plan(
                 session_key=session_key,
                 user_text=user_compact,
                 assistant_text=assistant_compact,
@@ -814,15 +886,14 @@ class BrainService:
         # style/rules are applied from the Brain plan (with whitelist + secret guards).
         su = plan.style_update
         if su and su.apply:
-            style_updates: Dict[str, str] = {}
-            for k, v in (su.keys or {}).items():
-                kk = str(k or "").strip()
-                vv = " ".join(str(v or "").split()).strip()
-                if kk in SAFE_STYLE_KEYS and vv and not SECRET_RE.search(vv):
-                    style_updates[kk] = vv[:180]
-            if style_updates:
-                wrote["style"] += int(apply_style_updates(db, style_updates))
-                sanitize_style_profile(db)
+            wrote["style"] += int(
+                self.apply_style_update_plan(
+                    db=db,
+                    session_key=session_key,
+                    ts=now,
+                    style_plan=su,
+                )
+            )
 
         ru = plan.rules_update
         if ru and ru.apply:
@@ -850,4 +921,48 @@ class BrainService:
                         by_key[k] = (k, v, int(prio), kind)
                 wrote["rules"] += int(apply_rule_updates(db, list(by_key.values())))
 
+        return wrote
+
+    def apply_style_update_plan(
+        self,
+        *,
+        db: MemqDB,
+        session_key: str,
+        ts: int,
+        style_plan: StyleUpdatePlan,
+    ) -> int:
+        su = style_plan
+        if not su or not bool(su.apply):
+            return 0
+        now = int(ts or time.time())
+        style_updates: Dict[str, str] = {}
+        pref_updates: Dict[str, str] = {}
+        for k, v in (su.keys or {}).items():
+            kk = self._canonical_style_key(str(k or ""))
+            vv = " ".join(str(v or "").split()).strip()
+            if kk in SAFE_STYLE_KEYS and vv and not SECRET_RE.search(vv):
+                compact = vv[:180]
+                style_updates[kk] = compact
+                pref_key = STYLE_PREF_KEYS.get(kk)
+                if pref_key:
+                    pref_updates[pref_key] = compact
+        if not style_updates:
+            return 0
+        wrote = int(apply_style_updates(db, style_updates))
+        # Keep style updates stable against immediate profile refresh overwrite by
+        # adding strong preference events and profiles in the same turn.
+        pref_weight = 3.0 if bool(su.explicit) else 1.4
+        pref_conf = 0.97 if bool(su.explicit) else 0.78
+        for pk, pv in pref_updates.items():
+            db.add_preference_event(
+                key=pk,
+                value=pv,
+                weight=pref_weight,
+                explicit=bool(su.explicit),
+                source="brain_style",
+                evidence_uri=f"session:{session_key}:brain_style",
+                created_at=now,
+            )
+            db.upsert_preference_profile(pk, pv, pref_conf)
+        sanitize_style_profile(db)
         return wrote

@@ -1,0 +1,12 @@
+Return exactly one JSON object:
+{"apply": boolean, "explicit": boolean, "keys": {"tone": string, "persona": string, "verbosity": string, "firstPerson": string, "callUser": string, "prefix": string, "speakingStyle": string, "avoid": string}}
+
+Rules:
+- If user explicitly asks style/persona/tone/first-person/call-user changes, set apply=true and explicit=true.
+- Fill only keys that are explicitly requested or clearly implied from the user text.
+- Never translate user-provided literals for firstPerson/callUser/prefix/persona.
+  - Example: 「一人称は僕」 -> firstPerson=\"僕\" (not \"I\")
+  - Example: 「呼称はヒロ」 -> callUser=\"ヒロ\" (not \"ユーザー\")
+  - Example: 「文頭は『ヒロ、』」 -> prefix=\"ヒロ、\"
+- If no explicit style request exists, return {"apply":false,"explicit":false,"keys":{}}.
+- No prose, no markdown, no extra keys.

@@ -12,7 +12,8 @@ from typing import Any, Dict, Optional, Type, TypeVar
 import httpx
 from pydantic import BaseModel, ValidationError
 
-from .schemas import BrainAuditPatchPlan, BrainIngestPlan, BrainMergePlan, BrainRecallPlan
+from .schemas import BrainAuditPatchPlan, BrainIngestPlan, BrainMergePlan, BrainRecallPlan, StyleUpdatePlan
+from ..style import extract_style_updates
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -209,6 +210,7 @@ class OllamaBrainClient:
         self._restart_lock = threading.Lock()
         self._last_chat_stats: Dict[str, Any] = {}
         self._ingest_system = _read_prompt("ingest_system.txt")
+        self._style_system = _read_prompt("style_system.txt")
         self._recall_system = _read_prompt("recall_system.txt")
         self._merge_system = _read_prompt("merge_system.txt")
         self._audit_patch_system = _read_prompt("audit_patch_system.txt")
@@ -413,8 +415,6 @@ class OllamaBrainClient:
             "options": {
                 "temperature": float(self.cfg.temperature),
                 "num_predict": np,
-                # Reduce "thinking-only" responses on local reasoning models.
-                "reasoning": "none",
             },
             "messages": [
                 {"role": "system", "content": system_prompt or "Return strict JSON only."},
@@ -465,7 +465,7 @@ class OllamaBrainClient:
         msg = self._build_chat_payload(user_payload=user_payload, system_prompt=system_prompt, schema=schema, num_predict=num_predict)
         res = self._post("/api/chat", msg)
         parsed = self._parse_chat_json(res)
-        if parsed is not None:
+        if parsed is not None and len(parsed) > 0:
             return parsed
 
         # Retry once without strict format; some local model builds occasionally
@@ -490,6 +490,25 @@ class OllamaBrainClient:
 
     def _repair_payload(self, *, model_cls: Type[T], data: Dict[str, Any], user_payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         raw = _to_dict(data)
+        if model_cls is StyleUpdatePlan:
+            su_raw = _to_dict(raw.get("style_update")) or raw
+            keys = _to_dict(su_raw.get("keys"))
+            if not keys:
+                keys = _to_dict(raw.get("style")) or _to_dict(raw.get("style_profile"))
+            apply_raw = su_raw.get("apply")
+            explicit_raw = su_raw.get("explicit")
+            apply = bool(apply_raw) if isinstance(apply_raw, bool) else bool(keys)
+            explicit = bool(explicit_raw) if isinstance(explicit_raw, bool) else bool(keys)
+            cleaned_keys: Dict[str, str] = {}
+            for k, v in keys.items():
+                kk = " ".join(str(k or "").split()).strip()
+                vv = " ".join(str(v or "").split()).strip()
+                if not kk or not vv:
+                    continue
+                cleaned_keys[kk[:48]] = vv[:180]
+                if len(cleaned_keys) >= 12:
+                    break
+            return {"apply": apply, "explicit": explicit, "keys": cleaned_keys}
         if model_cls is BrainRecallPlan:
             retrieval_defaults = _to_dict(user_payload.get("retrieval_defaults"))
             budgets = _to_dict(user_payload.get("budgets"))
@@ -713,6 +732,82 @@ class OllamaBrainClient:
             system_prompt=self._ingest_system,
             num_predict=ingest_np,
         )
+
+    def build_style_update_plan(
+        self,
+        *,
+        session_key: str,
+        user_text: str,
+        assistant_text: str,
+        ts: int,
+        metadata: Optional[Dict[str, Any]],
+    ) -> StyleUpdatePlan:
+        payload = {
+            "session_key": session_key,
+            "ts": int(ts),
+            "user_text": user_text or "",
+            "assistant_text": assistant_text or "",
+            "metadata": metadata or {},
+            "constraints": {
+                "version": "memq_brain_v1",
+                "style_keys_allow": ["tone", "persona", "verbosity", "firstPerson", "callUser", "prefix", "speakingStyle", "avoid"],
+                "unknown_policy": "return_apply_false",
+            },
+        }
+        user_block = (
+            f"user_text:\n{user_text or ''}\n\n"
+            f"assistant_text:\n{assistant_text or ''}\n"
+        )
+        msg = {
+            "model": self.cfg.model,
+            "stream": False,
+            "keep_alive": self.cfg.keep_alive,
+            "options": {
+                "temperature": float(self.cfg.temperature),
+            },
+            "messages": [
+                {"role": "system", "content": self._style_system or self._ingest_system or "Return strict JSON only."},
+                {"role": "user", "content": user_block},
+            ],
+        }
+        res = self._post("/api/chat", msg)
+        parsed = self._parse_chat_json(res)
+        if parsed is None or len(parsed) == 0:
+            relaxed = dict(msg)
+            relaxed["messages"] = [
+                {
+                    "role": "system",
+                    "content": "Return one minified JSON object only with keys apply, explicit, keys. No prose.",
+                },
+                {"role": "user", "content": user_block},
+            ]
+            res2 = self._post("/api/chat", relaxed)
+            parsed = self._parse_chat_json(res2) or {}
+        try:
+            plan = StyleUpdatePlan.model_validate(parsed)
+        except ValidationError:
+            repaired = self._repair_payload(model_cls=StyleUpdatePlan, data=parsed or {}, user_payload=payload)
+            if repaired is None:
+                plan = StyleUpdatePlan(apply=False, explicit=False, keys={})
+            else:
+                plan = StyleUpdatePlan.model_validate(repaired)
+
+        # Assistive normalization:
+        # Keep Brain as the orchestrator, but preserve explicit style literals from user text
+        # so callUser/firstPerson/persona are not translated to generic placeholders.
+        explicit_updates = extract_style_updates(user_text or "")
+        if explicit_updates:
+            merged = dict(plan.keys or {})
+            for key in ("tone", "persona", "verbosity", "firstPerson", "callUser", "prefix", "speakingStyle", "avoid"):
+                val = " ".join(str(explicit_updates.get(key, "")).split()).strip()
+                if val:
+                    merged[key] = val[:160]
+            plan = StyleUpdatePlan(
+                apply=bool(plan.apply or bool(merged)),
+                explicit=bool(plan.explicit or True),
+                keys=merged,
+            )
+        return plan
 
     def build_recall_plan(
         self,

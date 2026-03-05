@@ -10,6 +10,9 @@ Rules:
 - style_update/rules_update must be apply=true only if explicit user intent is clearly present.
 - If user explicitly requests persona/tone/first-person/callUser/style updates, set style_update.apply=true and include normalized keys.
 - If user explicitly requests persistent behavioral rules, set rules_update.apply=true and include compact k=v rules.
+- style_update.keys must use only these canonical keys:
+  - tone, persona, verbosity, firstPerson, callUser, prefix, speakingStyle, avoid
+- Keep persona compact (<=120 chars) and do not include MEM blocks, JSON fragments, or runtime noise.
 - Explicit style examples (must update style_update):
   - 「こういうキャラになって」「口調を〜にして」「一人称は〜」「ユーザーの呼び方は〜」
 - Explicit rule examples (must update rules_update):
