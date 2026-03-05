@@ -41,3 +41,19 @@ python3 bench/src/brain_required_proof.py
 ```bash
 scripts/memq-openclaw.sh brain-proof
 ```
+
+For complex real-world memory orchestration validation (long turns, style/rule updates, deep/timeline recall):
+
+```bash
+python3 bench/src/brain_complex_required_validation.py
+```
+
+This writes:
+
+- `bench/results/brain_complex_required_validation.json`
+
+To verify OpenClaw gateway integration markers:
+
+```bash
+scripts/memq-openclaw.sh brain-proof-openclaw
+```

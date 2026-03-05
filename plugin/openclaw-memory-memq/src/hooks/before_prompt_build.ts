@@ -400,6 +400,9 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, rt: Ru
       const traceId = String((q as any)?.traceId || (q as any)?.meta?.traceId || (q as any)?.meta?.debug?.trace_id || "");
       const psSeen = Number((q as any)?.meta?.debug?.ps_seen || 0) > 0 ? 1 : 0;
       logInfo(api, `[memq][brain-proof] session=${sessionKey} op=recall_plan trace_id=${traceId} model=gpt-oss:20b ps_seen=${psSeen} latency_ms=${Date.now() - t0}`);
+      if (brainRequired && psSeen !== 1) {
+        throw new Error("brain_proof_missing_ps_seen");
+      }
     } catch (err) {
       const em = String((err as Error)?.message || err || "unknown_error").replace(/\s+/g, " ").slice(0, 280);
       logInfo(

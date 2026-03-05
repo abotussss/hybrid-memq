@@ -485,6 +485,26 @@ cmd_brain_proof() {
   echo
 }
 
+cmd_brain_proof_openclaw() {
+  local log_file="${HOME}/.openclaw/logs/gateway.log"
+  if [ ! -f "$log_file" ]; then
+    echo "gateway.log not found: $log_file"
+    return 1
+  fi
+  echo "openclaw brain-proof markers (last 80):"
+  grep "\[memq\]\[brain-proof\]" "$log_file" | tail -n 80 || true
+  echo
+  echo "openclaw brain-proof summary:"
+  local total
+  total="$(grep -c "\[memq\]\[brain-proof\]" "$log_file" || true)"
+  local ps_seen_ok
+  ps_seen_ok="$(grep "\[memq\]\[brain-proof\]" "$log_file" | grep -c "ps_seen=1" || true)"
+  local errors
+  errors="$(grep "\[memq\]\[brain-proof\]" "$log_file" | grep -c "err=1" || true)"
+  echo "total_markers=$total ps_seen_ok=$ps_seen_ok err_markers=$errors"
+  echo
+}
+
 cmd_setup() {
   print_banner
   cmd_install
@@ -525,6 +545,8 @@ commands:
   brain-required-on   force brain required mode (fail-closed)
   brain-required-off  return to best_effort mode
   brain-proof         print /brain/stats + /brain/trace + ollama /api/ps
+  brain-proof-openclaw
+                      print OpenClaw gateway.log memq brain-proof markers
 EOF
 }
 
@@ -550,5 +572,6 @@ case "${1:-}" in
   brain-required-on) cmd_brain_required_on ;;
   brain-required-off) cmd_brain_required_off ;;
   brain-proof) cmd_brain_proof ;;
+  brain-proof-openclaw) cmd_brain_proof_openclaw ;;
   *) usage; exit 1 ;;
 esac

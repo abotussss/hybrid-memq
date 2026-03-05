@@ -59,6 +59,8 @@ export function createAgentEnd(api: any, sidecar: SidecarClient, rt: RuntimeStat
   return async (event: any, hookCtx: any): Promise<void> => {
     const sessionKey = String(hookCtx?.sessionKey ?? hookCtx?.sessionId ?? event?.sessionKey ?? "default");
     const workspaceRoot = getCfg(api, "memq.workspaceRoot", defaults["memq.workspaceRoot"]);
+    const brainMode = String(getCfg(api, "memq.brain.mode", defaults["memq.brain.mode"]) || "best_effort").toLowerCase();
+    const brainRequired = brainMode === "required";
     const messages = collectMessages(event, hookCtx);
 
     const lastUser = [...messages].reverse().find((m) => String(m?.role ?? "") === "user");
@@ -86,16 +88,20 @@ export function createAgentEnd(api: any, sidecar: SidecarClient, rt: RuntimeStat
       logInfo(api, `[memq][brain-proof] session=${sessionKey} op=ingest_plan trace_id=${traceId} model=gpt-oss:20b`);
     } catch (err) {
       const em = String((err as Error)?.message || err || "unknown_error").replace(/\s+/g, " ").slice(0, 280);
-      try {
-        enqueueIngest(workspaceRoot, {
-          sessionKey,
-          userText: userText.slice(0, 2400),
-          assistantText: assistantText.slice(0, 2400),
-          ts: Math.floor(Date.now() / 1000),
-          metadata: actionSummaries.length > 0 ? { actionSummaries } : undefined,
-        });
-      } catch {
-        // best effort queue
+      if (!brainRequired) {
+        try {
+          enqueueIngest(workspaceRoot, {
+            sessionKey,
+            userText: userText.slice(0, 2400),
+            assistantText: assistantText.slice(0, 2400),
+            ts: Math.floor(Date.now() / 1000),
+            metadata: actionSummaries.length > 0 ? { actionSummaries } : undefined,
+          });
+        } catch {
+          // best effort queue
+        }
+      } else {
+        logInfo(api, `[memq-v2] agent_end session=${sessionKey} ingest_fail_closed=1 mode=required`);
       }
       logInfo(api, `[memq-v2] agent_end session=${sessionKey} ingest_failed=${(err as Error).message}`);
       logInfo(api, `[memq][brain-proof] session=${sessionKey} op=ingest_plan trace_id= err=1 model=gpt-oss:20b error=${em}`);

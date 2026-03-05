@@ -1,0 +1,250 @@
+{
+  "ok": true,
+  "base": "http://127.0.0.1:7781",
+  "ts": 1772673288,
+  "session": "brain_complex_1772673288",
+  "health": {
+    "brainMode": "required",
+    "brainModel": "gpt-oss:20b"
+  },
+  "ensure": {
+    "ok": true,
+    "seen": true,
+    "trace_id": "a742f558-6309-463e-aeba-6d0343fde021",
+    "ps": {
+      "ok": true,
+      "seen": true,
+      "matched": {
+        "name": "gpt-oss:20b",
+        "model": "gpt-oss:20b",
+        "size": 14094668192,
+        "expires_at": "2026-03-05T10:44:37.493326+09:00"
+      },
+      "models_n": 1
+    }
+  },
+  "ingest_rows": [
+    {
+      "idx": 0,
+      "traceId": "8d83a58e-8fe7-4bf9-bfa5-2f8a119f284b",
+      "wrote": {
+        "surface": 0,
+        "deep": 0,
+        "ephemeral": 0,
+        "quarantined": 0,
+        "events": 2,
+        "style": 1,
+        "rules": 1,
+        "brain": 1
+      }
+    },
+    {
+      "idx": 1,
+      "traceId": "5c25964f-b7d0-4875-846a-f9b3243c7c30",
+      "wrote": {
+        "surface": 0,
+        "deep": 0,
+        "ephemeral": 0,
+        "quarantined": 0,
+        "events": 2,
+        "style": 0,
+        "rules": 0,
+        "brain": 1
+      }
+    },
+    {
+      "idx": 2,
+      "traceId": "bcf3b25f-9fc6-4302-87e1-9e2d8e03eb79",
+      "wrote": {
+        "surface": 0,
+        "deep": 0,
+        "ephemeral": 0,
+        "quarantined": 0,
+        "events": 2,
+        "style": 0,
+        "rules": 0,
+        "brain": 1
+      }
+    },
+    {
+      "idx": 3,
+      "traceId": "69a5d0e0-082f-4655-9494-3bc8a8173af7",
+      "wrote": {
+        "surface": 0,
+        "deep": 0,
+        "ephemeral": 0,
+        "quarantined": 0,
+        "events": 2,
+        "style": 0,
+        "rules": 0,
+        "brain": 1
+      }
+    },
+    {
+      "idx": 4,
+      "traceId": "4f0d2e66-9a6f-4a41-831f-dd1bc8261a3f",
+      "wrote": {
+        "surface": 0,
+        "deep": 0,
+        "ephemeral": 0,
+        "quarantined": 0,
+        "events": 2,
+        "style": 0,
+        "rules": 0,
+        "brain": 1
+      }
+    }
+  ],
+  "idle_once": {
+    "did": [
+      "decay",
+      "prune_expired_events",
+      "dedup_surface",
+      "dedup_surface_fuzzy",
+      "dedup_deep",
+      "dedup_deep_fuzzy",
+      "cleanup_noisy_memory",
+      "promote_structured_from_conv",
+      "promote_profile_facts",
+      "prune_invalid_profile_facts",
+      "backfill_fact_keys",
+      "backfill_fact_index",
+      "cleanup_stale_fact_index",
+      "profile_refresh",
+      "rule_override_prune",
+      "daily_digest_refresh",
+      "brain_merge_plan"
+    ],
+    "traceId": "e20a1a95-48c7-4981-9438-315ac7012e4a"
+  },
+  "queries": [
+    {
+      "name": "style_and_rules",
+      "traceId": "1b637bac-0212-4ea3-a9a5-451ca9c4cfb4",
+      "memrules_head": "budget_tokens=80\nidentity.precedence=memstyle\nidentity.no_generic_assistant_label=true\nsecurity.never_output_secrets=true\noperation.allow_user_requested_local_config=true\nlanguage.allowed=ja,en\nprocedure.avoid_extra_suggestions=true",
+      "memstyle_head": "budget_tokens=120\nfirstPerson=僕\ncallUser=ヒロ\ntone=polite\npersona=persona\nspeakingStyle=真面目で優しい。丁寧＋親しい口調で、自然な日本語で話す。語尾は「〜だね/〜だよ/〜かな？」を過剰にならない範囲で使う。",
+      "memctx_head": "budget_tokens=120\nd1=人格: persona=persona | subject=assistant | conf=0.96 | src=profile_sync | ttl=3650d\np.snapshot=callUser:ヒロ | firstPerson:僕 | persona:persona | tone:polite | verbosity:low | language.primary:ja | policy.ttl.default_d\nwm.surf=none",
+      "debug": {
+        "surface_count": 0,
+        "deep_count": 5,
+        "surface_top_score": null,
+        "surface_top_sim": null,
+        "surface_top_lex": null,
+        "surface_threshold": 0.85,
+        "coverage_gap": 1,
+        "brain_plan_used": 1,
+        "brain_plan_queries_n": 1,
+        "brain_plan_fact_keys_n": 5,
+        "brain_plan_allow_deep": 1,
+        "timeline_route": 0,
+        "timeline_label": "",
+        "brain_enabled": 1,
+        "brain_required": 1,
+        "brain_plan": 1,
+        "trace_id": "1b637bac-0212-4ea3-a9a5-451ca9c4cfb4",
+        "ps_seen": 1,
+        "brain_call_ok": 1,
+        "brain_latency_ms": 6318,
+        "brain_intent_timeline": 0.0,
+        "brain_intent_profile": 0.0,
+        "brain_intent_state": 0.0,
+        "brain_intent_fact_lookup": 0.0,
+        "brain_intent_meta": 0.0,
+        "brain_intent_fact": 0.0,
+        "brain_intent_procedure": 0.0,
+        "brain_intent_overview": 0.0
+      }
+    },
+    {
+      "name": "deep_profile_project",
+      "traceId": "22f45316-eddf-4dd3-adb8-fe6eccfb0847",
+      "memrules_head": "budget_tokens=80\nidentity.precedence=memstyle\nidentity.no_generic_assistant_label=true\nsecurity.never_output_secrets=true\noperation.allow_user_requested_local_config=true\nlanguage.allowed=ja,en\nprocedure.avoid_extra_suggestions=true",
+      "memstyle_head": "budget_tokens=120\nfirstPerson=僕\ncallUser=ヒロ\ntone=polite\npersona=persona\nspeakingStyle=真面目で優しい。丁寧＋親しい口調で、自然な日本語で話す。語尾は「〜だね/〜だよ/〜かな？」を過剰にならない範囲で使う。",
+      "memctx_head": "budget_tokens=120\nd1=家族構成: ？ ctx.memory=surface_only_minimal </MEMCTX v1> 俺 | subject=user | conf=0.84 | src=user_msg | ttl=365d\np.snapshot=callUser:ヒロ | firstPerson:僕 | persona:persona | tone:polite | verbosity:low | language.primary:ja | policy.ttl.default_d\nwm.surf=none",
+      "debug": {
+        "surface_count": 0,
+        "deep_count": 5,
+        "surface_top_score": null,
+        "surface_top_sim": null,
+        "surface_top_lex": null,
+        "surface_threshold": 0.85,
+        "coverage_gap": 1,
+        "brain_plan_used": 1,
+        "brain_plan_queries_n": 1,
+        "brain_plan_fact_keys_n": 9,
+        "brain_plan_allow_deep": 1,
+        "timeline_route": 0,
+        "timeline_label": "",
+        "brain_enabled": 1,
+        "brain_required": 1,
+        "brain_plan": 1,
+        "trace_id": "22f45316-eddf-4dd3-adb8-fe6eccfb0847",
+        "ps_seen": 1,
+        "brain_call_ok": 1,
+        "brain_latency_ms": 5927,
+        "brain_intent_timeline": 0.0,
+        "brain_intent_profile": 0.0,
+        "brain_intent_state": 0.0,
+        "brain_intent_fact_lookup": 0.0,
+        "brain_intent_meta": 0.0,
+        "brain_intent_fact": 0.0,
+        "brain_intent_procedure": 0.0,
+        "brain_intent_overview": 0.0
+      }
+    },
+    {
+      "name": "timeline_yesterday",
+      "traceId": "48f9b5c0-577e-4232-96a5-752f0a52316f",
+      "memrules_head": "budget_tokens=80\nidentity.precedence=memstyle\nidentity.no_generic_assistant_label=true\nsecurity.never_output_secrets=true\noperation.allow_user_requested_local_config=true\nlanguage.allowed=ja,en\nprocedure.avoid_extra_suggestions=true",
+      "memstyle_head": "budget_tokens=120\nfirstPerson=僕\ncallUser=ヒロ\ntone=polite\npersona=persona\nspeakingStyle=真面目で優しい。丁寧＋親しい口調で、自然な日本語で話す。語尾は「〜だね/〜だよ/〜かな？」を過剰にならない範囲で使う。",
+      "memctx_head": "budget_tokens=120\nt.range=2026-03-04..2026-03-04\nt.ev2=2026-03-04 assistant/chat: 了解。計画・期限・検索方針・未完タスクを記録する。\nwm.surf=none\nt.recent=2026-03-05:- [user/chat] 雑談: 昼ごはんはラーメン。これは長期記憶には要らない。 | - [user/chat] 昨日は仕様整理、今日",
+      "debug": {
+        "surface_count": 0,
+        "deep_count": 0,
+        "surface_top_score": null,
+        "surface_top_sim": null,
+        "surface_top_lex": null,
+        "surface_threshold": 0.85,
+        "coverage_gap": 1,
+        "brain_plan_used": 1,
+        "brain_plan_queries_n": 1,
+        "brain_plan_fact_keys_n": 2,
+        "brain_plan_allow_deep": 1,
+        "timeline_route": 1,
+        "timeline_label": "yesterday",
+        "brain_enabled": 1,
+        "brain_required": 1,
+        "brain_plan": 1,
+        "trace_id": "48f9b5c0-577e-4232-96a5-752f0a52316f",
+        "ps_seen": 1,
+        "brain_call_ok": 1,
+        "brain_latency_ms": 11559,
+        "brain_intent_timeline": 0.0,
+        "brain_intent_profile": 0.0,
+        "brain_intent_state": 0.0,
+        "brain_intent_fact_lookup": 0.0,
+        "brain_intent_meta": 0.0,
+        "brain_intent_fact": 0.0,
+        "brain_intent_procedure": 0.0,
+        "brain_intent_overview": 0.0
+      }
+    }
+  ],
+  "preference_keys": [
+    "language.primary",
+    "policy.ttl.default_days",
+    "style.tone",
+    "style.verbosity"
+  ],
+  "stats_delta": {
+    "ingest_plan_ok_delta": 5,
+    "recall_plan_ok_delta": 3,
+    "merge_plan_ok_delta": 1
+  },
+  "memory_stats": {
+    "deep": 67,
+    "surface": 151
+  },
+  "deep_rows_n": 15,
+  "trace_scope_rows": 24
+}

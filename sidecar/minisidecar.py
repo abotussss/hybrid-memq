@@ -522,13 +522,16 @@ def memctx_query(req: MemctxQueryRequest) -> MemctxQueryResponse:
         )
 
     dbg = dict(meta.get("debug") or {})
+    call_meta = brain.last_call_meta("recall_plan")
     dbg["timeline_route"] = 1 if timeline_first else 0
     dbg["timeline_label"] = timeline_range.label if timeline_range else ""
     dbg["brain_enabled"] = 1 if brain.enabled else 0
     dbg["brain_required"] = 1 if required else 0
     dbg["brain_plan"] = 1 if brain_plan is not None else 0
-    dbg["trace_id"] = brain.last_trace_id("recall_plan")
-    dbg["ps_seen"] = 1 if bool(brain.status.get("last_ps_seen_model")) else 0
+    dbg["trace_id"] = str(call_meta.get("trace_id") or brain.last_trace_id("recall_plan"))
+    dbg["ps_seen"] = 1 if bool(call_meta.get("ps_seen")) else 0
+    dbg["brain_call_ok"] = 1 if bool(call_meta.get("ok")) else 0
+    dbg["brain_latency_ms"] = int(call_meta.get("latency_ms") or 0)
     if brain_plan and isinstance(brain_plan.get("intent"), dict):
         for k, v in brain_plan["intent"].items():
             dbg[f"brain_intent_{k}"] = v

@@ -69,6 +69,7 @@ class BrainService:
         self._last_error_ts: int = 0
         self._last_trace_id: str = ""
         self._last_trace_by_op: Dict[str, str] = {}
+        self._last_call_meta_by_op: Dict[str, Dict[str, Any]] = {}
         self._last_ps_seen_model: str = ""
         self._last_ps_seen_ts: int = 0
         self._stats: Dict[str, Any] = {
@@ -216,6 +217,13 @@ class BrainService:
             if self.required and not bool(ps.get("seen")):
                 raise BrainUnavailable("brain_proof_failed")
             latency_ms = max(0, int(time.time() * 1000) - t0)
+            self._last_call_meta_by_op[op] = {
+                "trace_id": trace_id,
+                "ok": True,
+                "latency_ms": latency_ms,
+                "ps_seen": bool(ps.get("seen")),
+                "ts": int(time.time()),
+            }
             self._record_call_stats(op, ok=True, trace_id=trace_id)
             self._append_trace(
                 {
@@ -238,6 +246,14 @@ class BrainService:
             msg = str(e) or "brain_unavailable"
             self._mark_error(msg, err_type=type(e).__name__, trace_id=trace_id)
             latency_ms = max(0, int(time.time() * 1000) - t0)
+            self._last_call_meta_by_op[op] = {
+                "trace_id": trace_id,
+                "ok": False,
+                "latency_ms": latency_ms,
+                "ps_seen": False,
+                "ts": int(time.time()),
+                "err": msg,
+            }
             self._record_call_stats(op, ok=False, trace_id=trace_id)
             self._append_trace(
                 {
@@ -264,6 +280,14 @@ class BrainService:
             msg = str(e) or "brain_unknown_error"
             self._mark_error(msg, err_type=type(e).__name__, trace_id=trace_id)
             latency_ms = max(0, int(time.time() * 1000) - t0)
+            self._last_call_meta_by_op[op] = {
+                "trace_id": trace_id,
+                "ok": False,
+                "latency_ms": latency_ms,
+                "ps_seen": False,
+                "ts": int(time.time()),
+                "err": msg,
+            }
             self._record_call_stats(op, ok=False, trace_id=trace_id)
             self._append_trace(
                 {
@@ -288,6 +312,10 @@ class BrainService:
 
     def last_trace_id(self, op: str) -> str:
         return str(self._last_trace_by_op.get(op) or "")
+
+    def last_call_meta(self, op: str) -> Dict[str, Any]:
+        v = self._last_call_meta_by_op.get(op) or {}
+        return dict(v)
 
     def record_apply(self, *, op: str, session_key: str, trace_id: str, apply_summary: Dict[str, Any]) -> None:
         if not trace_id:
