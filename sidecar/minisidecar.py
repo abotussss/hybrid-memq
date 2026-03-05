@@ -532,9 +532,7 @@ def memctx_query(req: MemctxQueryRequest) -> MemctxQueryResponse:
             )
         style_plan_obj = None
 
-    if style_plan_obj is not None and bool(getattr(style_plan_obj, "apply", False)) and bool(
-        getattr(style_plan_obj, "explicit", False)
-    ):
+    if style_plan_obj is not None and bool(getattr(style_plan_obj, "apply", False)):
         try:
             style_wrote = int(
                 brain.apply_style_update_plan(

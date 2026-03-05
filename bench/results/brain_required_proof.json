@@ -2,7 +2,7 @@
   "ok": true,
   "base": "http://127.0.0.1:7781",
   "model": "gpt-oss:20b",
-  "session": "brain_required_proof_1772691426",
+  "session": "brain_required_proof_1772703607",
   "assertions": {
     "brain_mode_required": true,
     "global_ingest_plan_ge_target": true,
@@ -20,27 +20,8 @@
   "brain_mode": "required",
   "stats_before": {
     "ok": true,
-    "total_calls": 0,
-    "ok_calls": 0,
-    "err_calls": 0,
-    "ops": {},
-    "enabled": true,
-    "required": true,
-    "mode": "required",
-    "provider": "ollama",
-    "model": "gpt-oss:20b",
-    "last_error": "",
-    "last_error_type": "",
-    "last_error_ts": 0,
-    "last_trace_id": "",
-    "last_ps_seen_model": "",
-    "last_ps_seen_ts": 0,
-    "trace_path": "/Users/hiroyukimiyake/Documents/New project/.memq/brain_trace.jsonl"
-  },
-  "stats_after": {
-    "ok": true,
-    "total_calls": 3,
-    "ok_calls": 3,
+    "total_calls": 4,
+    "ok_calls": 4,
     "err_calls": 0,
     "ops": {
       "ingest_plan": {
@@ -48,19 +29,19 @@
         "ok": 1,
         "err": 0
       },
-      "recall_plan": {
-        "total": 1,
-        "ok": 1,
+      "style_plan": {
+        "total": 2,
+        "ok": 2,
         "err": 0
       },
-      "merge_plan": {
+      "recall_plan": {
         "total": 1,
         "ok": 1,
         "err": 0
       }
     },
-    "last_ok_ts": 1772691478,
-    "last_trace_id": "5f1d2453-e64f-4bee-879c-dec28d64c18b",
+    "last_ok_ts": 1772703592,
+    "last_trace_id": "6bd0dca5-d857-49ff-a6f1-75dad31f7636",
     "enabled": true,
     "required": true,
     "mode": "required",
@@ -70,7 +51,48 @@
     "last_error_type": "",
     "last_error_ts": 0,
     "last_ps_seen_model": "gpt-oss:20b",
-    "last_ps_seen_ts": 1772691478,
+    "last_ps_seen_ts": 1772703592,
+    "trace_path": "/Users/hiroyukimiyake/Documents/New project/.memq/brain_trace.jsonl"
+  },
+  "stats_after": {
+    "ok": true,
+    "total_calls": 9,
+    "ok_calls": 9,
+    "err_calls": 0,
+    "ops": {
+      "ingest_plan": {
+        "total": 2,
+        "ok": 2,
+        "err": 0
+      },
+      "style_plan": {
+        "total": 4,
+        "ok": 4,
+        "err": 0
+      },
+      "recall_plan": {
+        "total": 2,
+        "ok": 2,
+        "err": 0
+      },
+      "merge_plan": {
+        "total": 1,
+        "ok": 1,
+        "err": 0
+      }
+    },
+    "last_ok_ts": 1772703677,
+    "last_trace_id": "1089d8a8-9c0a-49e8-8827-a9224f2b3ac4",
+    "enabled": true,
+    "required": true,
+    "mode": "required",
+    "provider": "ollama",
+    "model": "gpt-oss:20b",
+    "last_error": "",
+    "last_error_type": "",
+    "last_error_ts": 0,
+    "last_ps_seen_model": "gpt-oss:20b",
+    "last_ps_seen_ts": 1772703677,
     "trace_path": "/Users/hiroyukimiyake/Documents/New project/.memq/brain_trace.jsonl"
   },
   "delta": {
@@ -95,25 +117,29 @@
   },
   "idle_skipped": false,
   "global_before": {
-    "runtime_ensure": 437,
-    "ingest_plan": 208,
-    "ingest_plan_apply": 207,
-    "recall_plan": 168,
-    "merge_plan": 542,
-    "merge_plan_apply": 542
+    "runtime_ensure": 543,
+    "ingest_plan": 256,
+    "ingest_plan_apply": 255,
+    "recall_plan": 214,
+    "merge_plan": 642,
+    "merge_plan_apply": 642,
+    "style_plan": 47,
+    "style_plan_apply": 5
   },
   "global_after": {
-    "runtime_ensure": 440,
-    "ingest_plan": 209,
-    "ingest_plan_apply": 208,
-    "recall_plan": 169,
-    "merge_plan": 543,
-    "merge_plan_apply": 543
+    "runtime_ensure": 546,
+    "ingest_plan": 257,
+    "ingest_plan_apply": 256,
+    "recall_plan": 215,
+    "merge_plan": 643,
+    "merge_plan_apply": 643,
+    "style_plan": 49,
+    "style_plan_apply": 5
   },
-  "trace_session_count": 8,
-  "trace_model_count": 8,
-  "trace_ps_seen_count": 8,
-  "ollama_ps_models_n": 2,
+  "trace_session_count": 10,
+  "trace_model_count": 10,
+  "trace_ps_seen_count": 10,
+  "ollama_ps_models_n": 1,
   "fail_test": {
     "ok": true,
     "code": 503,

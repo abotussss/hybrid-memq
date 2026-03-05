@@ -13,7 +13,6 @@ import httpx
 from pydantic import BaseModel, ValidationError
 
 from .schemas import BrainAuditPatchPlan, BrainIngestPlan, BrainMergePlan, BrainRecallPlan, StyleUpdatePlan
-from ..style import extract_style_updates
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -792,21 +791,6 @@ class OllamaBrainClient:
             else:
                 plan = StyleUpdatePlan.model_validate(repaired)
 
-        # Assistive normalization:
-        # Keep Brain as the orchestrator, but preserve explicit style literals from user text
-        # so callUser/firstPerson/persona are not translated to generic placeholders.
-        explicit_updates = extract_style_updates(user_text or "")
-        if explicit_updates:
-            merged = dict(plan.keys or {})
-            for key in ("tone", "persona", "verbosity", "firstPerson", "callUser", "prefix", "speakingStyle", "avoid"):
-                val = " ".join(str(explicit_updates.get(key, "")).split()).strip()
-                if val:
-                    merged[key] = val[:160]
-            plan = StyleUpdatePlan(
-                apply=bool(plan.apply or bool(merged)),
-                explicit=bool(plan.explicit or True),
-                keys=merged,
-            )
         return plan
 
     def build_recall_plan(
