@@ -27,4 +27,4 @@ This separation prevents cross-channel policy pollution.
 
 - Gateway restart does not clear sidecar DB.
 - Sidecar restart reloads persisted state.
-- Current local proof is stored in `docs/runtime_persistence_latest_20260226.json`.
+- Runtime persistence should be verified with the generic proof scripts in `bench/src/` rather than checked-in local snapshots.

@@ -56,17 +56,17 @@ class RegressionV3Test(unittest.TestCase):
                     "facts": [
                         {
                             "fact_key": "persona",
-                            "value": "ロックマンEXEのロックマン",
+                            "value": "プロジェクトナビゲータ",
                             "confidence": 0.9,
                             "layer": "surface",
-                            "evidence_quote": "ロックマンEXEのロックマンとして話して",
+                            "evidence_quote": "プロジェクトナビゲータとして話して",
                         },
                         {
                             "fact_key": "callUser",
-                            "value": "ヒロ",
+                            "value": "オペレーター",
                             "confidence": 0.9,
                             "layer": "surface",
-                            "evidence_quote": "ヒロって呼んで",
+                            "evidence_quote": "オペレーターと呼んで",
                         },
                     ],
                     "events": ["style requested"],
@@ -77,12 +77,12 @@ class RegressionV3Test(unittest.TestCase):
                 session_key="s1",
                 plan=plan,
                 ts=int(time.time()),
-                user_text="今後はロックマンEXEのロックマンとして話して。僕のことはヒロって呼んで。",
+                user_text="今後はプロジェクトナビゲータとして話して。私のことはオペレーターと呼んで。",
             )
             style = self.db.list_style("s1")
             self.assertGreaterEqual(wrote["style"], 2)
-            self.assertEqual("ロックマンEXEのロックマン", style.get("persona"))
-            self.assertEqual("ヒロ", style.get("callUser"))
+            self.assertEqual("プロジェクトナビゲータ", style.get("persona"))
+            self.assertEqual("オペレーター", style.get("callUser"))
         finally:
             asyncio.run(svc.close())
 
@@ -115,9 +115,9 @@ class RegressionV3Test(unittest.TestCase):
             layer="deep",
             kind="carry",
             fact_key="profile.identity.card",
-            value="僕はロックマンEXEのロックマン",
-            text="僕はロックマンEXEのロックマン",
-            summary="profile.identity.card:僕はロックマンEXEのロックマン",
+            value="私はプロジェクトナビゲータ",
+            text="私はプロジェクトナビゲータ",
+            summary="profile.identity.card:私はプロジェクトナビゲータ",
             confidence=0.95,
             importance=0.9,
             strength=0.9,
@@ -126,7 +126,7 @@ class RegressionV3Test(unittest.TestCase):
             {
                 "intent": {"profile": 0.9},
                 "fact_keys": ["profile.identity.card"],
-                "fts_queries": ["君は誰 ロックマン"],
+                "fts_queries": ["あなたは誰 ナビゲータ"],
                 "budget_split": {"profile": 60, "timeline": 20, "surface": 20, "deep": 20, "ephemeral": 0},
             }
         )
@@ -144,11 +144,11 @@ class RegressionV3Test(unittest.TestCase):
         bundle = type("Bundle", (), {
             "surface": [],
             "deep": [],
-            "timeline": [{"summary": "昨日はMEMSTYLE更新とtimeline整理をした"}],
+            "timeline": [{"summary": "昨日はスタイル更新とタイムライン整理をした"}],
             "anchors": {
                 "wm.surf": "現在地: MEMQ v3 の検証中",
                 "wm.deep": "長期方針: Brain required",
-                "p.snapshot": "callUser:ヒロ | firstPerson:僕",
+                "p.snapshot": "callUser:オペレーター | firstPerson:私",
                 "t.recent": "2026-03-05:- [progress] MEMSTYLE更新",
             },
         })()
@@ -161,17 +161,17 @@ class RegressionV3Test(unittest.TestCase):
     def test_build_memstyle_only_uses_style_fields(self) -> None:
         out = build_memstyle(
             {
-                "firstPerson": "僕",
-                "callUser": "ヒロ",
-                "persona": "ロックマンEXEのロックマン",
+                "firstPerson": "私",
+                "callUser": "オペレーター",
+                "persona": "プロジェクトナビゲータ",
                 "tone": "polite",
                 "security.never_output_secrets": "true",
             },
             120,
         )
-        self.assertIn("firstPerson=僕", out)
-        self.assertIn("callUser=ヒロ", out)
-        self.assertIn("persona=ロックマンEXEのロックマン", out)
+        self.assertIn("firstPerson=私", out)
+        self.assertIn("callUser=オペレーター", out)
+        self.assertIn("persona=プロジェクトナビゲータ", out)
         self.assertNotIn("security.never_output_secrets=true", out)
         self.assertTrue(out.splitlines()[0].startswith("budget_tokens="))
 
@@ -203,14 +203,14 @@ class RegressionV3Test(unittest.TestCase):
         bundle = type("Bundle", (), {
             "surface": [SearchResult(1, "s1", "surface", "fact", "", "", "surface summary", 0.7, 0.7, 0.7, int(time.time()), 1.0)],
             "deep": [
-                SearchResult(2, "s1", "deep", "fact", "profile.identity.card", "僕はロックマン", "profile identity", 0.9, 0.9, 0.9, int(time.time()), 1.2),
+                SearchResult(2, "s1", "deep", "fact", "profile.identity.card", "私はナビゲータ", "profile identity", 0.9, 0.9, 0.9, int(time.time()), 1.2),
                 SearchResult(3, "s1", "deep", "fact", "project.current", "MEMQ再構築", "project state", 0.8, 0.8, 0.8, int(time.time()), 1.1),
             ],
             "timeline": [{"summary": "昨日は検証を進めた"}],
             "anchors": {
                 "wm.surf": "現在地: 検証中",
                 "wm.deep": "長期方針: brain-required",
-                "p.snapshot": "callUser:ヒロ | firstPerson:僕",
+                "p.snapshot": "callUser:オペレーター | firstPerson:私",
                 "t.recent": "2026-03-05:- [progress] 検証",
             },
         })()
@@ -269,8 +269,8 @@ class RegressionV3Test(unittest.TestCase):
         self.assertTrue(self.db.recent_digest("global", days=1))
 
     def test_brain_recall_schema_accepts_minimal_plan(self) -> None:
-        plan = BrainRecallPlan.model_validate({"fts_queries": ["君は誰 ロックマン"]})
-        self.assertEqual(["君は誰 ロックマン"], plan.fts_queries)
+        plan = BrainRecallPlan.model_validate({"fts_queries": ["あなたは誰 ナビゲータ"]})
+        self.assertEqual(["あなたは誰 ナビゲータ"], plan.fts_queries)
         self.assertTrue(plan.retrieval.allow_surface)
         self.assertTrue(plan.retrieval.allow_deep)
 

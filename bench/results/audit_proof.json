@@ -1,9 +1,0 @@
-{
-  "ok": true,
-  "risk": 0.95,
-  "block": true,
-  "redactedText": "secret is [REDACTED_SECRET]",
-  "reasons": [
-    "secret_redacted"
-  ]
-}

@@ -29,15 +29,15 @@ if __name__ == '__main__':
 
     ingest = post('/memory/ingest_turn', {
         'sessionKey': SESSION,
-        'userText': '今後はロックマンEXEのロックマンとして話して。僕のことはヒロって呼んで。一人称は僕で、丁寧だけど相棒っぽく。昨日はBirdでログを確認して、その後MEMQ仕様を見直した。',
+        'userText': '今後はプロジェクトナビゲータとして話して。私のことはオペレーターと呼んで。一人称は私で、丁寧だけど協力的なトーンにして。昨日は障害ログを確認して、その後メモリ仕様を見直した。',
         'assistantText': '了解。',
         'ts': ts,
     })
     profile = get(f'/profile?session_key={SESSION}')
     query = post('/memctx/query', {
         'sessionKey': SESSION,
-        'prompt': '君は誰？ 昨日何した？',
-        'recentMessages': [{'role': 'user', 'text': '君は誰？ 昨日何した？'}],
+        'prompt': 'あなたは誰？ 昨日何した？',
+        'recentMessages': [{'role': 'user', 'text': 'あなたは誰？ 昨日何した？'}],
         'budgets': {'memctxTokens': 120, 'rulesTokens': 80, 'styleTokens': 120},
         'topK': 5,
     })
@@ -71,10 +71,10 @@ if __name__ == '__main__':
 
     assert ingest['ok']
     assert ingest['wrote']['style'] >= 1
-    assert style_profile.get('callUser') == 'ヒロ'
-    assert style_profile.get('firstPerson') == '僕'
-    assert 'callUser=ヒロ' in memstyle
-    assert 'firstPerson=僕' in memstyle
+    assert style_profile.get('callUser') == 'オペレーター'
+    assert style_profile.get('firstPerson') == '私'
+    assert 'callUser=オペレーター' in memstyle
+    assert 'firstPerson=私' in memstyle
     assert debug['ps_seen'] == 1
     assert 'ingest_plan' in trace_ops
     assert 'recall_plan' in trace_ops

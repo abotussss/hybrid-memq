@@ -42,35 +42,10 @@ python3 bench/src/brain_required_proof.py
 scripts/memq-openclaw.sh brain-proof
 ```
 
-For complex real-world memory orchestration validation (long turns, style/rule updates, deep/timeline recall):
+Additional generic proof scripts:
 
-```bash
-python3 bench/src/brain_complex_required_validation.py
-```
-
-This writes:
-
-- `bench/results/brain_complex_required_validation.json`
-
-For repeated stability validation under `required + gpt-oss:20b`:
-
-```bash
-python3 bench/src/brain_required_stability.py
-```
-
-This writes:
-
-- `bench/results/brain_required_stability.json`
-
-The run is considered stable when:
-- `ok=true`
-- `failures=[]`
-- `deltas.ingest_ok_delta >= iters`
-- `deltas.recall_ok_delta >= iters`
-- `trace_ps_seen_count` is non-zero and `trace_ops` include ingest/recall/merge plan operations.
-
-To verify OpenClaw gateway integration markers:
-
-```bash
-scripts/memq-openclaw.sh brain-proof-openclaw
-```
+- `python3 bench/src/generic_memory_recall.py`
+- `python3 bench/src/timeline_recall_proof.py`
+- `python3 bench/src/sleep_consolidation_proof.py`
+- `python3 bench/src/token_budget_proof.py`
+- `python3 bench/src/audit_proof.py`

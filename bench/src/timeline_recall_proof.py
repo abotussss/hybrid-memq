@@ -14,7 +14,7 @@ def post(path,payload):
 if __name__ == '__main__':
     post('/memory/ingest_turn', {
         'sessionKey': SESSION,
-        'userText': '昨日はBirdでログを確認し、その後MEMQの仕様を修正した。',
+        'userText': '昨日は障害ログを確認し、その後メモリ仕様を更新した。',
         'assistantText': '了解。',
         'ts': int(time.time()) - 86400,
     })

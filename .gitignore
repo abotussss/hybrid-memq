@@ -15,3 +15,7 @@ __pycache__/
 # optional local artifacts
 sidecar.log
 bench/results/*.sqlite
+bench/results/*.json
+!bench/results/.gitkeep
+docs/reports/
+docs/runtime_persistence_*.json
