@@ -29,7 +29,7 @@ if __name__ == '__main__':
 
     ingest = post('/memory/ingest_turn', {
         'sessionKey': SESSION,
-        'userText': '今後はプロジェクトナビゲータとして話して。私のことはオペレーターと呼んで。一人称は私で、丁寧だけど協力的なトーンにして。昨日は障害ログを確認して、その後メモリ仕様を見直した。',
+        'userText': '今後は調査支援アシスタントとして話して。私のことは利用者と呼んで。一人称は私で、丁寧だけど協力的なトーンにして。昨日は障害ログを確認して、その後メモリ仕様を見直した。',
         'assistantText': '了解。',
         'ts': ts,
     })
@@ -71,9 +71,9 @@ if __name__ == '__main__':
 
     assert ingest['ok']
     assert ingest['wrote']['style'] >= 1
-    assert style_profile.get('callUser') == 'オペレーター'
+    assert style_profile.get('callUser') == '利用者'
     assert style_profile.get('firstPerson') == '私'
-    assert 'callUser=オペレーター' in memstyle
+    assert 'callUser=利用者' in memstyle
     assert 'firstPerson=私' in memstyle
     assert debug['ps_seen'] == 1
     assert 'ingest_plan' in trace_ops
