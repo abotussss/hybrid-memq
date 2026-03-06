@@ -1,28 +1,33 @@
-# MEMQ Sidecar
+# Hybrid MEMQ v3 Sidecar
 
-Local FastAPI service for Hybrid MEMQ v2 (Mode A).
+The sidecar is the single source of truth for Hybrid MEMQ v3.
+
+Responsibilities:
+- persist memory state in SQLite
+- call MemBrain for ingest / recall / merge planning
+- apply those plans deterministically
+- expose proof endpoints for required runtime
+- provide bounded `MEMRULES`, `MEMSTYLE`, `MEMCTX` to the plugin
 
 ## Run
 
 ```bash
-cd /path/to/hybrid-memq
+cd /Users/hiroyukimiyake/Documents/New\ project
 python3 -m venv sidecar/.venv
 sidecar/.venv/bin/pip install -r sidecar/requirements.txt
+MEMQ_BRAIN_MODE=brain-required \
+MEMQ_BRAIN_MODEL=gpt-oss:20b \
 sidecar/.venv/bin/python sidecar/minisidecar.py
 ```
 
-## Health
+## Important Endpoints
 
-```bash
-curl -sS http://127.0.0.1:7781/health
-```
-
-## Main endpoints
-
-- `POST /memctx/query`
+- `GET /health`
 - `POST /memory/ingest_turn`
-- `POST /conversation/summarize`
+- `POST /memctx/query`
 - `POST /idle/run_once`
 - `POST /audit/output`
 - `GET /profile`
 - `GET /quarantine`
+- `GET /brain/stats`
+- `GET /brain/trace/recent`

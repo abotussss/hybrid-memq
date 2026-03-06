@@ -1,0 +1,29 @@
+{
+  "ok": true,
+  "did": [
+    "refresh_digests",
+    "refresh_profile_snapshot",
+    "refresh_fact_index",
+    "brain_merge_plan",
+    "refresh_fts"
+  ],
+  "stats": {
+    "did": [
+      "refresh_digests",
+      "refresh_profile_snapshot",
+      "refresh_fact_index",
+      "brain_merge_plan",
+      "refresh_fts"
+    ],
+    "merge": {
+      "merged": 4,
+      "pruned": 0
+    },
+    "fts": {
+      "memory": 11,
+      "events": 2
+    }
+  },
+  "traceId": "63a046f7-b4fe-42f2-ae15-bb865aaa2a97",
+  "psSeen": 1
+}

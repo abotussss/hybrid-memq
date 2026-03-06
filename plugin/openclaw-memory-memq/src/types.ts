@@ -1,5 +1,3 @@
-export type Json = string | number | boolean | null | Json[] | { [k: string]: Json };
-
 export interface MemqMessage {
   role: string;
   text: string;
@@ -18,8 +16,6 @@ export interface MemqQueryRequest {
   recentMessages: MemqMessage[];
   budgets: MemqBudgets;
   topK: number;
-  surfaceThreshold?: number;
-  deepEnabled?: boolean;
 }
 
 export interface MemqQueryResponse {
@@ -30,14 +26,13 @@ export interface MemqQueryResponse {
   meta: {
     surfaceHit: boolean;
     deepCalled: boolean;
-    usedMemoryIds: string[];
-    debug?: Record<string, Json>;
+    usedMemoryIds: number[];
+    debug?: Record<string, unknown>;
   };
 }
 
 export interface RuntimeState {
   lastUserBySession: Map<string, string>;
   lastPromptBySession: Map<string, string>;
-  lastKeptBySession: Map<string, MemqMessage[]>;
   lastMemstyleBySession: Map<string, string>;
 }

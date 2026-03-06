@@ -1,52 +1,27 @@
 from __future__ import annotations
 
-import re
-from typing import Set
+
+def estimate_tokens(text: str) -> int:
+    clean = " ".join(str(text or "").split())
+    if not clean:
+        return 0
+    return max(1, (len(clean) + 3) // 4)
 
 
-LATIN_RE = re.compile(r"[a-z0-9_]{2,}")
-JP_SPAN_RE = re.compile(r"[ぁ-んァ-ヶ一-龠]{2,32}")
-
-
-def tokenize_lexical(text: str) -> Set[str]:
-    s = str(text or "").lower()
-    out: Set[str] = set(LATIN_RE.findall(s))
-
-    # CJK tokens: keep spans and add char n-grams to tolerate paraphrase like
-    # "家族構成" <-> "家族" without embeddings.
-    for span in JP_SPAN_RE.findall(s):
-        span = span.strip()
-        if not span:
+def fit_lines(lines: list[str], budget_tokens: int) -> list[str]:
+    out: list[str] = []
+    used = 0
+    for line in lines:
+        line = " ".join(str(line or "").split())
+        if not line:
             continue
-        out.add(span)
-        L = len(span)
-        for n in (2, 3, 4):
-            if L < n:
-                continue
-            for i in range(0, L - n + 1):
-                out.add(span[i : i + n])
-    return out
-
-
-def lexical_overlap(query_tokens: Set[str], text: str) -> float:
-    if not query_tokens:
-        return 0.0
-    t = tokenize_lexical(text)
-    if not t:
-        return 0.0
-    return float(len(query_tokens & t)) / float(max(1, len(query_tokens)))
-
-
-def build_fts_or_query(text: str, max_terms: int = 18) -> str:
-    toks = sorted(tokenize_lexical(text), key=lambda x: (-len(x), x))
-    if not toks:
-        return ""
-    out = []
-    for t in toks:
-        if len(t) < 2:
-            continue
-        tt = t.replace('"', '""')
-        out.append(f'"{tt}"')
-        if len(out) >= max_terms:
+        cost = estimate_tokens(line) + 1
+        if out and used + cost > budget_tokens:
             break
-    return " OR ".join(out)
+        if not out and cost > budget_tokens:
+            trimmed = line[: max(24, budget_tokens * 4)]
+            out.append(trimmed)
+            break
+        out.append(line)
+        used += cost
+    return out

@@ -1,160 +1,78 @@
 {
-  "ok": true,
-  "base": "http://127.0.0.1:7781",
-  "model": "gpt-oss:20b",
-  "session": "brain_required_proof_1772703607",
-  "assertions": {
-    "brain_mode_required": true,
-    "global_ingest_plan_ge_target": true,
-    "global_recall_plan_ge_target": true,
-    "global_merge_plan_ge_target": true,
-    "delta_ingest_ge_min": true,
-    "delta_recall_ge_min": true,
-    "delta_merge_ge_min": true,
-    "trace_has_model": true,
-    "trace_has_ps_seen": true,
-    "ollama_ps_has_model": true,
-    "fail_closed_returns_503": true
+  "health_ok": true,
+  "brain_mode": "brain-required",
+  "brain_model": "gpt-oss:20b",
+  "ingest_ok": true,
+  "ingest_wrote": {
+    "facts": 0,
+    "events": 0,
+    "style": 4,
+    "rules": 0,
+    "quarantine": 0
   },
-  "notes": [],
-  "brain_mode": "required",
-  "stats_before": {
+  "style_updated": true,
+  "style_profile": {
+    "callUser": "ヒロ",
+    "firstPerson": "僕",
+    "persona": "Rockman EXE",
+    "tone": "buddy-like"
+  },
+  "memstyle": "budget_tokens=120\nfirstPerson=僕\ncallUser=ヒロ\npersona=Rockman EXE\ntone=buddy-like",
+  "memctx": "budget_tokens=120\nt.recent=2026-03-06:- [chat] User requested style changes: speak as Rockman EXE, call user Hiro, first-person '僕', polite but buddy-like tone.\nt.digest=2026-03-06:- [chat] User requested style changes: speak as Rockman EXE, call user Hiro, first-p…\np.snapshot=profile.identity.card:A | profile.name:ヒロ | profile.pet:犬 | profile.spouse:exists\nwm.deep=profile.name:ヒロ\nt.range=2026-03-05..2026-03-05\nt.label=yesterday",
+  "recall_ps_seen": 1,
+  "trace_ops": [
+    "merge_plan",
+    "recall_plan",
+    "ingest_plan",
+    "recall_plan",
+    "ingest_plan",
+    "recall_plan",
+    "ingest_plan",
+    "recall_plan",
+    "ingest_plan",
+    "recall_plan"
+  ],
+  "brain_stats": {
     "ok": true,
-    "total_calls": 4,
-    "ok_calls": 4,
+    "total_calls": 5,
+    "ok_calls": 5,
     "err_calls": 0,
-    "ops": {
-      "ingest_plan": {
-        "total": 1,
-        "ok": 1,
-        "err": 0
+    "last_ok_ts": 1772797937,
+    "last_err_ts": 0,
+    "last_err": "",
+    "last_trace_id": "22e27bf9-936e-4197-8ebf-e173d0f9a7e9",
+    "last_ps_seen_model": "gpt-oss:20b"
+  },
+  "ps_models": [
+    "gpt-oss:20b"
+  ],
+  "idle": {
+    "ok": true,
+    "did": [
+      "refresh_digests",
+      "refresh_profile_snapshot",
+      "refresh_fact_index",
+      "brain_merge_plan",
+      "refresh_fts"
+    ],
+    "stats": {
+      "did": [
+        "refresh_digests",
+        "refresh_profile_snapshot",
+        "refresh_fact_index",
+        "brain_merge_plan",
+        "refresh_fts"
+      ],
+      "merge": {
+        "merged": 4,
+        "pruned": 0
       },
-      "style_plan": {
-        "total": 2,
-        "ok": 2,
-        "err": 0
-      },
-      "recall_plan": {
-        "total": 1,
-        "ok": 1,
-        "err": 0
+      "fts": {
+        "memory": 9,
+        "events": 1
       }
     },
-    "last_ok_ts": 1772703592,
-    "last_trace_id": "6bd0dca5-d857-49ff-a6f1-75dad31f7636",
-    "enabled": true,
-    "required": true,
-    "mode": "required",
-    "provider": "ollama",
-    "model": "gpt-oss:20b",
-    "last_error": "",
-    "last_error_type": "",
-    "last_error_ts": 0,
-    "last_ps_seen_model": "gpt-oss:20b",
-    "last_ps_seen_ts": 1772703592,
-    "trace_path": "/Users/hiroyukimiyake/Documents/New project/.memq/brain_trace.jsonl"
-  },
-  "stats_after": {
-    "ok": true,
-    "total_calls": 9,
-    "ok_calls": 9,
-    "err_calls": 0,
-    "ops": {
-      "ingest_plan": {
-        "total": 2,
-        "ok": 2,
-        "err": 0
-      },
-      "style_plan": {
-        "total": 4,
-        "ok": 4,
-        "err": 0
-      },
-      "recall_plan": {
-        "total": 2,
-        "ok": 2,
-        "err": 0
-      },
-      "merge_plan": {
-        "total": 1,
-        "ok": 1,
-        "err": 0
-      }
-    },
-    "last_ok_ts": 1772703677,
-    "last_trace_id": "1089d8a8-9c0a-49e8-8827-a9224f2b3ac4",
-    "enabled": true,
-    "required": true,
-    "mode": "required",
-    "provider": "ollama",
-    "model": "gpt-oss:20b",
-    "last_error": "",
-    "last_error_type": "",
-    "last_error_ts": 0,
-    "last_ps_seen_model": "gpt-oss:20b",
-    "last_ps_seen_ts": 1772703677,
-    "trace_path": "/Users/hiroyukimiyake/Documents/New project/.memq/brain_trace.jsonl"
-  },
-  "delta": {
-    "ingest_plan": 1,
-    "recall_plan": 1,
-    "merge_plan": 1
-  },
-  "targets": {
-    "ingest": 10,
-    "recall": 10,
-    "merge": 1
-  },
-  "min_delta": {
-    "ingest": 1,
-    "recall": 1,
-    "merge": 1
-  },
-  "needed": {
-    "ingest": 1,
-    "recall": 1,
-    "merge": 1
-  },
-  "idle_skipped": false,
-  "global_before": {
-    "runtime_ensure": 543,
-    "ingest_plan": 256,
-    "ingest_plan_apply": 255,
-    "recall_plan": 214,
-    "merge_plan": 642,
-    "merge_plan_apply": 642,
-    "style_plan": 47,
-    "style_plan_apply": 5
-  },
-  "global_after": {
-    "runtime_ensure": 546,
-    "ingest_plan": 257,
-    "ingest_plan_apply": 256,
-    "recall_plan": 215,
-    "merge_plan": 643,
-    "merge_plan_apply": 643,
-    "style_plan": 49,
-    "style_plan_apply": 5
-  },
-  "trace_session_count": 10,
-  "trace_model_count": 10,
-  "trace_ps_seen_count": 10,
-  "ollama_ps_models_n": 1,
-  "fail_test": {
-    "ok": true,
-    "code": 503,
-    "body": "{\"ok\":false,\"code\":\"brain_unavailable\",\"op\":\"recall_plan\",\"session_key\":\"fail_closed_test\",\"provider\":\"ollama\",\"model\":\"gpt-oss:20b\",\"trace_id\":\"\",\"err_type\":\"BrainUnavailable\",\"err_msg\":\"brain_ps_error:ConnectError\"}",
-    "error": "",
-    "resp": {
-      "ok": false,
-      "code": "brain_unavailable",
-      "op": "recall_plan",
-      "session_key": "fail_closed_test",
-      "provider": "ollama",
-      "model": "gpt-oss:20b",
-      "trace_id": "",
-      "err_type": "BrainUnavailable",
-      "err_msg": "brain_ps_error:ConnectError"
-    }
+    "traceId": "22e27bf9-936e-4197-8ebf-e173d0f9a7e9",
+    "psSeen": 1
   }
 }

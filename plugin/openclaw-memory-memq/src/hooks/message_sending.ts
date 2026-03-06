@@ -1,24 +1,16 @@
+import { defaults, getCfg, logInfo } from "../config/schema.js";
 import { SidecarClient } from "../lib/sidecar_client.js";
-import { getCfg, defaults, logInfo } from "../config/schema.js";
 import type { RuntimeState } from "../types.js";
 
-function extractTextTargets(event: any, hookCtx: any): Array<{ obj: any; key: string; text: string }> {
+function extractTargets(event: any, hookCtx: any): Array<{ obj: any; key: string; text: string }> {
   const out: Array<{ obj: any; key: string; text: string }> = [];
-  const bag = [event, hookCtx, event?.result, hookCtx?.result, event?.response, hookCtx?.response];
-  for (const obj of bag) {
-    if (!obj || typeof obj !== "object") continue;
-    if (typeof obj.text === "string" && obj.text.trim()) out.push({ obj, key: "text", text: obj.text });
-    if (Array.isArray(obj.payloads)) {
-      for (const p of obj.payloads) {
-        if (p && typeof p === "object" && typeof p.text === "string" && p.text.trim()) {
-          out.push({ obj: p, key: "text", text: p.text });
-        }
-      }
-    }
-    if (Array.isArray(obj.messages)) {
-      for (const m of obj.messages) {
-        if (m && typeof m === "object" && m.role === "assistant" && typeof m.content === "string" && m.content.trim()) {
-          out.push({ obj: m, key: "content", text: m.content });
+  for (const bag of [event, hookCtx, event?.result, hookCtx?.result, event?.response, hookCtx?.response]) {
+    if (!bag || typeof bag !== "object") continue;
+    if (typeof bag.text === "string" && bag.text.trim()) out.push({ obj: bag, key: "text", text: bag.text });
+    if (Array.isArray(bag.messages)) {
+      for (const message of bag.messages) {
+        if (message?.role === "assistant" && typeof message?.content === "string" && message.content.trim()) {
+          out.push({ obj: message, key: "content", text: message.content });
         }
       }
     }
@@ -26,112 +18,27 @@ function extractTextTargets(event: any, hookCtx: any): Array<{ obj: any; key: st
   return out;
 }
 
-function parseKvLines(memstyle: string): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const raw of String(memstyle || "").split("\n")) {
-    const ln = raw.trim();
-    if (!ln || ln.startsWith("budget_tokens=")) continue;
-    const idx = ln.indexOf("=");
-    if (idx <= 0) continue;
-    const k = ln.slice(0, idx).trim();
-    const v = ln.slice(idx + 1).trim();
-    if (!k || !v) continue;
-    out.set(k, v);
-  }
-  return out;
-}
-
-function isIdentityQuestion(text: string): boolean {
-  const s = String(text || "");
-  if (!s.trim()) return false;
-  return /(?:君は誰|あなたは誰|何者|who are you|what are you|introduce yourself)/i.test(s);
-}
-
-function enforceIdentityStyle(text: string, memstyle: string, lastUserPrompt: string): { text: string; changed: boolean } {
-  let out = String(text || "");
-  if (!out.trim() || !memstyle.trim()) return { text: out, changed: false };
-
-  const kv = parseKvLines(memstyle);
-  const persona = kv.get("persona") || "";
-  const first = kv.get("firstPerson") || kv.get("mustFirstPerson") || "僕";
-  const callUser = kv.get("callUser") || kv.get("mustCallUser") || "";
-  const prefix = kv.get("prefix") || kv.get("mustPrefix") || (callUser ? `${callUser}、` : "");
-  let changed = false;
-  if (prefix && out.trim() && !out.trim().startsWith(prefix)) {
-    out = `${prefix}${out.replace(/^\s+/, "")}`;
-    changed = true;
-  }
-
-  if (!persona) return { text: out, changed };
-
-  const jpAssistantClaim =
-    /(?:僕|私|わたし|俺)\s*は[^。!\n]{0,96}(?:OpenClaw|openclaw|assistant|アシスタント|AIアシスタント)[^。!\n]{0,96}[。.!！?？]?/giu;
-  const enAssistantClaim =
-    /I\s*am[^.\n]{0,120}\b(?:assistant|ai assistant)\b[^.\n]{0,80}[.!?]?/giu;
-  const hadClaim = out.search(jpAssistantClaim) >= 0 || out.search(enAssistantClaim) >= 0;
-  if (!hadClaim) return { text: out, changed };
-  // Do not strip self-introduction when user explicitly asks identity.
-  if (isIdentityQuestion(lastUserPrompt)) return { text: out, changed };
-
-  out = out.replace(jpAssistantClaim, "").replace(enAssistantClaim, "").trim();
-  out = out
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-  if (!out) {
-    const fallback = `${prefix}${first}がサポートするよ。`.trim();
-    out = fallback || `${first}がサポートするよ。`;
-  }
-  return { text: out, changed: true };
-}
-
-export function createMessageSending(api: any, sidecar: SidecarClient, rt: RuntimeState) {
+export function createMessageSending(api: any, sidecar: SidecarClient, _runtime: RuntimeState) {
   return async (event: any, hookCtx: any): Promise<void> => {
-    const enabled = getCfg(api, "memq.security.primaryRulesEnabled", defaults["memq.security.primaryRulesEnabled"]);
-    if (!enabled) return;
-
-    const sessionKey = String(hookCtx?.sessionKey ?? hookCtx?.sessionId ?? event?.sessionKey ?? "default");
-    const mode = getCfg(api, "memq.security.llmAuditEnabled", defaults["memq.security.llmAuditEnabled"]) ? "dual" : "primary";
-    const targets = extractTextTargets(event, hookCtx);
+    if (!getCfg(api, "memq.security.primaryRulesEnabled", defaults["memq.security.primaryRulesEnabled"])) return;
+    const targets = extractTargets(event, hookCtx);
     if (!targets.length) return;
-
-    // patch last assistant-ish text only
-    const t = targets[targets.length - 1];
-    try {
-      const res = await sidecar.auditOutput({
+    const target = targets[targets.length - 1];
+    const sessionKey = String(hookCtx?.sessionKey ?? hookCtx?.sessionId ?? event?.sessionKey ?? "default");
+    const result = await sidecar.auditOutput(
+      {
         sessionKey,
-        text: t.text,
-        mode,
-        thresholds: {
-          llmAuditThreshold: getCfg(api, "memq.security.llmAuditThreshold", defaults["memq.security.llmAuditThreshold"]),
-          blockThreshold: getCfg(api, "memq.security.blockThreshold", defaults["memq.security.blockThreshold"]),
-        },
-      });
-      const beforeText = String(t.obj[t.key] ?? "");
-      const redacted = typeof res.redactedText === "string" ? res.redactedText : "";
-      if (redacted.trim()) {
-        t.obj[t.key] = redacted;
-        const changed = redacted !== beforeText ? 1 : 0;
-        logInfo(
-          api,
-          `[memq-v2] message_sending session=${sessionKey} redacted=1 changed=${changed} blocked=${res.block ? 1 : 0} risk=${res.risk.toFixed(2)}`
-        );
-      } else if (res.block) {
-        t.obj[t.key] = "[BLOCKED_BY_MEMRULES]";
-        logInfo(api, `[memq-v2] message_sending session=${sessionKey} blocked=1 fallback=1 risk=${res.risk.toFixed(2)}`);
-      }
-    } catch (err) {
-      logInfo(api, `[memq-v2] message_sending session=${sessionKey} audit_failed=${(err as Error).message}`);
+        text: target.text,
+        mode: getCfg(api, "memq.security.llmAuditEnabled", defaults["memq.security.llmAuditEnabled"]) ? "dual" : "primary",
+      },
+      30000
+    );
+    if (typeof result?.redactedText === "string" && result.redactedText.trim()) {
+      target.obj[target.key] = result.redactedText;
     }
-
-    const memstyle = String(rt.lastMemstyleBySession.get(sessionKey) || "");
-    const lastUserPrompt = String(rt.lastUserBySession.get(sessionKey) || rt.lastPromptBySession.get(sessionKey) || "");
-    if (memstyle) {
-      const fixed = enforceIdentityStyle(String(t.obj[t.key] || ""), memstyle, lastUserPrompt);
-      if (fixed.changed) {
-        t.obj[t.key] = fixed.text;
-        logInfo(api, `[memq-v2] message_sending session=${sessionKey} style_identity_repair=1`);
-      }
+    if (result?.block && !result?.redactedText) {
+      target.obj[target.key] = "[BLOCKED_BY_MEMRULES]";
     }
+    logInfo(api, `[memq-v3] message_sending session=${sessionKey} risk=${Number(result?.risk || 0).toFixed(2)} blocked=${result?.block ? 1 : 0}`);
   };
 }

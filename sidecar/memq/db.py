@@ -1,343 +1,356 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import json
 import re
 import sqlite3
 import time
-import uuid
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
-
-from .fact_keys import infer_text_fact_keys
-from .timeline import day_key_from_ts
-from .text_sanitize import contains_runtime_noise, strip_memq_blocks, strip_runtime_noise
-from .tokens import tokenize_lexical
+from typing import Any, Iterable
+from zoneinfo import ZoneInfo
 
 
-def now_ts() -> int:
-    return int(time.time())
+def _utc_now() -> int:
+    return int(datetime.now(timezone.utc).timestamp())
 
 
-def normalize_sig(text: str) -> str:
-    raw = " ".join((text or "").strip().lower().split())
-    sig = re.sub(r"[^a-z0-9ぁ-んァ-ヶ一-龠]+", "", raw)
-    return sig or raw
+def _normalize_text(text: str) -> str:
+    return " ".join(str(text or "").replace("\x00", " ").split())
 
 
-def token_set(text: str) -> set[str]:
-    s = (text or "").lower()
-    out = set(re.findall(r"[a-z0-9_]{2,}", s))
-    out.update(re.findall(r"[ぁ-んァ-ヶ一-龠]{1,8}", text or ""))
-    return out
+def _slug_tokens(text: str) -> list[str]:
+    clean = re.sub(r"[^0-9A-Za-z\u3040-\u30ff\u3400-\u9fff_-]+", " ", _normalize_text(text)).strip()
+    if not clean:
+        return []
+    return [tok for tok in clean.split() if tok]
 
 
-_CJK_RE = re.compile(r"[ぁ-んァ-ヶ一-龠]")
+def _ngrams(text: str, n: int = 2) -> str:
+    clean = re.sub(r"\s+", "", _normalize_text(text))
+    if not clean:
+        return ""
+    if len(clean) <= n:
+        return clean
+    grams = [clean[i : i + n] for i in range(len(clean) - n + 1)]
+    return " ".join(grams)
 
 
-def _contains_cjk(text: str) -> bool:
-    return bool(_CJK_RE.search(text or ""))
-
-
-def _fts_terms(text: str, *, max_terms: int = 300) -> List[str]:
-    toks = tokenize_lexical(text or "")
-    out: List[str] = []
-    seen = set()
-    for t in sorted(toks, key=lambda x: (-len(x), x)):
-        tt = str(t or "").strip()
-        if len(tt) < 2 or tt in seen:
-            continue
-        seen.add(tt)
-        out.append(tt)
-        if len(out) >= max_terms:
-            break
-    return out
-
-
-def _fts_content(summary: str, fact_keys: Sequence[str] | None = None, *, max_len: int = 2600) -> str:
-    base = " ".join((summary or "").split()).strip()
-    keys = [str(k or "").strip() for k in (fact_keys or []) if str(k or "").strip()]
-    # Embed lexical n-gram terms into indexed content so unicode61 builds can still
-    # retrieve Japanese spans reliably without embeddings.
-    terms = _fts_terms(" ".join([base, " ".join(keys)]), max_terms=360 if _contains_cjk(base) else 220)
-    merged = " ".join(x for x in [base, " ".join(keys), " ".join(terms)] if x).strip()
-    return merged[:max_len]
-
-
-def jaccard(a: set[str], b: set[str]) -> float:
-    if not a or not b:
-        return 0.0
-    return float(len(a & b)) / float(max(1, len(a | b)))
-
-
-def infer_fact_keys_from_text(text: str) -> List[str]:
-    return infer_text_fact_keys(text)
+def _fts_match_query(text: str) -> str:
+    terms: list[str] = []
+    for token in _slug_tokens(text)[:8]:
+        safe = token.replace('"', "").strip()
+        if safe:
+            terms.append(f'"{safe}"')
+    for token in _ngrams(text).split()[:8]:
+        safe = token.replace('"', "").strip()
+        if safe:
+            terms.append(f'"{safe}"')
+    if not terms:
+        safe = _normalize_text(text).replace('"', "").strip()
+        return f'"{safe}"' if safe else '""'
+    return " OR ".join(dict.fromkeys(terms))
 
 
 @dataclass
-class MemoryRow:
-    id: str
+class SearchResult:
+    id: int
     session_key: str
     layer: str
-    created_at: int
-    updated_at: int
-    last_access_at: int
-    ttl_expires_at: Optional[int]
-    importance: float
-    usage_count: int
-    text: str
+    kind: str
+    fact_key: str
+    value: str
     summary: str
-    tags: str
-    emb_f16: Optional[bytes]
-    emb_q: Optional[bytes]
-    emb_dim: int
-    emb_norm: float
-    source: str
+    confidence: float
+    importance: float
+    strength: float
+    updated_at: int
+    score: float
 
 
 class MemqDB:
-    def __init__(self, db_path: Path):
-        self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    def __init__(self, path: Path, timezone_name: str = "Asia/Tokyo") -> None:
+        self.path = path
+        self.timezone = ZoneInfo(timezone_name)
+        if self._needs_reset(path):
+            backup = path.with_suffix(path.suffix + f".legacy.{int(time.time())}.bak")
+            path.rename(backup)
+        self.conn = sqlite3.connect(str(path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL;")
-        self.conn.execute("PRAGMA synchronous=NORMAL;")
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
         self._init_schema()
 
+    def _needs_reset(self, path: Path) -> bool:
+        if not path.exists():
+            return False
+        conn = sqlite3.connect(str(path))
+        try:
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(memory_items)").fetchall()}
+            required = {"session_key", "layer", "kind", "fact_key", "value", "summary", "confidence"}
+            return bool(cols) and not required.issubset(cols)
+        finally:
+            conn.close()
+
+    def close(self) -> None:
+        self.conn.close()
+
     def _init_schema(self) -> None:
-        c = self.conn.cursor()
-        c.executescript(
+        cur = self.conn.cursor()
+        cur.executescript(
             """
             CREATE TABLE IF NOT EXISTS memory_items (
-              id TEXT PRIMARY KEY,
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
               session_key TEXT NOT NULL,
               layer TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              fact_key TEXT NOT NULL DEFAULT '',
+              value TEXT NOT NULL DEFAULT '',
+              text TEXT NOT NULL DEFAULT '',
+              summary TEXT NOT NULL DEFAULT '',
+              keywords TEXT NOT NULL DEFAULT '',
+              ngrams TEXT NOT NULL DEFAULT '',
+              confidence REAL NOT NULL DEFAULT 0.0,
+              importance REAL NOT NULL DEFAULT 0.0,
+              strength REAL NOT NULL DEFAULT 0.0,
+              tags_json TEXT NOT NULL DEFAULT '{}',
+              source_quote TEXT NOT NULL DEFAULT '',
+              ttl_expires_at INTEGER,
+              tombstoned INTEGER NOT NULL DEFAULT 0,
               created_at INTEGER NOT NULL,
-              updated_at INTEGER NOT NULL,
-              last_access_at INTEGER NOT NULL,
-              ttl_expires_at INTEGER NULL,
-              importance REAL NOT NULL DEFAULT 0.5,
-              usage_count INTEGER NOT NULL DEFAULT 0,
-              text TEXT NOT NULL,
-              summary TEXT NOT NULL,
-              tags TEXT NOT NULL DEFAULT '[]',
-              emb_f16 BLOB NULL,
-              emb_q BLOB NULL,
-              emb_dim INTEGER NOT NULL DEFAULT 0,
-              emb_norm REAL NOT NULL DEFAULT 1.0,
-              source TEXT NOT NULL DEFAULT 'turn'
+              updated_at INTEGER NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_memory_layer_session ON memory_items(layer, session_key);
-            CREATE INDEX IF NOT EXISTS idx_memory_last_access ON memory_items(last_access_at);
+            CREATE INDEX IF NOT EXISTS idx_memory_session_layer ON memory_items(session_key, layer, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_memory_fact ON memory_items(session_key, fact_key, updated_at DESC);
             CREATE INDEX IF NOT EXISTS idx_memory_ttl ON memory_items(ttl_expires_at);
 
-            CREATE TABLE IF NOT EXISTS conv_summaries (
-              id TEXT PRIMARY KEY,
-              session_key TEXT NOT NULL,
-              retention_scope TEXT NOT NULL,
-              updated_at INTEGER NOT NULL,
-              summary TEXT NOT NULL
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_session_scope ON conv_summaries(session_key, retention_scope);
-
-            CREATE TABLE IF NOT EXISTS rules (
-              id TEXT PRIMARY KEY,
-              priority INTEGER NOT NULL,
-              enabled INTEGER NOT NULL,
-              kind TEXT NOT NULL,
-              body TEXT NOT NULL,
-              updated_at INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_rules_kind ON rules(kind);
-
-            CREATE TABLE IF NOT EXISTS style_profile (
-              key TEXT PRIMARY KEY,
-              value TEXT NOT NULL,
-              updated_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS preference_profile (
-              key TEXT PRIMARY KEY,
-              value TEXT NOT NULL,
-              confidence REAL NOT NULL,
-              updated_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS preference_event (
-              id TEXT PRIMARY KEY,
-              key TEXT NOT NULL,
-              value TEXT NOT NULL,
-              weight REAL NOT NULL,
-              explicit INTEGER NOT NULL,
-              source TEXT NOT NULL,
-              evidence_uri TEXT NULL,
-              created_at INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_pref_event_key_time ON preference_event(key, created_at);
-
-            CREATE TABLE IF NOT EXISTS memory_policy_profile (
-              policy_key TEXT PRIMARY KEY,
-              policy_value TEXT NOT NULL,
-              confidence REAL NOT NULL,
-              updated_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS memory_quarantine (
-              id TEXT PRIMARY KEY,
-              trace_id TEXT,
-              raw_text TEXT,
-              reason TEXT NOT NULL,
-              risk_score REAL NOT NULL,
-              created_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS conflict_group (
-              id TEXT PRIMARY KEY,
-              fact_key TEXT NOT NULL,
-              members_json TEXT NOT NULL,
-              policy TEXT NOT NULL,
-              created_at INTEGER NOT NULL,
-              updated_at INTEGER NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS fact_index (
-              session_key TEXT NOT NULL,
-              fact_key TEXT NOT NULL,
-              item_id TEXT NOT NULL,
-              updated_at INTEGER NOT NULL,
-              PRIMARY KEY(session_key, fact_key, item_id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_fact_index_key ON fact_index(fact_key, session_key, updated_at);
-            CREATE INDEX IF NOT EXISTS idx_fact_index_item ON fact_index(item_id);
-
-            CREATE TABLE IF NOT EXISTS audit_events (
-              id TEXT PRIMARY KEY,
-              sessionKey TEXT NOT NULL,
-              ts INTEGER NOT NULL,
-              risk REAL NOT NULL,
-              block INTEGER NOT NULL,
-              reasons TEXT NOT NULL,
-              sample_hash TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);
-
-            CREATE TABLE IF NOT EXISTS kv_state (
-              key TEXT PRIMARY KEY,
-              value TEXT NOT NULL,
-              updated_at INTEGER NOT NULL
-            );
-
             CREATE TABLE IF NOT EXISTS events (
-              id TEXT PRIMARY KEY,
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
               session_key TEXT NOT NULL,
               ts INTEGER NOT NULL,
               day_key TEXT NOT NULL,
               actor TEXT NOT NULL,
               kind TEXT NOT NULL,
               summary TEXT NOT NULL,
-              tags_json TEXT NOT NULL DEFAULT '{}',
-              importance REAL NOT NULL DEFAULT 0.5,
-              ttl_expires_at INTEGER NULL,
+              keywords TEXT NOT NULL DEFAULT '',
+              salience REAL NOT NULL DEFAULT 0.0,
+              ttl_expires_at INTEGER,
               created_at INTEGER NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_events_day_session_ts ON events(day_key, session_key, ts DESC);
-            CREATE INDEX IF NOT EXISTS idx_events_session_ts ON events(session_key, ts DESC);
+            CREATE INDEX IF NOT EXISTS idx_events_session_day ON events(session_key, day_key, ts DESC);
             CREATE INDEX IF NOT EXISTS idx_events_ttl ON events(ttl_expires_at);
 
             CREATE TABLE IF NOT EXISTS daily_digests (
               day_key TEXT NOT NULL,
-              scope TEXT NOT NULL,
               session_key TEXT NOT NULL,
-              compact_text TEXT NOT NULL,
-              meso_text TEXT NOT NULL DEFAULT '',
+              digest_micro TEXT NOT NULL DEFAULT '',
+              digest_meso TEXT NOT NULL DEFAULT '',
               updated_at INTEGER NOT NULL,
-              PRIMARY KEY(day_key, scope, session_key)
+              PRIMARY KEY(day_key, session_key)
             );
-            CREATE INDEX IF NOT EXISTS idx_daily_digests_session_day ON daily_digests(session_key, day_key DESC);
+
+            CREATE TABLE IF NOT EXISTS rules (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              session_key TEXT NOT NULL,
+              key TEXT NOT NULL,
+              value TEXT NOT NULL,
+              priority INTEGER NOT NULL DEFAULT 100,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              source TEXT NOT NULL DEFAULT 'brain',
+              updated_at INTEGER NOT NULL,
+              UNIQUE(session_key, key)
+            );
+
+            CREATE TABLE IF NOT EXISTS style_profile (
+              session_key TEXT NOT NULL,
+              key TEXT NOT NULL,
+              value TEXT NOT NULL,
+              updated_at INTEGER NOT NULL,
+              PRIMARY KEY(session_key, key)
+            );
+
+            CREATE TABLE IF NOT EXISTS fact_index (
+              session_key TEXT NOT NULL,
+              fact_key TEXT NOT NULL,
+              item_id INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              PRIMARY KEY(session_key, fact_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS quarantine (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              session_key TEXT NOT NULL,
+              raw_text TEXT NOT NULL,
+              reason TEXT NOT NULL,
+              risk REAL NOT NULL DEFAULT 0.0,
+              created_at INTEGER NOT NULL
+            );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+              summary,
+              keywords,
+              ngrams,
+              content=''
+            );
+            CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
+              summary,
+              keywords,
+              ngrams,
+              content=''
+            );
             """
         )
-        # FTS indices for embedding-free scalable retrieval.
-        try:
-            c.execute(
-                """
-                CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts
-                USING fts5(
-                  item_id UNINDEXED,
-                  session_key UNINDEXED,
-                  layer UNINDEXED,
-                  fact_keys,
-                  content,
-                  tokenize='unicode61'
-                );
-                """
-            )
-            c.execute(
-                """
-                CREATE VIRTUAL TABLE IF NOT EXISTS events_fts
-                USING fts5(
-                  event_id UNINDEXED,
-                  session_key UNINDEXED,
-                  day_key UNINDEXED,
-                  actor UNINDEXED,
-                  kind UNINDEXED,
-                  content,
-                  tokenize='unicode61'
-                );
-                """
-            )
-        except sqlite3.OperationalError:
-            # Some sqlite builds may not include FTS5; retrieval falls back to normal paths.
-            pass
         self.conn.commit()
-        # Backward-compatible migration for existing DBs.
-        try:
-            cols = {str(r["name"]) for r in self.conn.execute("PRAGMA table_info(daily_digests)").fetchall()}
-            if "meso_text" not in cols:
-                self.conn.execute("ALTER TABLE daily_digests ADD COLUMN meso_text TEXT NOT NULL DEFAULT ''")
-                self.conn.commit()
-        except Exception:
-            pass
 
-        # migrate away from over-restrictive legacy key-refusal rules
-        ts = now_ts()
-        self.conn.execute(
-            "DELETE FROM rules WHERE id='r_security_refuse_keys' OR body LIKE 'compliance.refuse_api_keys=%'"
-        )
-        self.conn.execute(
-            "UPDATE rules SET body='security.never_output_secrets=true', kind='security', updated_at=? WHERE body='security.no_secrets=true'",
-            (ts,),
+    def _row_to_search_result(self, row: sqlite3.Row, score: float) -> SearchResult:
+        return SearchResult(
+            id=int(row["id"]),
+            session_key=str(row["session_key"]),
+            layer=str(row["layer"]),
+            kind=str(row["kind"]),
+            fact_key=str(row["fact_key"] or ""),
+            value=str(row["value"] or ""),
+            summary=str(row["summary"] or ""),
+            confidence=float(row["confidence"] or 0.0),
+            importance=float(row["importance"] or 0.0),
+            strength=float(row["strength"] or 0.0),
+            updated_at=int(row["updated_at"] or 0),
+            score=score,
         )
 
-        # default hard rules (output-safe, no input-side refusal)
-        defaults = [
-            ("r_security_never_output_secrets", 100, 1, "security", "security.never_output_secrets=true", ts),
-            ("r_operation_allow_local_config", 90, 1, "operation", "operation.allow_user_requested_local_config=true", ts),
-        ]
-        for row in defaults:
+    def _upsert_memory_fts(self, item_id: int, summary: str, keywords: str, ngrams: str) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO memory_fts(rowid, summary, keywords, ngrams) VALUES(?,?,?,?)",
+            (item_id, summary, keywords, ngrams),
+        )
+
+    def _upsert_event_fts(self, event_id: int, summary: str, keywords: str, ngrams: str) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO events_fts(rowid, summary, keywords, ngrams) VALUES(?,?,?,?)",
+            (event_id, summary, keywords, ngrams),
+        )
+
+    def _local_day(self, ts: int) -> str:
+        return datetime.fromtimestamp(ts, tz=self.timezone).strftime("%Y-%m-%d")
+
+    def now_day(self) -> str:
+        return self._local_day(_utc_now())
+
+    def upsert_rule(self, session_key: str, key: str, value: str, *, priority: int = 100, source: str = "brain", enabled: bool = True, updated_at: int | None = None) -> None:
+        ts = updated_at or _utc_now()
+        self.conn.execute(
+            """
+            INSERT INTO rules(session_key, key, value, priority, enabled, source, updated_at)
+            VALUES(?,?,?,?,?,?,?)
+            ON CONFLICT(session_key, key)
+            DO UPDATE SET value=excluded.value, priority=excluded.priority, enabled=excluded.enabled, source=excluded.source, updated_at=excluded.updated_at
+            """,
+            (session_key, key, value, priority, 1 if enabled else 0, source, ts),
+        )
+        self.conn.commit()
+
+    def list_rules(self, session_key: str) -> dict[str, str]:
+        rows = self.conn.execute(
+            "SELECT key, value FROM rules WHERE enabled=1 AND session_key IN (?, 'global') ORDER BY session_key='global', priority ASC, updated_at DESC",
+            (session_key,),
+        ).fetchall()
+        out: dict[str, str] = {}
+        for row in rows:
+            out[str(row["key"])] = str(row["value"])
+        return out
+
+    def upsert_style(self, session_key: str, key: str, value: str, *, updated_at: int | None = None) -> None:
+        ts = updated_at or _utc_now()
+        self.conn.execute(
+            """
+            INSERT INTO style_profile(session_key, key, value, updated_at)
+            VALUES(?,?,?,?)
+            ON CONFLICT(session_key, key)
+            DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+            """,
+            (session_key, key, value, ts),
+        )
+        self.conn.commit()
+
+    def list_style(self, session_key: str) -> dict[str, str]:
+        rows = self.conn.execute(
+            "SELECT key, value FROM style_profile WHERE session_key IN (?, 'global') ORDER BY session_key='global', updated_at DESC",
+            (session_key,),
+        ).fetchall()
+        out: dict[str, str] = {}
+        for row in rows:
+            out[str(row["key"])] = str(row["value"])
+        return out
+
+    def insert_memory(
+        self,
+        *,
+        session_key: str,
+        layer: str,
+        kind: str,
+        fact_key: str,
+        value: str,
+        text: str,
+        summary: str,
+        confidence: float,
+        importance: float,
+        strength: float,
+        tags: dict[str, Any] | None = None,
+        source_quote: str = "",
+        ttl_days: int | None = None,
+        created_at: int | None = None,
+    ) -> int:
+        ts = created_at or _utc_now()
+        ttl_expires_at = ts + ttl_days * 86400 if ttl_days else None
+        summary = _normalize_text(summary or text or value)
+        text = _normalize_text(text or summary or value)
+        fact_key = str(fact_key or "").strip()
+        value = _normalize_text(value or "")
+        keywords = " ".join(dict.fromkeys(_slug_tokens(" ".join([summary, value, fact_key]))))
+        ngrams = _ngrams(" ".join([summary, value, fact_key]))
+        cur = self.conn.execute(
+            """
+            INSERT INTO memory_items(
+              session_key, layer, kind, fact_key, value, text, summary, keywords, ngrams,
+              confidence, importance, strength, tags_json, source_quote, ttl_expires_at, created_at, updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                session_key,
+                layer,
+                kind,
+                fact_key,
+                value,
+                text,
+                summary,
+                keywords,
+                ngrams,
+                float(confidence),
+                float(importance),
+                float(strength),
+                json.dumps(tags or {}, ensure_ascii=False),
+                _normalize_text(source_quote)[:160],
+                ttl_expires_at,
+                ts,
+                ts,
+            ),
+        )
+        item_id = int(cur.lastrowid)
+        self._upsert_memory_fts(item_id, summary, keywords, ngrams)
+        if fact_key:
             self.conn.execute(
-                "INSERT OR IGNORE INTO rules(id,priority,enabled,kind,body,updated_at) VALUES(?,?,?,?,?,?)",
-                row,
+                """
+                INSERT INTO fact_index(session_key, fact_key, item_id, updated_at)
+                VALUES(?,?,?,?)
+                ON CONFLICT(session_key, fact_key)
+                DO UPDATE SET item_id=excluded.item_id, updated_at=excluded.updated_at
+                """,
+                (session_key, fact_key, item_id, ts),
             )
         self.conn.commit()
-        self._maybe_rebuild_fts_terms()
+        return item_id
 
-    def close(self) -> None:
-        self.conn.close()
-
-    def set_state(self, key: str, value: str) -> None:
-        ts = now_ts()
-        self.conn.execute(
-            "INSERT INTO kv_state(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
-            (key, value, ts),
-        )
-        self.conn.commit()
-
-    def get_state(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        row = self.conn.execute("SELECT value FROM kv_state WHERE key=?", (key,)).fetchone()
-        if not row:
-            return default
-        return str(row["value"])
-
-    def add_event(
+    def insert_event(
         self,
         *,
         session_key: str,
@@ -345,1422 +358,430 @@ class MemqDB:
         actor: str,
         kind: str,
         summary: str,
-        tags: Optional[Dict[str, Any]] = None,
-        importance: float = 0.5,
-        ttl_expires_at: Optional[int] = None,
-    ) -> str:
-        eid = str(uuid.uuid4())
-        evt_ts = int(ts or now_ts())
-        day_key = day_key_from_ts(evt_ts)
-        self.conn.execute(
-            """
-            INSERT INTO events(
-              id,session_key,ts,day_key,actor,kind,summary,tags_json,importance,ttl_expires_at,created_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
-            """,
-            (
-                eid,
-                session_key,
-                evt_ts,
-                day_key,
-                (actor or "assistant")[:16],
-                (kind or "chat")[:32],
-                " ".join((summary or "").split())[:420],
-                json.dumps(tags or {}, ensure_ascii=False),
-                float(max(0.0, min(1.0, importance))),
-                ttl_expires_at,
-                now_ts(),
-            ),
+        salience: float,
+        keywords: Iterable[str] | None = None,
+        ttl_days: int | None = None,
+    ) -> int:
+        day_key = self._local_day(ts)
+        ttl_expires_at = ts + ttl_days * 86400 if ttl_days else None
+        summary = _normalize_text(summary)
+        key_text = " ".join(dict.fromkeys((keywords or []) or _slug_tokens(summary)))
+        ngrams = _ngrams(summary)
+        cur = self.conn.execute(
+            "INSERT INTO events(session_key, ts, day_key, actor, kind, summary, keywords, salience, ttl_expires_at, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (session_key, ts, day_key, actor, kind, summary, key_text, float(salience), ttl_expires_at, ts),
         )
-        self._sync_event_fts_item(
-            event_id=eid,
-            session_key=session_key,
-            day_key=day_key,
-            actor=(actor or "assistant")[:16],
-            kind=(kind or "chat")[:32],
-            summary=" ".join((summary or "").split())[:420],
+        event_id = int(cur.lastrowid)
+        self._upsert_event_fts(event_id, summary, key_text, ngrams)
+        self.conn.commit()
+        return event_id
+
+    def insert_quarantine(self, session_key: str, raw_text: str, reason: str, risk: float = 1.0) -> None:
+        self.conn.execute(
+            "INSERT INTO quarantine(session_key, raw_text, reason, risk, created_at) VALUES(?,?,?,?,?)",
+            (session_key, raw_text[:400], reason[:120], float(risk), _utc_now()),
         )
         self.conn.commit()
-        return eid
 
-    def list_events_range(
-        self,
-        *,
-        session_key: str,
-        start_day: str,
-        end_day: str,
-        limit: int = 200,
-        include_global: bool = True,
-    ) -> List[sqlite3.Row]:
-        now = now_ts()
-        if include_global:
-            rows = self.conn.execute(
-                """
-                SELECT * FROM events
-                WHERE day_key >= ? AND day_key <= ?
-                  AND (session_key=? OR session_key='global')
-                  AND (ttl_expires_at IS NULL OR ttl_expires_at > ?)
-                ORDER BY day_key DESC, importance DESC, ts DESC
-                LIMIT ?
-                """,
-                (start_day, end_day, session_key, now, int(limit)),
-            ).fetchall()
-            return rows
+    def list_quarantine(self, limit: int = 50) -> list[dict[str, Any]]:
         rows = self.conn.execute(
-            """
-            SELECT * FROM events
-            WHERE day_key >= ? AND day_key <= ?
-              AND session_key=?
-              AND (ttl_expires_at IS NULL OR ttl_expires_at > ?)
-            ORDER BY day_key DESC, importance DESC, ts DESC
-            LIMIT ?
-            """,
-            (start_day, end_day, session_key, now, int(limit)),
+            "SELECT id, session_key, raw_text, reason, risk, created_at FROM quarantine ORDER BY created_at DESC LIMIT ?",
+            (max(1, min(limit, 500)),),
         ).fetchall()
-        return rows
+        return [dict(row) for row in rows]
 
-    def prune_expired_events(self) -> int:
-        now = now_ts()
-        deleted = self.conn.execute(
+    def purge_expired(self) -> dict[str, int]:
+        now = _utc_now()
+        removed_memory = self.conn.execute(
+            "DELETE FROM memory_items WHERE ttl_expires_at IS NOT NULL AND ttl_expires_at <= ?",
+            (now,),
+        ).rowcount
+        removed_events = self.conn.execute(
             "DELETE FROM events WHERE ttl_expires_at IS NOT NULL AND ttl_expires_at <= ?",
             (now,),
         ).rowcount
         self.conn.commit()
-        return int(deleted)
+        return {"memory": int(removed_memory or 0), "events": int(removed_events or 0)}
 
-    def upsert_daily_digest(
+    def decay_ephemera(self, session_key: str, *, factor: float = 0.92, min_strength: float = 0.08) -> dict[str, int]:
+        rows = self.conn.execute(
+            "SELECT id, strength, importance FROM memory_items WHERE session_key IN (?, 'global') AND layer='ephemeral' AND tombstoned=0",
+            (session_key,),
+        ).fetchall()
+        updated = 0
+        pruned = 0
+        for row in rows:
+            strength = float(row["strength"] or 0.0) * factor
+            importance = float(row["importance"] or 0.0) * factor
+            if max(strength, importance) < min_strength:
+                self.conn.execute("UPDATE memory_items SET tombstoned=1, updated_at=? WHERE id=?", (_utc_now(), int(row["id"])))
+                pruned += 1
+            else:
+                self.conn.execute(
+                    "UPDATE memory_items SET strength=?, importance=?, updated_at=? WHERE id=?",
+                    (strength, importance, _utc_now(), int(row["id"])),
+                )
+                updated += 1
+        if updated or pruned:
+            self.conn.commit()
+        return {"updated": updated, "pruned": pruned}
+
+    def search_memory(
         self,
         *,
-        day_key: str,
-        scope: str,
         session_key: str,
-        compact_text: str,
-        meso_text: str = "",
-        updated_at: Optional[int] = None,
-    ) -> None:
-        ts = int(updated_at or now_ts())
-        self.conn.execute(
-            """
-            INSERT INTO daily_digests(day_key,scope,session_key,compact_text,meso_text,updated_at)
-            VALUES(?,?,?,?,?,?)
-            ON CONFLICT(day_key,scope,session_key)
-            DO UPDATE SET compact_text=excluded.compact_text, meso_text=excluded.meso_text, updated_at=excluded.updated_at
-            """,
-            (day_key, scope, session_key, compact_text[:2200], meso_text[:4200], ts),
+        queries: list[str],
+        fact_keys: list[str],
+        layers: tuple[str, ...],
+        limit: int,
+        include_global: bool = True,
+    ) -> list[SearchResult]:
+        now = _utc_now()
+        layer_placeholders = ",".join("?" for _ in layers)
+        sessions = [session_key] + (["global"] if include_global else [])
+        session_placeholders = ",".join("?" for _ in sessions)
+        candidates: dict[int, float] = {}
+        params_common: list[Any] = list(layers) + sessions + [now]
+        base_where = (
+            f"m.layer IN ({layer_placeholders}) AND m.session_key IN ({session_placeholders}) "
+            "AND m.tombstoned=0 AND (m.ttl_expires_at IS NULL OR m.ttl_expires_at > ?)"
         )
-        self.conn.commit()
+        for q in [q for q in queries if q.strip()][:6]:
+            match = _fts_match_query(q)
+            sql = (
+                "SELECT m.id, (-bm25(memory_fts)) AS score FROM memory_fts "
+                "JOIN memory_items m ON m.id = memory_fts.rowid "
+                f"WHERE {base_where} AND memory_fts MATCH ? ORDER BY bm25(memory_fts) LIMIT ?"
+            )
+            for row in self.conn.execute(sql, params_common + [match, max(4, limit * 4)]).fetchall():
+                candidates[int(row["id"])] = max(candidates.get(int(row["id"]), 0.0), float(row["score"] or 0.0))
+        if fact_keys:
+            fact_rows = self.conn.execute(
+                f"""
+                SELECT m.id, 4.0 as score
+                FROM fact_index fi
+                JOIN memory_items m ON m.id = fi.item_id
+                WHERE {base_where} AND fi.session_key IN ({session_placeholders}) AND fi.fact_key IN ({','.join('?' for _ in fact_keys)})
+                ORDER BY m.updated_at DESC
+                LIMIT ?
+                """,
+                params_common + sessions + fact_keys + [max(4, limit * 4)],
+            ).fetchall()
+            for row in fact_rows:
+                candidates[int(row["id"])] = max(candidates.get(int(row["id"]), 0.0), float(row["score"] or 0.0))
+        if not candidates:
+            return []
+        ids = sorted(candidates, key=lambda item_id: candidates[item_id], reverse=True)[: max(limit * 4, limit)]
+        rows = self.conn.execute(
+            f"SELECT * FROM memory_items WHERE id IN ({','.join('?' for _ in ids)})",
+            ids,
+        ).fetchall()
+        mapped = {int(row["id"]): row for row in rows}
+        results: list[SearchResult] = []
+        for item_id in ids:
+            row = mapped.get(item_id)
+            if not row:
+                continue
+            recency_bonus = 0.15 if int(row["updated_at"] or 0) >= now - 86400 * 14 else 0.0
+            score = candidates[item_id] + float(row["confidence"] or 0.0) * 0.3 + float(row["importance"] or 0.0) * 0.2 + recency_bonus
+            results.append(self._row_to_search_result(row, score))
+        dedup: dict[tuple[str, str, str], SearchResult] = {}
+        for result in results:
+            key = (result.layer, result.fact_key, result.value or result.summary)
+            if key not in dedup or dedup[key].score < result.score:
+                dedup[key] = result
+        ordered = sorted(dedup.values(), key=lambda item: item.score, reverse=True)
+        return ordered[:limit]
 
-    def list_daily_digests_range(
+    def search_events(
         self,
         *,
         session_key: str,
+        queries: list[str],
         start_day: str,
         end_day: str,
-        scope: str = "session",
-        limit: int = 14,
-        include_global: bool = False,
-    ) -> List[sqlite3.Row]:
-        if include_global:
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        now = _utc_now()
+        candidates: dict[int, float] = {}
+        for q in [q for q in queries if q.strip()][:6]:
+            match = _fts_match_query(q)
+            sql = (
+                "SELECT e.id, (-bm25(events_fts)) AS score FROM events_fts "
+                "JOIN events e ON e.id = events_fts.rowid "
+                "WHERE e.session_key=? AND e.day_key BETWEEN ? AND ? AND (e.ttl_expires_at IS NULL OR e.ttl_expires_at > ?) AND events_fts MATCH ? "
+                "ORDER BY bm25(events_fts) LIMIT ?"
+            )
+            for row in self.conn.execute(sql, (session_key, start_day, end_day, now, match, max(4, limit * 4))).fetchall():
+                candidates[int(row["id"])] = max(candidates.get(int(row["id"]), 0.0), float(row["score"] or 0.0))
+        if not candidates:
             rows = self.conn.execute(
-                """
-                SELECT * FROM daily_digests
-                WHERE day_key >= ? AND day_key <= ?
-                  AND scope=?
-                  AND (session_key=? OR session_key='global')
-                ORDER BY day_key DESC, CASE WHEN session_key=? THEN 0 ELSE 1 END
-                LIMIT ?
-                """,
-                (start_day, end_day, scope, session_key, session_key, int(limit)),
+                "SELECT id, summary, ts, day_key, actor, kind, salience FROM events WHERE session_key=? AND day_key BETWEEN ? AND ? ORDER BY salience DESC, ts DESC LIMIT ?",
+                (session_key, start_day, end_day, max(4, limit)),
             ).fetchall()
-            return rows
+            return [dict(row) for row in rows]
+        ids = sorted(candidates, key=lambda item_id: candidates[item_id], reverse=True)[: max(limit * 4, limit)]
         rows = self.conn.execute(
-            """
-            SELECT * FROM daily_digests
-            WHERE day_key >= ? AND day_key <= ?
-              AND scope=? AND session_key=?
-            ORDER BY day_key DESC
-            LIMIT ?
-            """,
-            (start_day, end_day, scope, session_key, int(limit)),
+            f"SELECT id, summary, ts, day_key, actor, kind, salience FROM events WHERE id IN ({','.join('?' for _ in ids)})",
+            ids,
         ).fetchall()
-        return rows
+        mapped = {int(row["id"]): dict(row) for row in rows}
+        ordered: list[dict[str, Any]] = []
+        for event_id in ids:
+            row = mapped.get(event_id)
+            if row:
+                ordered.append(row)
+        return ordered[:limit]
 
-    def add_memory_item(
-        self,
-        *,
-        session_key: str,
-        layer: str,
-        text: str,
-        summary: str,
-        importance: float,
-        tags: Dict[str, Any],
-        emb_f16: Optional[bytes],
-        emb_q: Optional[bytes],
-        emb_dim: int,
-        ttl_expires_at: Optional[int] = None,
-        source: str = "turn",
-    ) -> str:
-        item_id = str(uuid.uuid4())
-        ts = now_ts()
+    def refresh_daily_digest(self, session_key: str, day_key: str) -> None:
+        rows = self.conn.execute(
+            "SELECT summary, kind, salience FROM events WHERE session_key=? AND day_key=? ORDER BY salience DESC, ts DESC LIMIT 12",
+            (session_key, day_key),
+        ).fetchall()
+        bullets = [f"- [{row['kind']}] {str(row['summary'])[:140]}" for row in rows]
+        digest_micro = " | ".join(bullets[:4])
+        digest_meso = "\n".join(bullets[:10])
         self.conn.execute(
             """
-            INSERT INTO memory_items(
-              id,session_key,layer,created_at,updated_at,last_access_at,ttl_expires_at,
-              importance,usage_count,text,summary,tags,emb_f16,emb_q,emb_dim,emb_norm,source
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            INSERT INTO daily_digests(day_key, session_key, digest_micro, digest_meso, updated_at)
+            VALUES(?,?,?,?,?)
+            ON CONFLICT(day_key, session_key)
+            DO UPDATE SET digest_micro=excluded.digest_micro, digest_meso=excluded.digest_meso, updated_at=excluded.updated_at
             """,
-            (
-                item_id,
-                session_key,
-                layer,
-                ts,
-                ts,
-                ts,
-                ttl_expires_at,
-                float(importance),
-                0,
-                text,
-                summary,
-                json.dumps(tags, ensure_ascii=False),
-                emb_f16,
-                emb_q,
-                int(emb_dim),
-                1.0,
-                source,
-            ),
-        )
-        self._sync_fact_index_for_item(
-            item_id=item_id,
-            session_key=session_key,
-            layer=layer,
-            tags=tags,
-            updated_at=ts,
-        )
-        self._sync_memory_fts_item(
-            item_id=item_id,
-            session_key=session_key,
-            layer=layer,
-            summary=summary,
-            tags=tags,
+            (day_key, session_key, digest_micro, digest_meso, _utc_now()),
         )
         self.conn.commit()
-        return item_id
 
-    def add_or_merge_memory_item(
-        self,
-        *,
-        session_key: str,
-        layer: str,
-        text: str,
-        summary: str,
-        importance: float,
-        tags: Dict[str, Any],
-        emb_f16: Optional[bytes],
-        emb_q: Optional[bytes],
-        emb_dim: int,
-        ttl_expires_at: Optional[int] = None,
-        source: str = "turn",
-        similar_threshold: float = 0.86,
-    ) -> Tuple[str, bool]:
-        """Insert new memory item, or merge into a near-duplicate recent item.
-        Returns: (item_id, merged_existing)
-        """
-        ts = now_ts()
-        new_sig = normalize_sig(summary)
-        new_tok = token_set(summary)
-        rows = self.conn.execute(
-            """
-            SELECT id,summary,tags,importance,usage_count,updated_at FROM memory_items
-            WHERE layer=? AND session_key=?
-            ORDER BY updated_at DESC
-            LIMIT 300
-            """,
-            (layer, session_key),
-        ).fetchall()
-        for r in rows:
-            old_summary = str(r["summary"] or "")
-            old_sig = normalize_sig(old_summary)
-            old_tok = token_set(old_summary)
-            sim = jaccard(new_tok, old_tok)
-            if old_sig == new_sig:
-                sim = 1.0
-            elif len(new_sig) >= 20 and len(old_sig) >= 20 and (new_sig in old_sig or old_sig in new_sig):
-                sim = max(sim, 0.93)
-            if sim < similar_threshold:
-                continue
+    def refresh_recent_digests(self, session_key: str, days: int = 7) -> None:
+        today = datetime.now(self.timezone).date()
+        for i in range(max(1, days)):
+            day_key = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+            self.refresh_daily_digest(session_key, day_key)
 
-            rid = str(r["id"])
-            try:
-                old_tags = json.loads(str(r["tags"] or "{}"))
-            except Exception:
-                old_tags = {}
-            merged_tags = dict(old_tags)
-            for k, v in (tags or {}).items():
-                if k == "fact_keys":
-                    a = set(old_tags.get("fact_keys") or [])
-                    b = set(v or [])
-                    merged_tags["fact_keys"] = sorted([x for x in (a | b) if x])
-                else:
-                    merged_tags[k] = v
+    def recent_digest(self, session_key: str, days: int = 2) -> str:
+        today = datetime.now(self.timezone).date()
+        rows = []
+        for i in range(max(1, days)):
+            day_key = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+            row = self.conn.execute(
+                "SELECT digest_micro FROM daily_digests WHERE day_key=? AND session_key=?",
+                (day_key, session_key),
+            ).fetchone()
+            if row and row["digest_micro"]:
+                rows.append(f"{day_key}:{row['digest_micro']}")
+        return " | ".join(rows[:2])
 
-            new_importance = max(float(r["importance"]), float(importance))
-            self.conn.execute(
-                """
-                UPDATE memory_items
-                SET text=?, summary=?, importance=?, tags=?, emb_f16=?, emb_q=?, emb_dim=?, updated_at=?, last_access_at=?, source=?
-                WHERE id=?
-                """,
-                (
-                    text,
-                    summary,
-                    new_importance,
-                    json.dumps(merged_tags, ensure_ascii=False),
-                    emb_f16,
-                    emb_q,
-                    int(emb_dim),
-                    ts,
-                    ts,
-                    source,
-                    rid,
-                ),
-            )
-            self._sync_fact_index_for_item(
-                item_id=rid,
-                session_key=session_key,
-                layer=layer,
-                tags=merged_tags,
-                updated_at=ts,
-            )
-            self._sync_memory_fts_item(
-                item_id=rid,
-                session_key=session_key,
-                layer=layer,
-                summary=summary,
-                tags=merged_tags,
-            )
-            self.conn.commit()
-            return rid, True
-
-        item_id = self.add_memory_item(
-            session_key=session_key,
-            layer=layer,
-            text=text,
-            summary=summary,
-            importance=importance,
-            tags=tags,
-            emb_f16=emb_f16,
-            emb_q=emb_q,
-            emb_dim=emb_dim,
-            ttl_expires_at=ttl_expires_at,
-            source=source,
-        )
-        return item_id, False
-
-    def _extract_fact_keys_from_tags(self, tags: Dict[str, Any]) -> List[str]:
-        keys: List[str] = []
-        if not isinstance(tags, dict):
-            return keys
-        raw_keys = tags.get("fact_keys")
-        if isinstance(raw_keys, list):
-            for x in raw_keys:
-                k = str(x or "").strip()
-                if k:
-                    keys.append(k)
-        fact = tags.get("fact")
-        if isinstance(fact, dict):
-            fk = str(fact.get("fact_key") or "").strip()
-            if fk:
-                keys.append(fk)
-        out: List[str] = []
-        seen = set()
-        for k in keys:
-            if not k or k in seen or len(k) > 128:
-                continue
-            seen.add(k)
-            out.append(k)
-        return out
-
-    def _sync_fact_index_for_item(
-        self,
-        *,
-        item_id: str,
-        session_key: str,
-        layer: str,
-        tags: Dict[str, Any],
-        updated_at: Optional[int] = None,
-    ) -> int:
-        self.conn.execute("DELETE FROM fact_index WHERE item_id=?", (item_id,))
-        if layer != "deep":
-            return 0
-        keys = self._extract_fact_keys_from_tags(tags)
-        if not keys:
-            return 0
-        ts = int(updated_at or now_ts())
-        wrote = 0
-        for fk in keys:
-            self.conn.execute(
-                """
-                INSERT INTO fact_index(session_key,fact_key,item_id,updated_at)
-                VALUES(?,?,?,?)
-                ON CONFLICT(session_key,fact_key,item_id) DO UPDATE SET updated_at=excluded.updated_at
-                """,
-                (session_key, fk, item_id, ts),
-            )
-            wrote += 1
-        return wrote
-
-    def _sync_memory_fts_item(
-        self,
-        *,
-        item_id: str,
-        session_key: str,
-        layer: str,
-        summary: str,
-        tags: Dict[str, Any],
-    ) -> None:
-        try:
-            self.conn.execute("DELETE FROM memory_fts WHERE item_id=?", (item_id,))
-            keys_list = self._extract_fact_keys_from_tags(tags)
-            keys = " ".join(keys_list)
-            content = _fts_content(summary, keys_list, max_len=2600)
-            self.conn.execute(
-                "INSERT INTO memory_fts(item_id,session_key,layer,fact_keys,content) VALUES(?,?,?,?,?)",
-                (item_id, session_key, layer, keys, content),
-            )
-        except sqlite3.OperationalError:
-            # FTS unavailable; ignore.
-            return
-
-    def _sync_event_fts_item(
-        self,
-        *,
-        event_id: str,
-        session_key: str,
-        day_key: str,
-        actor: str,
-        kind: str,
-        summary: str,
-    ) -> None:
-        try:
-            self.conn.execute("DELETE FROM events_fts WHERE event_id=?", (event_id,))
-            content = _fts_content(summary, [], max_len=2200)
-            self.conn.execute(
-                "INSERT INTO events_fts(event_id,session_key,day_key,actor,kind,content) VALUES(?,?,?,?,?,?)",
-                (event_id, session_key, day_key, actor, kind, content),
-            )
-        except sqlite3.OperationalError:
-            return
-
-    def _search_memory_fts_once(
-        self,
-        *,
-        layer: str,
-        session_key: str,
-        match_query: str,
-        limit: int,
-        include_global: bool,
-        now: int,
-    ) -> List[sqlite3.Row]:
-        if include_global:
-            return self.conn.execute(
-                """
-                SELECT mi.*, bm25(memory_fts) AS fts_rank
-                FROM memory_fts
-                JOIN memory_items mi ON mi.id = memory_fts.item_id
-                WHERE memory_fts MATCH ?
-                  AND mi.layer=?
-                  AND (mi.session_key=? OR mi.session_key='global')
-                  AND (mi.ttl_expires_at IS NULL OR mi.ttl_expires_at > ?)
-                ORDER BY fts_rank ASC, mi.updated_at DESC
-                LIMIT ?
-                """,
-                (match_query, layer, session_key, now, int(limit)),
-            ).fetchall()
-        return self.conn.execute(
-            """
-            SELECT mi.*, bm25(memory_fts) AS fts_rank
-            FROM memory_fts
-            JOIN memory_items mi ON mi.id = memory_fts.item_id
-            WHERE memory_fts MATCH ?
-              AND mi.layer=?
-              AND mi.session_key=?
-              AND (mi.ttl_expires_at IS NULL OR mi.ttl_expires_at > ?)
-            ORDER BY fts_rank ASC, mi.updated_at DESC
-            LIMIT ?
-            """,
-            (match_query, layer, session_key, now, int(limit)),
-        ).fetchall()
-
-    def search_memory_fts(
-        self,
-        *,
-        layer: str,
-        session_key: str,
-        match_query: str,
-        limit: int = 1200,
-        include_global: bool = True,
-    ) -> List[sqlite3.Row]:
-        q = str(match_query or "").strip()
-        if not q:
-            return []
-        now = now_ts()
-        try:
-            rows = self._search_memory_fts_once(
-                layer=layer,
-                session_key=session_key,
-                match_query=q,
-                limit=limit,
-                include_global=include_global,
-                now=now,
-            )
-            # Fallback to n-gram query form for CJK prompts when raw MATCH is sparse.
-            if len(rows) < min(6, int(limit)) and _contains_cjk(q):
-                ng_terms = _fts_terms(q, max_terms=18)
-                if ng_terms:
-                    q2 = " OR ".join(f'"{t.replace(chr(34), chr(34) * 2)}"' for t in ng_terms if len(t) >= 2)
-                    if q2:
-                        rows2 = self._search_memory_fts_once(
-                            layer=layer,
-                            session_key=session_key,
-                            match_query=q2,
-                            limit=limit,
-                            include_global=include_global,
-                            now=now,
-                        )
-                        merged: List[sqlite3.Row] = []
-                        seen = set()
-                        for r in rows + rows2:
-                            rid = str(r["id"])
-                            if rid in seen:
-                                continue
-                            seen.add(rid)
-                            merged.append(r)
-                            if len(merged) >= int(limit):
-                                break
-                        rows = merged
-            return rows
-        except sqlite3.OperationalError:
-            return []
-
-    def _maybe_rebuild_fts_terms(self) -> None:
-        state_key = "fts_terms_version"
-        target = "v2"
-        cur = self.get_state(state_key, "")
-        if cur == target:
-            return
-        try:
-            self.conn.execute("DELETE FROM memory_fts")
-            self.conn.execute("DELETE FROM events_fts")
-            mem_rows = self.conn.execute(
-                "SELECT id,session_key,layer,summary,tags FROM memory_items ORDER BY updated_at DESC LIMIT 50000"
-            ).fetchall()
-            for r in mem_rows:
-                rid = str(r["id"])
-                s_key = str(r["session_key"] or "")
-                layer = str(r["layer"] or "")
-                summary = str(r["summary"] or "")
-                try:
-                    tags = json.loads(str(r["tags"] or "{}"))
-                except Exception:
-                    tags = {}
-                if not isinstance(tags, dict):
-                    tags = {}
-                self._sync_memory_fts_item(
-                    item_id=rid,
-                    session_key=s_key,
-                    layer=layer,
-                    summary=summary,
-                    tags=tags,
-                )
-            evt_rows = self.conn.execute(
-                "SELECT id,session_key,day_key,actor,kind,summary FROM events ORDER BY ts DESC LIMIT 50000"
-            ).fetchall()
-            for r in evt_rows:
-                self._sync_event_fts_item(
-                    event_id=str(r["id"]),
-                    session_key=str(r["session_key"] or ""),
-                    day_key=str(r["day_key"] or ""),
-                    actor=str(r["actor"] or "assistant"),
-                    kind=str(r["kind"] or "chat"),
-                    summary=str(r["summary"] or ""),
-                )
-            self.conn.commit()
-            self.set_state(state_key, target)
-        except sqlite3.OperationalError:
-            # FTS not available on this sqlite build.
-            return
-
-    def fetch_deep_items_by_fact_keys(
-        self,
-        *,
-        session_key: str,
-        fact_keys: Sequence[str],
-        limit: int = 1500,
-        include_global: bool = True,
-    ) -> List[sqlite3.Row]:
-        keys = [str(k or "").strip() for k in fact_keys if str(k or "").strip()]
-        if not keys:
-            return []
-        uniq_keys = list(dict.fromkeys(keys))[:128]
-        now = now_ts()
-        in_clause = ",".join("?" for _ in uniq_keys)
-        if include_global:
-            session_clause = "(fi.session_key=? OR fi.session_key='global')"
-        else:
-            session_clause = "fi.session_key=?"
-        params: List[Any] = []
-        params.extend(uniq_keys)
-        params.append(session_key)
-        params.append(now)
-        params.append(session_key)
-        params.append(int(limit))
-        rows = self.conn.execute(
-            f"""
-            SELECT fi.session_key AS idx_session, fi.fact_key AS idx_fact_key, mi.*
-            FROM fact_index fi
-            JOIN memory_items mi ON mi.id=fi.item_id
-            WHERE fi.fact_key IN ({in_clause})
-              AND {session_clause}
-              AND mi.layer='deep'
-              AND (mi.ttl_expires_at IS NULL OR mi.ttl_expires_at > ?)
-            ORDER BY CASE WHEN fi.session_key=? THEN 0 ELSE 1 END, fi.updated_at DESC, mi.updated_at DESC
-            LIMIT ?
-            """,
-            tuple(params),
-        ).fetchall()
-        out: List[sqlite3.Row] = []
-        seen = set()
-        for r in rows:
-            rid = str(r["id"])
-            if rid in seen:
-                continue
-            seen.add(rid)
-            out.append(r)
-        return out
-
-    def cleanup_stale_fact_index(self) -> int:
-        removed = self.conn.execute(
-            "DELETE FROM fact_index WHERE item_id NOT IN (SELECT id FROM memory_items)"
-        ).rowcount
-        self.conn.commit()
-        return int(removed)
-
-    def backfill_fact_index(self, layer: str = "deep", limit: int = 10000) -> int:
-        rows = self.conn.execute(
-            "SELECT id,session_key,layer,tags,updated_at FROM memory_items WHERE layer=? ORDER BY updated_at DESC LIMIT ?",
-            (layer, int(limit)),
-        ).fetchall()
-        synced = 0
-        for r in rows:
-            rid = str(r["id"])
-            s_key = str(r["session_key"])
-            lyr = str(r["layer"])
-            try:
-                tags = json.loads(str(r["tags"] or "{}"))
-            except Exception:
-                tags = {}
-            wrote = self._sync_fact_index_for_item(
-                item_id=rid,
-                session_key=s_key,
-                layer=lyr,
-                tags=tags if isinstance(tags, dict) else {},
-                updated_at=int(r["updated_at"]),
-            )
-            if wrote > 0:
-                synced += 1
-        self.conn.commit()
-        return synced
-
-    def list_memory_items(self, layer: str, session_key: str, limit: int = 5000) -> List[sqlite3.Row]:
-        now = now_ts()
-        rows = self.conn.execute(
-            """
-            SELECT * FROM memory_items
-            WHERE layer=?
-              AND (session_key=? OR session_key='global')
-              AND (ttl_expires_at IS NULL OR ttl_expires_at > ?)
-            ORDER BY updated_at DESC
-            LIMIT ?
-            """,
-            (layer, session_key, now, int(limit)),
-        ).fetchall()
-        return rows
-
-    def list_memory_items_any(self, layer: str, limit: int = 5000) -> List[sqlite3.Row]:
-        now = now_ts()
-        rows = self.conn.execute(
-            """
-            SELECT * FROM memory_items
-            WHERE layer=?
-              AND (ttl_expires_at IS NULL OR ttl_expires_at > ?)
-            ORDER BY updated_at DESC
-            LIMIT ?
-            """,
-            (layer, now, int(limit)),
-        ).fetchall()
-        return rows
-
-    def touch_items(self, item_ids: Sequence[str]) -> None:
-        if not item_ids:
-            return
-        ts = now_ts()
-        for item_id in item_ids:
-            self.conn.execute(
-                "UPDATE memory_items SET last_access_at=?, usage_count=usage_count+1, updated_at=? WHERE id=?",
-                (ts, ts, item_id),
-            )
-        self.conn.commit()
-
-    def upsert_conv_summary(self, session_key: str, retention_scope: str, summary: str) -> str:
-        ts = now_ts()
+    def surface_anchor(self, session_key: str) -> str:
         row = self.conn.execute(
-            "SELECT id FROM conv_summaries WHERE session_key=? AND retention_scope=?",
-            (session_key, retention_scope),
+            "SELECT summary FROM memory_items WHERE session_key=? AND layer='surface' AND kind <> 'snapshot' AND tombstoned=0 ORDER BY updated_at DESC LIMIT 1",
+            (session_key,),
+        ).fetchone()
+        return str(row["summary"]) if row else ""
+
+    def deep_anchor(self, session_key: str) -> str:
+        row = self.conn.execute(
+            "SELECT summary FROM memory_items WHERE session_key IN (?, 'global') AND layer='deep' AND tombstoned=0 ORDER BY updated_at DESC LIMIT 1",
+            (session_key,),
+        ).fetchone()
+        return str(row["summary"]) if row else ""
+
+    def profile_snapshot(self, session_key: str) -> str:
+        row = self.conn.execute(
+            """
+            SELECT value, summary FROM memory_items
+            WHERE session_key IN (?, 'global') AND fact_key='profile.snapshot' AND tombstoned=0
+            ORDER BY updated_at DESC LIMIT 1
+            """,
+            (session_key,),
         ).fetchone()
         if row:
-            cid = str(row["id"])
-            self.conn.execute(
-                "UPDATE conv_summaries SET summary=?, updated_at=? WHERE id=?",
-                (summary, ts, cid),
-            )
-            self.conn.commit()
-            return cid
-        cid = str(uuid.uuid4())
-        self.conn.execute(
-            "INSERT INTO conv_summaries(id,session_key,retention_scope,updated_at,summary) VALUES(?,?,?,?,?)",
-            (cid, session_key, retention_scope, ts, summary),
-        )
-        self.conn.commit()
-        return cid
+            snap = str(row["value"] or row["summary"] or "")
+            if snap.strip():
+                return snap
+        return self.compute_profile_snapshot(session_key)
 
-    def get_conv_summary(self, session_key: str, retention_scope: str) -> Optional[str]:
-        row = self.conn.execute(
-            "SELECT summary FROM conv_summaries WHERE session_key=? AND retention_scope=?",
-            (session_key, retention_scope),
-        ).fetchone()
-        if not row:
-            return None
-        return str(row["summary"])
-
-    def list_rules(self) -> List[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT * FROM rules WHERE enabled=1 ORDER BY priority DESC, updated_at DESC"
+    def compute_profile_snapshot(self, session_key: str) -> str:
+        style = self.list_style(session_key)
+        facts = self.conn.execute(
+            """
+            SELECT fact_key, value FROM memory_items
+            WHERE session_key IN (?, 'global') AND layer='deep' AND tombstoned=0 AND fact_key GLOB 'profile.*'
+            ORDER BY updated_at DESC LIMIT 10
+            """,
+            (session_key,),
         ).fetchall()
-
-    def prune_stale_user_rules(self, now_sec: int, max_age_sec: int = 86400 * 45) -> int:
-        rows = self.conn.execute(
-            "SELECT id,kind,updated_at FROM rules WHERE id LIKE 'user_%' AND enabled=1"
-        ).fetchall()
-        removed = 0
-        for r in rows:
-            rid = str(r["id"])
-            kind = str(r["kind"])
-            updated = int(r["updated_at"])
-            if now_sec - updated <= max_age_sec:
-                continue
-            # keep language/security overrides longer; expire procedural hints first
-            if kind in {"security", "language"}:
-                continue
-            self.conn.execute("UPDATE rules SET enabled=0, updated_at=? WHERE id=?", (now_sec, rid))
-            removed += 1
-        self.conn.commit()
-        return removed
-
-    def upsert_rule(self, rule_id: str, priority: int, enabled: bool, kind: str, body: str) -> None:
-        ts = now_ts()
-        self.conn.execute(
-            "INSERT INTO rules(id,priority,enabled,kind,body,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET priority=excluded.priority,enabled=excluded.enabled,kind=excluded.kind,body=excluded.body,updated_at=excluded.updated_at",
-            (rule_id, int(priority), 1 if enabled else 0, kind, body, ts),
-        )
-        self.conn.commit()
-
-    def upsert_style(self, key: str, value: str) -> None:
-        ts = now_ts()
-        self.conn.execute(
-            "INSERT INTO style_profile(key,value,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at",
-            (key, value, ts),
-        )
-        self.conn.commit()
-
-    def get_style_profile(self) -> Dict[str, str]:
-        rows = self.conn.execute("SELECT key,value FROM style_profile ORDER BY key").fetchall()
-        return {str(r["key"]): str(r["value"]) for r in rows}
-
-    def get_profile_snapshot(self, session_key: str, max_parts: int = 8) -> str:
-        parts: List[str] = []
-        style = self.get_style_profile()
-        def _clean_style(v: str, limit: int = 40) -> str:
-            t = strip_runtime_noise(strip_memq_blocks(str(v or "")))
-            t = re.sub(r"\s+", " ", t).strip()
-            if not t or contains_runtime_noise(t):
-                return ""
-            if re.search(r"(<MEM(?:RULES|STYLE|CTX)|budget_tokens=|identity\.precedence=|security\.)", t, re.IGNORECASE):
-                return ""
-            return t[:limit]
-
-        for k in ("callUser", "firstPerson", "persona", "tone", "verbosity"):
-            v = _clean_style(str(style.get(k) or ""))
-            if not v:
-                continue
-            parts.append(f"{k}:{v[:40]}")
-            if len(parts) >= max_parts:
-                return " | ".join(parts)
-
-        pref = self.get_preference_profile()
-        for k in ("language.primary", "policy.retention.default", "policy.ttl.default_days"):
-            pv = pref.get(k) or {}
-            v = str(pv.get("value") or "").strip()
-            conf = float(pv.get("confidence", 0.0) or 0.0)
-            if not v or conf < 0.55:
-                continue
-            parts.append(f"{k}:{v[:40]}")
-            if len(parts) >= max_parts:
-                return " | ".join(parts)
-
-        rows = self.fetch_deep_items_by_fact_keys(
-            session_key=session_key,
-            fact_keys=[
-                "profile.family",
-                "profile.family.spouse",
-                "profile.family.pet",
-                "profile.family.child",
-                "profile.identity.call_user",
-                "profile.identity.first_person",
-                "profile.persona.role",
-                "profile.persona.tone",
-            ],
-            limit=32,
-            include_global=True,
-        )
+        parts: list[str] = []
+        ordered_style = ["callUser", "firstPerson", "persona", "tone", "speaking_style", "verbosity"]
+        for key in ordered_style:
+            val = style.get(key)
+            if val:
+                parts.append(f"{key}:{val}")
         seen = set()
-        for r in rows:
-            try:
-                tags = json.loads(str(r["tags"] or "{}"))
-            except Exception:
-                tags = {}
-            fact = tags.get("fact") if isinstance(tags, dict) else {}
-            if not isinstance(fact, dict):
-                continue
-            fk = str(fact.get("fact_key") or "")
-            val = str(fact.get("value") or "").strip()
-            if not fk or not val:
-                continue
+        for row in facts:
+            fk = str(row["fact_key"] or "")
             if fk in seen:
                 continue
             seen.add(fk)
-            short_k = fk.replace("profile.", "")
-            parts.append(f"{short_k}:{val[:40]}")
-            if len(parts) >= max_parts:
-                break
-        return " | ".join(parts)
+            parts.append(f"{fk}:{str(row['value'] or '')}")
+        return " | ".join(parts[:8])
 
-    def add_preference_event(
-        self,
-        *,
-        key: str,
-        value: str,
-        weight: float,
-        explicit: bool,
-        source: str,
-        evidence_uri: Optional[str],
-        created_at: Optional[int] = None,
-    ) -> str:
-        ev_id = str(uuid.uuid4())
-        ts = int(created_at or now_ts())
-        self.conn.execute(
-            "INSERT INTO preference_event(id,key,value,weight,explicit,source,evidence_uri,created_at) VALUES(?,?,?,?,?,?,?,?)",
-            (ev_id, key, value, float(weight), 1 if explicit else 0, source, evidence_uri, ts),
-        )
-        self.conn.commit()
-        return ev_id
-
-    def iter_preference_events(self, key: str) -> List[sqlite3.Row]:
-        return self.conn.execute(
-            "SELECT * FROM preference_event WHERE key=? ORDER BY created_at DESC",
-            (key,),
-        ).fetchall()
-
-    def upsert_preference_profile(self, key: str, value: str, confidence: float) -> None:
-        ts = now_ts()
-        self.conn.execute(
-            "INSERT INTO preference_profile(key,value,confidence,updated_at) VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,confidence=excluded.confidence,updated_at=excluded.updated_at",
-            (key, value, float(confidence), ts),
-        )
-        self.conn.commit()
-
-    def get_preference_profile(self) -> Dict[str, Dict[str, Any]]:
-        rows = self.conn.execute("SELECT key,value,confidence,updated_at FROM preference_profile").fetchall()
-        return {
-            str(r["key"]): {
-                "value": str(r["value"]),
-                "confidence": float(r["confidence"]),
-                "updated_at": int(r["updated_at"]),
-            }
-            for r in rows
-        }
-
-    def upsert_memory_policy(self, key: str, value: str, confidence: float) -> None:
-        ts = now_ts()
-        self.conn.execute(
-            "INSERT INTO memory_policy_profile(policy_key,policy_value,confidence,updated_at) VALUES(?,?,?,?) ON CONFLICT(policy_key) DO UPDATE SET policy_value=excluded.policy_value,confidence=excluded.confidence,updated_at=excluded.updated_at",
-            (key, value, float(confidence), ts),
-        )
-        self.conn.commit()
-
-    def get_memory_policy_profile(self) -> Dict[str, Dict[str, Any]]:
-        rows = self.conn.execute("SELECT policy_key,policy_value,confidence,updated_at FROM memory_policy_profile").fetchall()
-        return {
-            str(r["policy_key"]): {
-                "value": str(r["policy_value"]),
-                "confidence": float(r["confidence"]),
-                "updated_at": int(r["updated_at"]),
-            }
-            for r in rows
-        }
-
-    def add_quarantine(self, trace_id: Optional[str], raw_text: str, reason: str, risk_score: float) -> str:
-        qid = str(uuid.uuid4())
-        self.conn.execute(
-            "INSERT INTO memory_quarantine(id,trace_id,raw_text,reason,risk_score,created_at) VALUES(?,?,?,?,?,?)",
-            (qid, trace_id, raw_text[:1200], reason, float(risk_score), now_ts()),
-        )
-        self.conn.commit()
-        return qid
-
-    def get_quarantine(self, limit: int = 50) -> List[Dict[str, Any]]:
-        rows = self.conn.execute(
-            "SELECT * FROM memory_quarantine ORDER BY created_at DESC LIMIT ?",
-            (int(limit),),
-        ).fetchall()
-        out: List[Dict[str, Any]] = []
-        for r in rows:
-            out.append({k: r[k] for k in r.keys()})
-        return out
-
-    def add_audit_event(self, session_key: str, risk: float, block: bool, reasons: List[str], sample_hash: str) -> None:
-        self.conn.execute(
-            "INSERT INTO audit_events(id,sessionKey,ts,risk,block,reasons,sample_hash) VALUES(?,?,?,?,?,?,?)",
-            (str(uuid.uuid4()), session_key, now_ts(), float(risk), 1 if block else 0, json.dumps(reasons, ensure_ascii=False), sample_hash),
-        )
-        self.conn.commit()
-
-    def decay_and_prune_ephemeral(self) -> Dict[str, int]:
-        ts = now_ts()
-        self.conn.execute(
-            "UPDATE memory_items SET importance=MAX(0.0, importance*0.92), updated_at=? WHERE layer='ephemeral'",
-            (ts,),
-        )
-        deleted = self.conn.execute(
-            "DELETE FROM memory_items WHERE layer='ephemeral' AND (ttl_expires_at IS NOT NULL AND ttl_expires_at<=? OR importance<0.05)",
-            (ts,),
-        ).rowcount
-        self.conn.commit()
-        return {"ephemeral_deleted": int(deleted)}
-
-    def dedup_layer(self, layer: str, session_key: str) -> int:
-        rows = self.conn.execute(
-            "SELECT id,summary FROM memory_items WHERE layer=? AND session_key=? ORDER BY updated_at DESC",
-            (layer, session_key),
-        ).fetchall()
-        seen: Dict[str, str] = {}
-        removed = 0
-        for r in rows:
-            sid = str(r["id"])
-            raw = str(r["summary"]).strip().lower()
-            sig = re.sub(r"[^a-z0-9ぁ-んァ-ヶ一-龠]+", "", raw)
-            if len(sig) < 8:
-                sig = raw
-            if not sig:
-                continue
-            if sig in seen:
-                self.conn.execute("DELETE FROM memory_items WHERE id=?", (sid,))
-                removed += 1
-            else:
-                seen[sig] = sid
-        self.conn.commit()
-        return removed
-
-    def dedup_layer_fuzzy(self, layer: str, session_key: str, threshold: float = 0.84) -> int:
-        rows = self.conn.execute(
-            "SELECT id,summary FROM memory_items WHERE layer=? AND session_key=? ORDER BY updated_at DESC",
-            (layer, session_key),
-        ).fetchall()
-        kept_tokens: List[set[str]] = []
-        kept_sigs: List[str] = []
-        removed = 0
-        for r in rows:
-            sid = str(r["id"])
-            summary = str(r["summary"] or "")
-            sig = normalize_sig(summary)
-            toks = token_set(summary)
-            is_dup = False
-            for i, ks in enumerate(kept_tokens):
-                js = jaccard(toks, ks)
-                if js >= threshold:
-                    is_dup = True
-                    break
-                ps = kept_sigs[i]
-                if len(sig) >= 20 and len(ps) >= 20 and (sig in ps or ps in sig):
-                    is_dup = True
-                    break
-            if is_dup:
-                self.conn.execute("DELETE FROM memory_items WHERE id=?", (sid,))
-                removed += 1
-                continue
-            kept_tokens.append(toks)
-            kept_sigs.append(sig)
-        self.conn.commit()
-        return removed
-
-    def expire_conflicting_fact_keys(
-        self,
-        layer: str,
-        session_key: str,
-        fact_keys: Sequence[str],
-        keep_id: str,
-        *,
-        include_all_sessions: bool = False,
-    ) -> int:
-        keys = [k for k in fact_keys if k]
-        if not keys:
-            return 0
-        now = now_ts()
-
-        def _fact_conf(tags: Dict[str, Any]) -> float:
-            fact = tags.get("fact")
-            if isinstance(fact, dict):
-                try:
-                    c = float(fact.get("confidence"))
-                    if c > 0.0:
-                        return max(0.0, min(1.0, c))
-                except Exception:
-                    pass
-            gate = tags.get("gate")
-            if isinstance(gate, dict):
-                try:
-                    c = float(gate.get("score"))
-                    if c > 0.0:
-                        return max(0.0, min(1.0, c))
-                except Exception:
-                    pass
-            kind = str(tags.get("kind", ""))
-            if kind in {"structured_fact", "durable_global_fact"}:
-                return 0.82
-            if kind in {"durable_global", "convdeep_global"}:
-                return 0.72
-            return 0.52
-
-        def _fact_ts(tags: Dict[str, Any], updated_at: int) -> int:
-            fact = tags.get("fact")
-            if isinstance(fact, dict):
-                try:
-                    ts = int(fact.get("ts"))
-                    if ts > 0:
-                        return ts
-                except Exception:
-                    pass
-            try:
-                ts = int(tags.get("ts"))
-                if ts > 0:
-                    return ts
-            except Exception:
-                pass
-            return int(updated_at)
-
-        def _source_trust(source: str) -> float:
-            s = (source or "").strip().lower()
-            if s == "turn":
-                return 1.0
-            if s == "conv_summarize":
-                return 0.75
-            if s == "bootstrap":
-                return 0.7
-            return 0.6
-
-        def _rank(row: sqlite3.Row, tags: Dict[str, Any]) -> float:
-            conf = _fact_conf(tags)
-            ts = _fact_ts(tags, int(row["updated_at"]))
-            age_days = max(0.0, float(now - ts) / 86400.0)
-            freshness = pow(2.718281828, -age_days / 120.0)
-            imp = max(0.0, min(1.0, float(row["importance"])))
-            src = _source_trust(str(row["source"]))
-            s = 0.52 * conf + 0.30 * freshness + 0.12 * imp + 0.06 * src
-            if str(row["id"]) == keep_id:
-                s += 0.03
-            return float(s)
-
-        if include_all_sessions:
-            rows = self.conn.execute(
-                """
-                SELECT id,tags,importance,updated_at,source FROM memory_items
-                WHERE layer=?
-                ORDER BY updated_at DESC
-                """,
-                (layer,),
-            ).fetchall()
+    def refresh_profile_snapshot(self, session_key: str) -> str:
+        snapshot = self.compute_profile_snapshot(session_key)
+        if not snapshot:
+            return ""
+        existing = self.conn.execute(
+            """
+            SELECT id FROM memory_items
+            WHERE session_key=? AND fact_key='profile.snapshot' AND tombstoned=0
+            ORDER BY updated_at DESC LIMIT 1
+            """,
+            (session_key,),
+        ).fetchone()
+        ts = _utc_now()
+        if existing:
+            item_id = int(existing["id"])
+            keywords = " ".join(dict.fromkeys(_slug_tokens(snapshot)))
+            ngrams = _ngrams(snapshot)
+            self.conn.execute(
+                "UPDATE memory_items SET value=?, summary=?, text=?, keywords=?, ngrams=?, updated_at=? WHERE id=?",
+                (snapshot, snapshot, snapshot, keywords, ngrams, ts, item_id),
+            )
+            self._upsert_memory_fts(item_id, snapshot, keywords, ngrams)
         else:
-            rows = self.conn.execute(
+            self.insert_memory(
+                session_key=session_key,
+                layer="surface",
+                kind="snapshot",
+                fact_key="profile.snapshot",
+                value=snapshot,
+                text=snapshot,
+                summary=snapshot,
+                confidence=1.0,
+                importance=0.9,
+                strength=0.9,
+                created_at=ts,
+            )
+            return snapshot
+        self.conn.commit()
+        return snapshot
+
+    def refresh_fact_index(self, session_key: str) -> int:
+        rows = self.conn.execute(
+            """
+            SELECT id, session_key, fact_key, updated_at
+            FROM memory_items
+            WHERE session_key IN (?, 'global') AND layer='deep' AND tombstoned=0 AND fact_key <> ''
+            ORDER BY updated_at DESC
+            """,
+            (session_key,),
+        ).fetchall()
+        seen: set[tuple[str, str]] = set()
+        written = 0
+        for row in rows:
+            key = (str(row["session_key"]), str(row["fact_key"]))
+            if key in seen:
+                continue
+            seen.add(key)
+            self.conn.execute(
                 """
-                SELECT id,tags,importance,updated_at,source FROM memory_items
-                WHERE layer=? AND (session_key=? OR session_key='global')
-                ORDER BY updated_at DESC
+                INSERT INTO fact_index(session_key, fact_key, item_id, updated_at)
+                VALUES(?,?,?,?)
+                ON CONFLICT(session_key, fact_key)
+                DO UPDATE SET item_id=excluded.item_id, updated_at=excluded.updated_at
                 """,
-                (layer, session_key),
-            ).fetchall()
-        removed = 0
-        keyset = set(keys)
-        key_rows: Dict[str, List[Tuple[sqlite3.Row, Dict[str, Any]]]] = {}
-        for k in keyset:
-            key_rows[k] = []
-        for r in rows:
-            try:
-                tags = json.loads(str(r["tags"] or "{}"))
-            except Exception:
-                tags = {}
-            rk = set(tags.get("fact_keys") or [])
-            hits = rk & keyset
-            if not hits:
-                continue
-            for k in hits:
-                key_rows.setdefault(k, []).append((r, tags))
-
-        for fk, candidates in key_rows.items():
-            if not candidates:
-                continue
-            winner_id = None
-            winner_score = -1.0
-            member_ids: List[str] = []
-            for r, tags in candidates:
-                rid = str(r["id"])
-                member_ids.append(rid)
-                score = _rank(r, tags)
-                if score > winner_score:
-                    winner_score = score
-                    winner_id = rid
-            if winner_id is None:
-                continue
-            gid = f"cg:{fk}"
-            self.conn.execute(
-                "INSERT INTO conflict_group(id,fact_key,members_json,policy,created_at,updated_at) VALUES(?,?,?,?,?,?) "
-                "ON CONFLICT(id) DO UPDATE SET members_json=excluded.members_json,policy=excluded.policy,updated_at=excluded.updated_at",
-                (
-                    gid,
-                    fk,
-                    json.dumps(sorted(set(member_ids)), ensure_ascii=False),
-                    "prefer_recent_x_confidence",
-                    now,
-                    now,
-                ),
+                (key[0], key[1], int(row["id"]), int(row["updated_at"] or _utc_now())),
             )
-            for rid in member_ids:
-                if rid == winner_id:
-                    continue
-                self.conn.execute("DELETE FROM memory_items WHERE id=?", (rid,))
-                removed += 1
+            written += 1
         self.conn.commit()
-        return removed
+        return written
 
-    def trim_layer_size(self, layer: str, session_key: str, max_items: int) -> int:
-        rows = self.conn.execute(
-            "SELECT id FROM memory_items WHERE layer=? AND session_key=? ORDER BY last_access_at DESC, updated_at DESC",
-            (layer, session_key),
+    def refresh_fts(self, session_key: str) -> dict[str, int]:
+        memory_rows = self.conn.execute(
+            "SELECT id, summary, keywords, ngrams FROM memory_items WHERE session_key IN (?, 'global') AND tombstoned=0",
+            (session_key,),
         ).fetchall()
-        if len(rows) <= max_items:
-            return 0
-        drop = rows[max_items:]
-        for r in drop:
-            self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
+        event_rows = self.conn.execute(
+            "SELECT id, summary, keywords FROM events WHERE session_key=?",
+            (session_key,),
+        ).fetchall()
+        for row in memory_rows:
+            self._upsert_memory_fts(int(row["id"]), str(row["summary"] or ""), str(row["keywords"] or ""), str(row["ngrams"] or ""))
+        for row in event_rows:
+            self._upsert_event_fts(int(row["id"]), str(row["summary"] or ""), str(row["keywords"] or ""), _ngrams(str(row["summary"] or "")))
         self.conn.commit()
-        return len(drop)
+        return {"memory": len(memory_rows), "events": len(event_rows)}
 
-    def _compile_safe_cleanup_patterns(self, patterns: Sequence[str]) -> List[re.Pattern[str]]:
-        compiled: List[re.Pattern[str]] = []
-        for p in patterns:
-            raw = str(p or "").strip()
-            if not raw:
-                continue
-            try:
-                cre = re.compile(raw, re.IGNORECASE)
-            except re.error:
-                continue
-            # Reject patterns that can match empty-string. They can delete everything.
-            if cre.search(""):
-                continue
-            compiled.append(cre)
-        return compiled
-
-    def cleanup_noisy_memory(self, max_delete: int = 50) -> Dict[str, int]:
-        patterns = [
-            r"<MEM(?:RULES|STYLE|CTX)\s+v1>",
-            r"\[MEM(?:RULES|STYLE|CTX)\s+v1\]",
-            r"MEMSTYLEを更新してください",
-            r"MEMRULESを更新してください",
-            r"Conversation info \(untrusted metadata\):",
-            r"read\s+(?:agents|soul|identity|heartbeat)\.md",
-            r"workspace context",
-            r"follow it strictly",
-            r"do not infer or repeat old tasks",
-            r"^x:",
-            r"/Users/",
-            r"openclaw\.json",
-            r"EXT_TOOL_RESULT",
-            r"externalContent",
-            r"長期記憶.*(?:不足|不完全|課題|弱い)",
-            r"参照できる記憶コンテキスト.*不足",
-            r"取り扱い不足",
-            r"OpenClawで動く.*アシスタント",
-            r"I am .*assistant",
-            r"(?:お前自身は|あなたは).*(?:ロックマン|persona|キャラ|roleplay|act as)",
-            r"thinkingSignature",
-            r"encrypted_content",
-            r"\"type\"\s*:\s*\"(?:reasoning|thinking)\"",
-        ]
-        safe_patterns = self._compile_safe_cleanup_patterns(patterns)
-        removed_items = 0
-        capped = False
+    def recent_surface_messages(self, session_key: str, limit: int = 3) -> list[str]:
         rows = self.conn.execute(
-            "SELECT id,summary,session_key,layer,importance,tags FROM memory_items WHERE layer IN ('surface','deep')"
+            "SELECT summary FROM memory_items WHERE session_key=? AND layer='surface' AND kind <> 'snapshot' AND tombstoned=0 ORDER BY updated_at DESC LIMIT ?",
+            (session_key, limit),
         ).fetchall()
-        durable_pat = re.compile(r"(覚えて(?!る)|必ず|ルール|方針|制約|remember|always|must|rule|policy)", re.IGNORECASE)
-        question_like_pat = re.compile(r"(教えて|覚えてる|何|だれ|誰|どこ|いつ|how|what|who|where|when)\??$", re.IGNORECASE)
-        for r in rows:
-            s = str(r["summary"] or "")
-            try:
-                tags = json.loads(str(r["tags"] or "{}"))
-            except Exception:
-                tags = {}
-            kind = str(tags.get("kind", ""))
-            fact = tags.get("fact") if isinstance(tags, dict) else None
-            fks = [str(x) for x in (tags.get("fact_keys") or [])] if isinstance(tags, dict) else []
-            if isinstance(fact, dict):
-                fk = str(fact.get("fact_key") or "")
-                fv = str(fact.get("value") or "")
-                if fk == "profile.persona.role" and re.search(
-                    r"(<MEM(?:RULES|STYLE|CTX)|thinkingSignature|encrypted_content|budget_tokens=|identity\.precedence=|security\.|memstyle|スタイル|更新してください|維持|余計な提案|一人称|ユーザー呼称|文頭は|以後)",
-                    fv,
-                    re.IGNORECASE,
-                ):
-                    if removed_items >= max_delete:
-                        capped = True
-                        break
-                    self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                    removed_items += 1
-                    continue
-                if fk == "profile.persona.role" and re.search(r"(?:が1つある|\d+\s*(?:件|個|つ)|none|unknown|不明)", fv, re.IGNORECASE):
-                    if removed_items >= max_delete:
-                        capped = True
-                        break
-                    self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                    removed_items += 1
-                    continue
-                if fk == "profile.persona.role" and len(" ".join(fv.split())) > 48:
-                    if removed_items >= max_delete:
-                        capped = True
-                        break
-                    self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                    removed_items += 1
-                    continue
-                if fk in {"profile.family.child", "profile.family.spouse", "profile.family.pet", "profile.user.name"}:
-                    if re.search(r"^(?:僕|ぼく|私|わたし|俺|オレ|自分|me|myself|you|yourself|assistant|アシスタント)$", fv, re.IGNORECASE):
-                        if removed_items >= max_delete:
-                            capped = True
-                            break
-                        self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                        removed_items += 1
-                        continue
-                    if re.search(r"(です|だよ|だね|ます)$", fv):
-                        if removed_items >= max_delete:
-                            capped = True
-                            break
-                        self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                        removed_items += 1
-                        continue
-                if fk == "profile.family.summary" and re.search(r"(<MEM|subject=|conf=|src=|ttl=|\||thinkingSignature|encrypted_content)", fv, re.IGNORECASE):
-                    if removed_items >= max_delete:
-                        capped = True
-                        break
-                    self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                    removed_items += 1
-                    continue
-                if fk == "profile.family.children_count" and not re.fullmatch(r"\d{1,2}", fv):
-                    if removed_items >= max_delete:
-                        capped = True
-                        break
-                    self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                    removed_items += 1
-                    continue
-            if (
-                str(r["layer"]) == "deep"
-                and kind in {"convdeep", "convdeep_global", "durable_global", "deep_global", "signal_deep", "auto_deep"}
-                and not isinstance(fact, dict)
-                and any(fk.startswith(("profile.", "pref.", "rule.")) for fk in fks)
-            ):
-                if removed_items >= max_delete:
-                    capped = True
-                    break
-                self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                removed_items += 1
-                continue
-            if any(p.search(s) for p in safe_patterns):
-                if removed_items >= max_delete:
-                    capped = True
-                    break
-                self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                removed_items += 1
-                continue
-            # prune global deep rows that are plain questions and unlikely to be durable memory
-            if str(r["layer"]) == "deep":
-                q_like = "？" in s or "?" in s
-                if question_like_pat.search("".join(s.split())):
-                    q_like = True
-                if q_like and not durable_pat.search(s) and float(r["importance"]) < 0.85:
-                    if removed_items >= max_delete:
-                        capped = True
-                        break
-                    self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                    removed_items += 1
-                    continue
-                if len(" ".join(s.split())) < 12 and not durable_pat.search(s) and float(r["importance"]) < 0.85:
-                    if removed_items >= max_delete:
-                        capped = True
-                        break
-                    self.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                    removed_items += 1
-                    continue
+        return [str(row["summary"]) for row in rows]
 
-        sanitized_conv = 0
-        conv_rows = self.conn.execute("SELECT id,summary FROM conv_summaries").fetchall()
-        for r in conv_rows:
-            old = str(r["summary"] or "")
-            lines: List[str] = []
-            seen = set()
-            for ln in old.split("\n"):
-                t = " ".join(ln.strip().split())
-                if not t:
-                    continue
-                if any(p.search(t) for p in safe_patterns):
-                    continue
-                k = t.lower()
-                if k in seen:
-                    continue
-                seen.add(k)
-                lines.append(t)
-            new = "\n".join(lines)
-            if new != old:
+    def duplicate_groups(self, session_key: str, limit: int = 24) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT id, fact_key, value, summary FROM memory_items WHERE session_key IN (?, 'global') AND tombstoned=0 AND layer='deep' ORDER BY updated_at DESC LIMIT 300",
+            (session_key,),
+        ).fetchall()
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            fact_key = str(row["fact_key"] or "")
+            summary = str(row["summary"] or "")
+            fingerprint = fact_key or summary[:48].lower()
+            if not fingerprint:
+                continue
+            groups.setdefault(fingerprint, []).append(dict(row))
+        out = []
+        for fingerprint, items in groups.items():
+            if len(items) < 2:
+                continue
+            out.append({"fingerprint": fingerprint, "items": items})
+        return out[:limit]
+
+    def apply_merge(self, target_id: int, source_ids: list[int], merged_summary: str, merged_value: str | None = None) -> None:
+        ts = _utc_now()
+        row = self.conn.execute(
+            "SELECT fact_key, value, text FROM memory_items WHERE id=?",
+            (target_id,),
+        ).fetchone()
+        fact_key = str(row["fact_key"] or "") if row else ""
+        current_value = str(row["value"] or "") if row else ""
+        value = _normalize_text(merged_value if merged_value is not None else current_value)
+        summary = _normalize_text(merged_summary)
+        text = _normalize_text(str(row["text"] or summary) if row else summary)
+        keywords = " ".join(dict.fromkeys(_slug_tokens(" ".join([summary, value, fact_key]))))
+        ngrams = _ngrams(" ".join([summary, value, fact_key]))
+        self.conn.execute(
+            "UPDATE memory_items SET summary=?, value=?, text=?, keywords=?, ngrams=?, updated_at=? WHERE id=?",
+            (summary, value, text, keywords, ngrams, ts, target_id),
+        )
+        self._upsert_memory_fts(target_id, summary, keywords, ngrams)
+        if fact_key:
+            session_row = self.conn.execute("SELECT session_key FROM memory_items WHERE id=?", (target_id,)).fetchone()
+            if session_row:
                 self.conn.execute(
-                    "UPDATE conv_summaries SET summary=?, updated_at=? WHERE id=?",
-                    (new, now_ts(), str(r["id"])),
+                    """
+                    INSERT INTO fact_index(session_key, fact_key, item_id, updated_at)
+                    VALUES(?,?,?,?)
+                    ON CONFLICT(session_key, fact_key)
+                    DO UPDATE SET item_id=excluded.item_id, updated_at=excluded.updated_at
+                    """,
+                    (str(session_row["session_key"]), fact_key, target_id, ts),
                 )
-                sanitized_conv += 1
-
-        self.conn.commit()
-        return {
-            "removed_memory_items": removed_items,
-            "sanitized_conv_summaries": sanitized_conv,
-            "cleanup_pattern_count": len(safe_patterns),
-            "cleanup_capped": 1 if capped else 0,
-        }
-
-    def memory_stats(self) -> Dict[str, int]:
-        rows = self.conn.execute(
-            "SELECT layer,COUNT(*) AS c FROM memory_items GROUP BY layer"
-        ).fetchall()
-        out: Dict[str, int] = {}
-        for r in rows:
-            out[str(r["layer"])] = int(r["c"])
-        return out
-
-    def list_memory_debug(self, layer: str | None = None, session_key: str | None = None, limit: int = 50) -> List[Dict[str, Any]]:
-        params: List[Any] = []
-        where: List[str] = []
-        if layer:
-            where.append("layer=?")
-            params.append(layer)
-        if session_key:
-            where.append("(session_key=? OR session_key='global')")
-            params.append(session_key)
-        sql = "SELECT id,session_key,layer,updated_at,importance,usage_count,summary,tags FROM memory_items"
-        if where:
-            sql += " WHERE " + " AND ".join(where)
-        sql += " ORDER BY updated_at DESC LIMIT ?"
-        params.append(int(limit))
-        rows = self.conn.execute(sql, tuple(params)).fetchall()
-        out: List[Dict[str, Any]] = []
-        for r in rows:
-            out.append(
-                {
-                    "id": str(r["id"]),
-                    "session_key": str(r["session_key"]),
-                    "layer": str(r["layer"]),
-                    "updated_at": int(r["updated_at"]),
-                    "importance": float(r["importance"]),
-                    "usage_count": int(r["usage_count"]),
-                    "summary": str(r["summary"]),
-                    "tags": str(r["tags"]),
-                }
-            )
-        return out
-
-    def backfill_fact_keys(self, layer: str = "deep", limit: int = 5000) -> int:
-        rows = self.conn.execute(
-            "SELECT id,session_key,layer,summary,tags,updated_at FROM memory_items WHERE layer=? ORDER BY updated_at DESC LIMIT ?",
-            (layer, int(limit)),
-        ).fetchall()
-        updated = 0
-        for r in rows:
-            rid = str(r["id"])
-            row_session_key = str(r["session_key"])
-            row_layer = str(r["layer"])
-            summary = str(r["summary"] or "")
-            try:
-                tags = json.loads(str(r["tags"] or "{}"))
-            except Exception:
-                tags = {}
-            kind = str(tags.get("kind", ""))
-            fact = tags.get("fact") if isinstance(tags, dict) else {}
-            # Only backfill key metadata for fact-oriented rows.
-            if kind not in {"structured_fact", "durable_global_fact"} and not isinstance(fact, dict):
-                continue
-            if isinstance(fact, dict) and str(fact.get("fact_key") or "") == "memory.note":
-                # Keep generic note facts isolated; avoid heuristic key pollution.
-                continue
-            cur = set(tags.get("fact_keys") or [])
-            if isinstance(fact, dict):
-                fk = str(fact.get("fact_key") or "").strip()
-                if fk:
-                    add = {fk}
-                else:
-                    add = set(infer_fact_keys_from_text(summary))
-            else:
-                add = set(infer_fact_keys_from_text(summary))
-            if not add:
-                continue
-            if isinstance(fact, dict) and str(fact.get("fact_key") or "").strip():
-                merged = sorted([x for x in add if x])
-            else:
-                merged = sorted([x for x in (cur | add) if x])
-            if merged == sorted([x for x in cur if x]):
-                self._sync_fact_index_for_item(
-                    item_id=rid,
-                    session_key=row_session_key,
-                    layer=row_layer,
-                    tags=tags if isinstance(tags, dict) else {},
-                    updated_at=int(r["updated_at"]),
-                )
-                continue
-            tags["fact_keys"] = merged
-            ts = now_ts()
+        if source_ids:
+            placeholders = ",".join("?" for _ in source_ids)
             self.conn.execute(
-                "UPDATE memory_items SET tags=?, updated_at=? WHERE id=?",
-                (json.dumps(tags, ensure_ascii=False), ts, rid),
+                f"UPDATE memory_items SET tombstoned=1, updated_at=? WHERE id IN ({placeholders})",
+                (ts, *source_ids),
             )
-            self._sync_fact_index_for_item(
-                item_id=rid,
-                session_key=row_session_key,
-                layer=row_layer,
-                tags=tags,
-                updated_at=ts,
-            )
-            updated += 1
         self.conn.commit()
-        return updated
+
+    def recent_brain_context(self, session_key: str) -> str:
+        surface = self.recent_surface_messages(session_key, limit=3)
+        events = self.conn.execute(
+            "SELECT summary FROM events WHERE session_key=? ORDER BY ts DESC LIMIT 3",
+            (session_key,),
+        ).fetchall()
+        parts = [f"surf:{txt}" for txt in surface]
+        parts.extend(f"evt:{str(row['summary'])}" for row in events)
+        return " | ".join(parts[:6])

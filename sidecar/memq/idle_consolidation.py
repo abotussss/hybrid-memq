@@ -1,371 +1,46 @@
 from __future__ import annotations
 
-import json
-import re
-import time
-from datetime import timedelta
-from typing import Dict, List
+from typing import Any
 
-from .db import MemqDB
-from .rules import prune_stale_rule_overrides, refresh_preference_profiles
-from .style import sanitize_style_profile
-from .structured_facts import (
-    extract_structured_facts_from_text,
-    parse_fact_signature_from_row,
-    plausible_fact_value,
-    structured_fact_summary,
-)
-from .timeline import date_to_day_key, day_key_to_date, today_day_key
+from sidecar.memq.brain.service import BrainService
+from sidecar.memq.config import Config
+from sidecar.memq.db import MemqDB
 
 
-def _promote_structured_from_conv(db: MemqDB, *, dim: int, bits_per_dim: int, max_rows: int = 200) -> int:
-    _ = dim
-    _ = bits_per_dim
-    rows = db.conn.execute(
-        "SELECT session_key,summary,updated_at FROM conv_summaries WHERE retention_scope='deep' ORDER BY updated_at DESC LIMIT ?",
-        (int(max_rows),),
-    ).fetchall()
-    if not rows:
-        return 0
+async def run_idle_consolidation(
+    *,
+    cfg: Config,
+    db: MemqDB,
+    brain: BrainService,
+    session_key: str,
+) -> tuple[dict[str, Any], str | None]:
+    stats: dict[str, Any] = {"did": []}
+    purge = db.purge_expired()
+    if purge["memory"] or purge["events"]:
+        stats["did"].append("purge_expired")
+        stats["purged"] = purge
+    decay = db.decay_ephemera(session_key)
+    if decay["updated"] or decay["pruned"]:
+        stats["did"].append("ephemera_decay")
+        stats["ephemera"] = decay
+    db.refresh_recent_digests(session_key, days=7)
+    stats["did"].append("refresh_digests")
+    snapshot = db.refresh_profile_snapshot(session_key)
+    if snapshot:
+        stats["did"].append("refresh_profile_snapshot")
+    index_rows = db.refresh_fact_index(session_key)
+    if index_rows:
+        stats["did"].append("refresh_fact_index")
 
-    existing = set()
-    for r in db.list_memory_items_any("deep", limit=20000):
-        fk, fv = parse_fact_signature_from_row(dict(r))
-        if fk and fv:
-            existing.add((str(r["session_key"]), fk, fv))
-
-    wrote = 0
-    now = int(time.time())
-    for row in rows:
-        session_key = str(row["session_key"] or "default")
-        ts = int(row["updated_at"] or now)
-        lines = str(row["summary"] or "").split("\n")
-        for ln in lines:
-            facts = extract_structured_facts_from_text(
-                ln,
-                ts=ts,
-                source="idle_consolidation",
-                confidence_scale=0.88,
-                strip_prefix=True,
-            )
-            for fact in facts:
-                fk = str(fact.get("fact_key") or "")
-                fv = str(fact.get("value") or "").strip().lower()
-                if not fk or not fv:
-                    continue
-                if not plausible_fact_value(fk, str(fact.get("value") or "")):
-                    continue
-                if (session_key, fk, fv) in existing:
-                    continue
-                summary = structured_fact_summary(fact)
-                mid = db.add_memory_item(
-                    session_key=session_key,
-                    layer="deep",
-                    text=summary,
-                    summary=summary,
-                    importance=0.70,
-                    tags={"kind": "structured_fact", "from": "idle_promote", "ts": ts, "fact_keys": [fk], "fact": fact},
-                    emb_f16=None,
-                    emb_q=None,
-                    emb_dim=0,
-                    source="idle_consolidation",
-                )
-                wrote += db.expire_conflicting_fact_keys("deep", session_key, [fk], mid)
-                wrote += 1
-                existing.add((session_key, fk, fv))
-
-                if ("global", fk, fv) not in existing:
-                    gid = db.add_memory_item(
-                        session_key="global",
-                        layer="deep",
-                        text=summary,
-                        summary=summary,
-                        importance=0.76,
-                        tags={"kind": "durable_global_fact", "from": "idle_promote", "ts": ts, "fact_keys": [fk], "fact": fact},
-                        emb_f16=None,
-                        emb_q=None,
-                        emb_dim=0,
-                        source="idle_consolidation",
-                    )
-                    wrote += db.expire_conflicting_fact_keys("deep", "global", [fk], gid)
-                    wrote += 1
-                    existing.add(("global", fk, fv))
-    return wrote
-
-
-def _prune_invalid_profile_facts(db: MemqDB) -> int:
-    rows = db.list_memory_items_any("deep", limit=30000)
-    removed = 0
-    for r in rows:
-        try:
-            tags = json.loads(str(r["tags"] or "{}"))
-        except Exception:
-            tags = {}
-        fact = tags.get("fact") if isinstance(tags, dict) else {}
-        if not isinstance(fact, dict):
-            continue
-        fk = str(fact.get("fact_key") or "")
-        if fk not in {
-            "profile.family.spouse",
-            "profile.family.pet",
-            "profile.family.child",
-            "profile.family.summary",
-            "profile.family.children_count",
-            "profile.identity.call_user",
-            "profile.identity.first_person",
-            "profile.user.name",
-            "profile.persona.role",
-            "profile.persona.tone",
-        }:
-            continue
-        fv = str(fact.get("value") or "")
-        if fk == "profile.persona.role":
-            if re.search(r"(<MEM(?:RULES|STYLE|CTX)|thinkingSignature|encrypted_content|budget_tokens=|identity\.precedence=|security\.)", fv, re.IGNORECASE):
-                db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                removed += 1
-                continue
-            if re.search(r"(?:が1つある|\d+\s*(?:件|個|つ)|none|unknown|不明)", fv, re.IGNORECASE):
-                db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                removed += 1
-                continue
-            if re.search(r"(memstyle|スタイル|更新してください|維持|余計な提案|一人称|ユーザー呼称|文頭は|以後)", fv, re.IGNORECASE):
-                db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                removed += 1
-                continue
-            if len(" ".join(fv.split())) > 48:
-                db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                removed += 1
-                continue
-        if fk in {"profile.family.child", "profile.family.spouse", "profile.family.pet", "profile.user.name"}:
-            if re.search(r"^(?:僕|ぼく|私|わたし|俺|オレ|自分|me|myself|you|yourself|assistant|アシスタント)$", fv, re.IGNORECASE):
-                db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                removed += 1
-                continue
-            if re.search(r"(です|だよ|だね|ます)$", fv):
-                db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                removed += 1
-                continue
-        if fk == "profile.family.summary":
-            if re.search(r"(<MEM|subject=|conf=|src=|ttl=|\||thinkingSignature|encrypted_content)", fv, re.IGNORECASE):
-                db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                removed += 1
-                continue
-        if fk == "profile.family.children_count":
-            if not re.fullmatch(r"\d{1,2}", fv):
-                db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                removed += 1
-                continue
-        if fk == "profile.persona.tone":
-            if not re.fullmatch(r"[A-Za-z0-9ぁ-んァ-ヶ一-龠ー._\-]{1,24}", fv):
-                db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-                removed += 1
-                continue
-        if plausible_fact_value(fk, fv):
-            continue
-        db.conn.execute("DELETE FROM memory_items WHERE id=?", (str(r["id"]),))
-        removed += 1
-    if removed > 0:
-        db.conn.commit()
-    return removed
-
-
-def _promote_profile_facts(db: MemqDB, *, dim: int, bits_per_dim: int) -> int:
-    _ = dim
-    _ = bits_per_dim
-    sanitize_style_profile(db)
-    style = db.get_style_profile()
-    if not style:
-        return 0
-
-    now = int(time.time())
-    rows = db.list_memory_items("deep", "global", limit=10000)
-    existing = set()
-    for r in rows:
-        try:
-            tags = json.loads(str(r["tags"] or "{}"))
-        except Exception:
-            tags = {}
-        fact = tags.get("fact") if isinstance(tags, dict) else {}
-        if not isinstance(fact, dict):
-            continue
-        fk = str(fact.get("fact_key") or "")
-        fv = str(fact.get("value") or "").strip().lower()
-        if fk and fv:
-            existing.add((fk, fv))
-
-    defs: List[Dict[str, object]] = []
-    persona = str(style.get("persona") or "").strip()
-    tone = str(style.get("tone") or "").strip()
-    call_user = str(style.get("callUser") or "").strip()
-    first_person = str(style.get("firstPerson") or "").strip()
-    if re.search(r"(<MEM(?:RULES|STYLE|CTX)|thinkingSignature|encrypted_content|budget_tokens=|identity\.precedence=|security\.)", persona, re.IGNORECASE):
-        persona = ""
-    if tone and not re.fullmatch(r"[A-Za-z0-9ぁ-んァ-ヶ一-龠ー._\-]{1,24}", tone):
-        tone = ""
-    if call_user and not plausible_fact_value("profile.identity.call_user", call_user):
-        call_user = ""
-    if first_person and not plausible_fact_value("profile.identity.first_person", first_person):
-        first_person = ""
-    if persona:
-        defs.append(
-            {"subject": "assistant", "relation": "persona.role", "value": persona[:48], "fact_key": "profile.persona.role", "confidence": 0.96}
-        )
-    if tone:
-        defs.append(
-            {"subject": "assistant", "relation": "persona.tone", "value": tone[:48], "fact_key": "profile.persona.tone", "confidence": 0.90}
-        )
-    if call_user:
-        defs.append(
-            {"subject": "assistant", "relation": "identity.call_user", "value": call_user[:48], "fact_key": "profile.identity.call_user", "confidence": 0.96}
-        )
-    if first_person:
-        defs.append(
-            {"subject": "assistant", "relation": "identity.first_person", "value": first_person[:48], "fact_key": "profile.identity.first_person", "confidence": 0.94}
-        )
-
-    wrote = 0
-    for f in defs:
-        fk = str(f["fact_key"])
-        fv = str(f["value"]).strip().lower()
-        if (fk, fv) in existing:
-            continue
-        fact = {
-            **f,
-            "source": "profile_sync",
-            "stable": True,
-            "ttl_days": 3650,
-            "explicit": False,
-            "ts": now,
-        }
-        summary = structured_fact_summary(fact)
-        gid = db.add_memory_item(
-            session_key="global",
-            layer="deep",
-            text=summary,
-            summary=summary,
-            importance=0.90,
-            tags={"kind": "durable_global_fact", "from": "profile_sync", "ts": now, "fact_keys": [fk], "fact": fact},
-            emb_f16=None,
-            emb_q=None,
-            emb_dim=0,
-            source="idle_consolidation",
-        )
-        wrote += db.expire_conflicting_fact_keys("deep", "global", [fk], gid)
-        wrote += 1
-        existing.add((fk, fv))
-    return wrote
-
-
-def _compact_digest_lines(rows: List[Dict[str, object]], max_lines: int = 6) -> str:
-    out: List[str] = []
-    seen = set()
-    for r in rows:
-        actor = str(r.get("actor") or "assistant")
-        kind = str(r.get("kind") or "chat")
-        summary = " ".join(str(r.get("summary") or "").split()).strip()
-        if not summary:
-            continue
-        sig = summary.lower()
-        if sig in seen:
-            continue
-        seen.add(sig)
-        line = f"- [{actor}/{kind}] {summary[:160]}"
-        out.append(line)
-        if len(out) >= max_lines:
-            break
-    return "\n".join(out)
-
-
-def _refresh_daily_digests(db: MemqDB, session_key: str, lookback_days: int = 14) -> int:
-    today = day_key_to_date(today_day_key())
-    start = today - timedelta(days=max(1, int(lookback_days)))
-    start_key = date_to_day_key(start)
-    end_key = date_to_day_key(today)
-
-    rows = db.conn.execute(
-        """
-        SELECT DISTINCT day_key
-        FROM events
-        WHERE day_key>=? AND day_key<=?
-          AND (session_key=? OR session_key='global')
-        ORDER BY day_key DESC
-        """,
-        (start_key, end_key, session_key),
-    ).fetchall()
-    updated = 0
-    for r in rows:
-        day_key = str(r["day_key"])
-        ev = db.list_events_range(
-            session_key=session_key,
-            start_day=day_key,
-            end_day=day_key,
-            limit=240,
-            include_global=True,
-        )
-        compact_micro = _compact_digest_lines([dict(x) for x in ev], max_lines=4)
-        compact_meso = _compact_digest_lines([dict(x) for x in ev], max_lines=10)
-        if not compact_micro and not compact_meso:
-            continue
-        db.upsert_daily_digest(
-            day_key=day_key,
-            scope="session",
-            session_key=session_key,
-            compact_text=compact_micro or compact_meso,
-            meso_text=compact_meso,
-            updated_at=int(time.time()),
-        )
-        updated += 1
-    return updated
-
-
-def run_idle_consolidation(db: MemqDB, session_key: str | None = None, *, dim: int = 256, bits_per_dim: int = 8) -> Dict[str, object]:
-    now = int(time.time())
-    did: List[str] = []
-    stats: Dict[str, int | float] = {}
-
-    did.append("decay")
-    ep = db.decay_and_prune_ephemeral()
-    stats.update(ep)
-    did.append("prune_expired_events")
-    stats["expired_events_deleted"] = db.prune_expired_events()
-
-    if session_key:
-        did.append("dedup_surface")
-        stats["dedup_surface_removed"] = db.dedup_layer("surface", session_key)
-        did.append("dedup_surface_fuzzy")
-        stats["dedup_surface_fuzzy_removed"] = db.dedup_layer_fuzzy("surface", session_key)
-        did.append("dedup_deep")
-        stats["dedup_deep_removed"] = db.dedup_layer("deep", session_key)
-        did.append("dedup_deep_fuzzy")
-        stats["dedup_deep_fuzzy_removed"] = db.dedup_layer_fuzzy("deep", session_key)
-
-    did.append("cleanup_noisy_memory")
-    stats.update(db.cleanup_noisy_memory())
-
-    did.append("promote_structured_from_conv")
-    stats["structured_promoted_from_conv"] = _promote_structured_from_conv(db, dim=dim, bits_per_dim=bits_per_dim)
-
-    did.append("promote_profile_facts")
-    stats["profile_facts_promoted"] = _promote_profile_facts(db, dim=dim, bits_per_dim=bits_per_dim)
-
-    did.append("prune_invalid_profile_facts")
-    stats["invalid_profile_facts_removed"] = _prune_invalid_profile_facts(db)
-
-    did.append("backfill_fact_keys")
-    stats["fact_keys_backfilled"] = db.backfill_fact_keys(layer="deep", limit=10000)
-    did.append("backfill_fact_index")
-    stats["fact_index_backfilled"] = db.backfill_fact_index(layer="deep", limit=20000)
-    did.append("cleanup_stale_fact_index")
-    stats["fact_index_stale_removed"] = db.cleanup_stale_fact_index()
-
-    did.append("profile_refresh")
-    updated = refresh_preference_profiles(db, now)
-    stats["profile_keys_updated"] = len(updated)
-
-    did.append("rule_override_prune")
-    stats["stale_rule_overrides_disabled"] = prune_stale_rule_overrides(db, now)
-    if session_key:
-        did.append("daily_digest_refresh")
-        stats["daily_digests_updated"] = _refresh_daily_digests(db, session_key=session_key, lookback_days=21)
-
-    return {"did": did, "stats": stats}
+    trace_id: str | None = None
+    groups = db.duplicate_groups(session_key, limit=24)
+    if groups or cfg.brain_required:
+        plan, trace_id, _ = await brain.build_merge_plan(session_key=session_key, candidate_groups=groups)
+        applied = brain.apply_merge_plan(db, session_key=session_key, plan=plan)
+        stats["did"].append("brain_merge_plan")
+        stats["merge"] = applied
+        if applied["merged"] or applied["pruned"]:
+            fts = db.refresh_fts(session_key)
+            stats["did"].append("refresh_fts")
+            stats["fts"] = fts
+    return stats, trace_id

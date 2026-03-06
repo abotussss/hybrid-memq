@@ -1,968 +1,373 @@
 from __future__ import annotations
 
-import hashlib
-import json
-import re
-import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+import asyncio
+import hashlib
+import json
+import uuid
+from typing import Any
 
-from ..config import MemqConfig
-from ..db import MemqDB
-from ..rules import apply_rule_updates
-from ..structured_facts import normalize_fact_value, plausible_fact_value, structured_fact_summary
-from ..style import apply_style_updates
-from ..style import sanitize_style_profile
-from .ollama_client import BrainUnavailable, OllamaBrainClient, OllamaConfig
-from .schemas import BrainAuditPatchPlan, BrainIngestPlan, BrainMergePlan, BrainRecallPlan, StyleUpdatePlan
-
-
-SAFE_FACT_KEY_PREFIX = ("profile.", "pref.", "policy.", "project.", "relationship.", "timeline.", "rule.", "memory.")
-SAFE_RULE_PREFIX = ("language.", "security.", "procedure.", "compliance.", "output.", "operation.", "identity.")
-SAFE_STYLE_KEYS = {"tone", "persona", "verbosity", "firstPerson", "callUser", "prefix", "speakingStyle", "avoid"}
-STYLE_KEY_ALIASES = {
-    "tone": "tone",
-    "persona": "persona",
-    "character": "persona",
-    "role": "persona",
-    "voice": "persona",
-    "verbosity": "verbosity",
-    "firstperson": "firstPerson",
-    "first_person": "firstPerson",
-    "first-person": "firstPerson",
-    "calluser": "callUser",
-    "call_user": "callUser",
-    "call-user": "callUser",
-    "username": "callUser",
-    "user_name": "callUser",
-    "user-name": "callUser",
-    "prefix": "prefix",
-    "speakingstyle": "speakingStyle",
-    "speaking_style": "speakingStyle",
-    "speaking-style": "speakingStyle",
-    "speechstyle": "speakingStyle",
-    "speech_style": "speakingStyle",
-    "speech-style": "speakingStyle",
-    "avoid": "avoid",
-}
-STYLE_PREF_KEYS = {
-    "tone": "style.tone",
-    "verbosity": "style.verbosity",
-    "persona": "style.persona",
-}
-SECRET_RE = re.compile(
-    r"(sk-[A-Za-z0-9_\-]{10,}|BEGIN (?:RSA|OPENSSH|PRIVATE) KEY|eyJ[A-Za-z0-9_\-]{12,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,})",
-    re.IGNORECASE,
+from sidecar.memq.config import Config
+from sidecar.memq.db import MemqDB
+from sidecar.memq.brain.schemas import (
+    BrainAuditPatchPlan,
+    BrainIngestPlan,
+    BrainMergePlan,
+    BrainRecallPlan,
 )
+from sidecar.memq.brain.ollama_client import BrainUnavailable, OllamaClient, load_prompt
+
+
+FACT_KEY_PREFIXES = ("profile.", "pref.", "policy.", "project.", "relationship.", "timeline.")
+STYLE_KEYS = {"tone", "persona", "verbosity", "speaking_style", "callUser", "firstPerson", "prefix"}
+RULE_PREFIXES = ("security.", "language.", "procedure.", "compliance.", "output.", "operation.")
+
+
+def explicit_style_requested(text: str) -> bool:
+    s = str(text or "")
+    markers = [
+        "口調",
+        "話し方",
+        "キャラ",
+        "人格",
+        "一人称",
+        "呼び方",
+        "呼称",
+        "呼んで",
+        "として話して",
+        "として振る舞",
+        "style",
+        "persona",
+        "tone",
+        "speaking style",
+        "で話して",
+    ]
+    return any(marker in s for marker in markers)
+
+
+def explicit_rule_requested(text: str) -> bool:
+    s = str(text or "")
+    markers = ["ルール", "今後は必ず", "禁止", "守って", "覚えて", "rule"]
+    return any(marker in s for marker in markers)
+
+
+def _style_key_alias(key: str) -> str | None:
+    raw = str(key or "").strip()
+    compact = raw.replace("_", "").replace("-", "").replace(" ", "").lower()
+    mapping = {
+        "tone": "tone",
+        "persona": "persona",
+        "speakingstyle": "speaking_style",
+        "style": "speaking_style",
+        "calluser": "callUser",
+        "username": "callUser",
+        "firstperson": "firstPerson",
+        "verbosity": "verbosity",
+        "prefix": "prefix",
+    }
+    if compact in mapping:
+        return mapping[compact]
+    if raw in STYLE_KEYS:
+        return raw
+    return None
+
 
 @dataclass
-class BrainResult:
-    used: bool
-    reason: str = ""
+class BrainCallRecord:
+    trace_id: str
+    op: str
+    ok: bool
+    latency_ms: int
+    prompt_sha256: str
+    stats: dict[str, Any]
+    ps_snapshot: dict[str, Any] | None
+    apply_summary: dict[str, Any]
 
 
 class BrainService:
-    def __init__(self, cfg: MemqConfig) -> None:
+    def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self.enabled = bool(cfg.brain_enabled and cfg.brain_provider.lower() == "ollama")
-        self.required = str(cfg.brain_mode or "best_effort").lower() == "required"
-        self.mode = str(cfg.brain_mode or "best_effort").lower()
-        if self.mode == "off":
-            self.enabled = False
-        self.provider = str(cfg.brain_provider or "disabled")
-        self.model = str(cfg.brain_model or "")
-        self.client: Optional[OllamaBrainClient] = None
-        self._retry_after_sec = max(5, min(20, int(max(1000, cfg.brain_timeout_ms) / 1000)))
-        if self.enabled:
-            self.client = OllamaBrainClient(
-                OllamaConfig(
-                    base_url=cfg.brain_base_url,
-                    model=cfg.brain_model,
-                    timeout_ms=cfg.brain_timeout_ms,
-                    keep_alive=cfg.brain_keep_alive,
-                    temperature=cfg.brain_temperature,
-                    max_tokens=cfg.brain_max_tokens,
-                    concurrent=cfg.brain_concurrent,
-                    required_mode=self.required,
-                    auto_restart=cfg.brain_auto_restart,
-                    restart_cooldown_sec=cfg.brain_restart_cooldown_sec,
-                    restart_wait_ms=cfg.brain_restart_wait_ms,
-                )
-            )
-        self.trace_path = (cfg.db_path.parent / "brain_trace.jsonl").resolve()
+        self.client = OllamaClient(cfg.brain)
+        self.prompt_dir = cfg.root / "sidecar" / "memq" / "brain" / "prompts"
+        self.trace_path = cfg.root / ".memq" / "brain_trace.jsonl"
         self.trace_path.parent.mkdir(parents=True, exist_ok=True)
-        self._last_error: str = ""
-        self._last_error_type: str = ""
-        self._last_error_ts: int = 0
-        self._last_trace_id: str = ""
-        self._last_trace_by_op: Dict[str, str] = {}
-        self._last_call_meta_by_op: Dict[str, Dict[str, Any]] = {}
-        self._last_ps_seen_model: str = ""
-        self._last_ps_seen_ts: int = 0
-        self._stats: Dict[str, Any] = {
+        self._lock = asyncio.Semaphore(cfg.brain.concurrency)
+        self._stats: dict[str, Any] = {
             "total_calls": 0,
             "ok_calls": 0,
             "err_calls": 0,
-            "ops": {},
+            "last_ok_ts": 0,
+            "last_err_ts": 0,
+            "last_err": "",
+            "last_trace_id": "",
+            "last_ps_seen_model": "",
         }
 
-    def _compact_text(self, text: str, max_chars: int) -> str:
-        if max_chars <= 0:
-            return ""
-        return " ".join(str(text or "").split()).strip()[:max_chars]
+    async def close(self) -> None:
+        await self.client.close()
 
-    def _compact_recent_messages(self, recent_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
-        max_items = max(1, int(self.cfg.brain_recall_recent_messages))
-        max_chars = max(80, int(self.cfg.brain_recall_message_chars))
-        for m in (recent_messages or [])[-max_items:]:
-            role = str((m or {}).get("role") or "")
-            text = self._compact_text(str((m or {}).get("text") or ""), max_chars)
-            if not text:
-                continue
-            ts = (m or {}).get("ts")
-            out.append({"role": role, "text": text, "ts": ts})
-        return out
+    def stats(self) -> dict[str, Any]:
+        return dict(self._stats)
 
-    def _canonical_style_key(self, key: str) -> str:
-        k = str(key or "").strip()
-        if not k:
-            return ""
-        if k in SAFE_STYLE_KEYS:
-            return k
-        low = k.lower()
-        low = low.replace(" ", "").replace(".", "_")
-        return STYLE_KEY_ALIASES.get(low, "")
-
-    def _can_attempt(self) -> bool:
-        if self.required:
-            return True
-        if not self._last_error_ts:
-            return True
-        return (int(time.time()) - int(self._last_error_ts)) >= int(self._retry_after_sec)
-
-    def _mark_error(self, err: str, *, err_type: str = "brain_error", trace_id: str = "") -> None:
-        self._last_error = str(err or "brain_error")
-        self._last_error_type = str(err_type or "brain_error")
-        self._last_error_ts = int(time.time())
-        if trace_id:
-            self._last_trace_id = trace_id
-
-    def _append_trace(self, row: Dict[str, Any]) -> None:
-        try:
-            with self.trace_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
-        except Exception:
-            pass
-
-    def _record_call_stats(self, op: str, *, ok: bool, trace_id: str) -> None:
-        self._stats["total_calls"] = int(self._stats.get("total_calls", 0)) + 1
-        if ok:
-            self._stats["ok_calls"] = int(self._stats.get("ok_calls", 0)) + 1
-            self._stats["last_ok_ts"] = int(time.time())
-        else:
-            self._stats["err_calls"] = int(self._stats.get("err_calls", 0)) + 1
-            self._stats["last_err_ts"] = int(time.time())
-        self._stats["last_trace_id"] = trace_id
-        ops = self._stats.setdefault("ops", {})
-        o = ops.setdefault(op, {"total": 0, "ok": 0, "err": 0})
-        o["total"] = int(o.get("total", 0)) + 1
-        if ok:
-            o["ok"] = int(o.get("ok", 0)) + 1
-        else:
-            o["err"] = int(o.get("err", 0)) + 1
-
-    def _proof_ps(self) -> Dict[str, Any]:
-        if not self.client:
-            raise BrainUnavailable("brain_client_missing")
-        ps = self.client.get_ps_snapshot()
-        if bool(ps.get("seen")):
-            self._last_ps_seen_model = self.model
-            self._last_ps_seen_ts = int(time.time())
-        return ps
-
-    def _call_plan(
-        self,
-        *,
-        op: str,
-        session_key: str,
-        payload: Dict[str, Any],
-        call: Callable[[], Any],
-        schema_version: str = "memq_brain_v1",
-    ) -> Optional[Any]:
-        trace_id = str(uuid.uuid4())
-        t0 = int(time.time() * 1000)
-        self._last_trace_by_op[op] = trace_id
-        self._last_trace_id = trace_id
-        prompt_sha = hashlib.sha256(
-            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8", errors="ignore")
-        ).hexdigest()
-
-        if not self.client:
-            err = "brain_disabled_or_no_client"
-            self._mark_error(err, err_type="brain_unavailable", trace_id=trace_id)
-            self._record_call_stats(op, ok=False, trace_id=trace_id)
-            self._append_trace(
-                {
-                    "ts": int(time.time()),
-                    "trace_id": trace_id,
-                    "session_key": session_key,
-                    "op": op,
-                    "provider": self.provider,
-                    "model": self.model,
-                    "ok": False,
-                    "latency_ms": max(0, int(time.time() * 1000) - t0),
-                    "prompt_sha256": prompt_sha,
-                    "schema_version": schema_version,
-                    "err_type": "brain_unavailable",
-                    "err_msg": err,
-                    "ps_snapshot": {"ok": False, "seen": False, "matched": None},
-                }
-            )
-            if self.required:
-                raise BrainUnavailable(err)
-            return None
-
-        if not self._can_attempt():
-            err = "brain_cooldown"
-            self._mark_error(err, err_type="brain_cooldown", trace_id=trace_id)
-            self._record_call_stats(op, ok=False, trace_id=trace_id)
-            self._append_trace(
-                {
-                    "ts": int(time.time()),
-                    "trace_id": trace_id,
-                    "session_key": session_key,
-                    "op": op,
-                    "provider": self.provider,
-                    "model": self.model,
-                    "ok": False,
-                    "latency_ms": max(0, int(time.time() * 1000) - t0),
-                    "prompt_sha256": prompt_sha,
-                    "schema_version": schema_version,
-                    "err_type": "brain_cooldown",
-                    "err_msg": err,
-                    "ps_snapshot": {"ok": False, "seen": False, "matched": None},
-                }
-            )
-            if self.required:
-                raise BrainUnavailable(err)
-            return None
-
-        try:
-            out = call()
-            ps = self._proof_ps()
-            if self.required and not bool(ps.get("seen")):
-                raise BrainUnavailable("brain_proof_failed")
-            latency_ms = max(0, int(time.time() * 1000) - t0)
-            self._last_call_meta_by_op[op] = {
-                "trace_id": trace_id,
-                "ok": True,
-                "latency_ms": latency_ms,
-                "ps_seen": bool(ps.get("seen")),
-                "ts": int(time.time()),
-            }
-            self._record_call_stats(op, ok=True, trace_id=trace_id)
-            self._append_trace(
-                {
-                    "ts": int(time.time()),
-                    "trace_id": trace_id,
-                    "session_key": session_key,
-                    "op": op,
-                    "provider": self.provider,
-                    "model": self.model,
-                    "ok": True,
-                    "latency_ms": latency_ms,
-                    "prompt_sha256": prompt_sha,
-                    "schema_version": schema_version,
-                    "ollama_response_stats": self.client.last_chat_stats,
-                    "ps_snapshot": ps,
-                }
-            )
-            return out
-        except BrainUnavailable as e:
-            msg = str(e) or "brain_unavailable"
-            self._mark_error(msg, err_type=type(e).__name__, trace_id=trace_id)
-            latency_ms = max(0, int(time.time() * 1000) - t0)
-            self._last_call_meta_by_op[op] = {
-                "trace_id": trace_id,
-                "ok": False,
-                "latency_ms": latency_ms,
-                "ps_seen": False,
-                "ts": int(time.time()),
-                "err": msg,
-            }
-            self._record_call_stats(op, ok=False, trace_id=trace_id)
-            self._append_trace(
-                {
-                    "ts": int(time.time()),
-                    "trace_id": trace_id,
-                    "session_key": session_key,
-                    "op": op,
-                    "provider": self.provider,
-                    "model": self.model,
-                    "ok": False,
-                    "latency_ms": latency_ms,
-                    "prompt_sha256": prompt_sha,
-                    "schema_version": schema_version,
-                    "err_type": type(e).__name__,
-                    "err_msg": msg,
-                    "ollama_response_stats": self.client.last_chat_stats if self.client else {},
-                    "ps_snapshot": {"ok": False, "seen": False, "matched": None},
-                }
-            )
-            if self.required:
-                raise
-            return None
-        except Exception as e:
-            msg = str(e) or "brain_unknown_error"
-            self._mark_error(msg, err_type=type(e).__name__, trace_id=trace_id)
-            latency_ms = max(0, int(time.time() * 1000) - t0)
-            self._last_call_meta_by_op[op] = {
-                "trace_id": trace_id,
-                "ok": False,
-                "latency_ms": latency_ms,
-                "ps_seen": False,
-                "ts": int(time.time()),
-                "err": msg,
-            }
-            self._record_call_stats(op, ok=False, trace_id=trace_id)
-            self._append_trace(
-                {
-                    "ts": int(time.time()),
-                    "trace_id": trace_id,
-                    "session_key": session_key,
-                    "op": op,
-                    "provider": self.provider,
-                    "model": self.model,
-                    "ok": False,
-                    "latency_ms": latency_ms,
-                    "prompt_sha256": prompt_sha,
-                    "schema_version": schema_version,
-                    "err_type": type(e).__name__,
-                    "err_msg": msg,
-                    "ps_snapshot": {"ok": False, "seen": False, "matched": None},
-                }
-            )
-            if self.required:
-                raise BrainUnavailable(msg) from e
-            return None
-
-    def last_trace_id(self, op: str) -> str:
-        return str(self._last_trace_by_op.get(op) or "")
-
-    def last_call_meta(self, op: str) -> Dict[str, Any]:
-        v = self._last_call_meta_by_op.get(op) or {}
-        return dict(v)
-
-    def record_apply(self, *, op: str, session_key: str, trace_id: str, apply_summary: Dict[str, Any]) -> None:
-        if not trace_id:
-            trace_id = str(uuid.uuid4())
-        self._append_trace(
-            {
-                "ts": int(time.time()),
-                "trace_id": trace_id,
-                "session_key": session_key,
-                "op": f"{op}_apply",
-                "provider": self.provider,
-                "model": self.model,
-                "ok": True,
-                "latency_ms": 0,
-                "prompt_sha256": "",
-                "schema_version": "memq_brain_v1",
-                "apply_summary": dict(apply_summary or {}),
-                "ps_snapshot": {"ok": True, "seen": bool(self._last_ps_seen_model), "matched": {"model": self._last_ps_seen_model or self.model}},
-            }
-        )
-
-    def recent_traces(self, n: int = 50) -> List[Dict[str, Any]]:
-        n = max(1, min(500, int(n)))
+    def recent_traces(self, limit: int = 50) -> list[dict[str, Any]]:
         if not self.trace_path.exists():
             return []
-        try:
-            lines = self.trace_path.read_text(encoding="utf-8").splitlines()
-        except Exception:
-            return []
-        out: List[Dict[str, Any]] = []
-        for ln in lines[-n:]:
+        lines = self.trace_path.read_text(encoding="utf-8").splitlines()[-max(1, min(limit, 200)):]
+        out: list[dict[str, Any]] = []
+        for line in reversed(lines):
             try:
-                obj = json.loads(ln)
-            except Exception:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
                 continue
-            if isinstance(obj, dict):
-                out.append(obj)
         return out
 
-    @property
-    def stats(self) -> Dict[str, Any]:
-        return {
-            **self._stats,
-            "enabled": self.enabled,
-            "required": self.required,
-            "mode": self.mode,
-            "provider": self.provider,
-            "model": self.model,
-            "last_error": self._last_error,
-            "last_error_type": self._last_error_type,
-            "last_error_ts": self._last_error_ts,
-            "last_trace_id": self._last_trace_id,
-            "last_ps_seen_model": self._last_ps_seen_model,
-            "last_ps_seen_ts": self._last_ps_seen_ts,
-            "trace_path": str(self.trace_path),
-        }
-
-    @property
-    def status(self) -> Dict[str, Any]:
-        next_retry_at = 0
-        if self._last_error_ts and not self.required:
-            next_retry_at = int(self._last_error_ts) + int(self._retry_after_sec)
-        return {
-            "enabled": self.enabled,
-            "required": self.required,
-            "mode": self.mode,
-            "provider": "ollama" if self.enabled else "disabled",
-            "model": self.model,
-            "last_error": self._last_error,
-            "last_error_ts": self._last_error_ts,
-            "next_retry_at": next_retry_at,
-            "last_trace_id": self._last_trace_id,
-            "last_ps_seen_model": self._last_ps_seen_model,
-            "last_ps_seen_ts": self._last_ps_seen_ts,
-        }
-
-    def build_ingest_plan(
-        self,
-        *,
-        session_key: str,
-        user_text: str,
-        assistant_text: str,
-        ts: int,
-        metadata: Optional[Dict[str, Any]],
-    ) -> Optional[BrainIngestPlan]:
-        user_compact = self._compact_text(user_text, int(self.cfg.brain_ingest_user_chars))
-        assistant_compact = self._compact_text(assistant_text, int(self.cfg.brain_ingest_assistant_chars))
-        md = dict(metadata or {})
-        # Keep metadata compact to avoid bloating local 20B prompts.
-        if "actions" in md and isinstance(md.get("actions"), list):
-            md["actions"] = list(md.get("actions") or [])[:6]
-        if "actionSummaries" in md and isinstance(md.get("actionSummaries"), list):
-            md["actionSummaries"] = [self._compact_text(str(x), 120) for x in list(md.get("actionSummaries") or [])[:8]]
+    def _write_trace(self, session_key: str, op: str, record: BrainCallRecord) -> None:
         payload = {
+            "trace_id": record.trace_id,
             "session_key": session_key,
-            "ts": int(ts),
-            "user_text": user_compact,
-            "assistant_text": assistant_compact,
-            "metadata": md,
+            "op": op,
+            "provider": self.cfg.brain.provider,
+            "model": self.cfg.brain.model,
+            "ok": record.ok,
+            "latency_ms": record.latency_ms,
+            "prompt_sha256": record.prompt_sha256,
+            "ollama_response_stats": record.stats,
+            "ps_snapshot": record.ps_snapshot,
+            "apply_summary": record.apply_summary,
         }
-        return self._call_plan(
-            op="ingest_plan",
-            session_key=session_key,
-            payload=payload,
-            call=lambda: self.client.build_ingest_plan(
-                session_key=session_key,
-                user_text=user_compact,
-                assistant_text=assistant_compact,
-                ts=ts,
-                metadata=md,
-            ) if self.client else None,
-        )
+        with self.trace_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
-    def build_style_update_plan(
-        self,
-        *,
-        session_key: str,
-        user_text: str,
-        assistant_text: str,
-        ts: int,
-        metadata: Optional[Dict[str, Any]],
-    ) -> Optional[StyleUpdatePlan]:
-        user_compact = self._compact_text(user_text, int(self.cfg.brain_ingest_user_chars))
-        assistant_compact = self._compact_text(assistant_text, int(self.cfg.brain_ingest_assistant_chars))
-        md = dict(metadata or {})
-        payload = {
-            "session_key": session_key,
-            "ts": int(ts),
-            "user_text": user_compact,
-            "assistant_text": assistant_compact,
-            "metadata": md,
-        }
-        return self._call_plan(
-            op="style_plan",
-            session_key=session_key,
-            payload=payload,
-            call=lambda: self.client.build_style_update_plan(
-                session_key=session_key,
-                user_text=user_compact,
-                assistant_text=assistant_compact,
-                ts=ts,
-                metadata=md,
-            ) if self.client else None,
-        )
+    def _note_call(self, *, ok: bool, trace_id: str, err: str = "", model_seen: str = "") -> None:
+        import time
 
-    def ensure_runtime(self, *, session_key: str = "runtime") -> Dict[str, Any]:
+        now = int(time.time())
+        self._stats["total_calls"] += 1
+        self._stats["last_trace_id"] = trace_id
+        if ok:
+            self._stats["ok_calls"] += 1
+            self._stats["last_ok_ts"] = now
+        else:
+            self._stats["err_calls"] += 1
+            self._stats["last_err_ts"] = now
+            self._stats["last_err"] = err
+        if model_seen:
+            self._stats["last_ps_seen_model"] = model_seen
+
+    async def _call(self, *, session_key: str, op: str, system_prompt: str, user_prompt: str, schema_model: type[Any]) -> tuple[Any, str, dict[str, Any]]:
         trace_id = str(uuid.uuid4())
-        if not self.client:
-            self._mark_error("brain_disabled_or_no_client", err_type="brain_unavailable", trace_id=trace_id)
-            return {"ok": False, "seen": False, "trace_id": trace_id, "err": "brain_disabled_or_no_client"}
-        try:
-            ps = self.client.ensure_runtime()
-            if bool(ps.get("seen")):
-                self._last_ps_seen_model = self.model
-                self._last_ps_seen_ts = int(time.time())
-            self._append_trace(
-                {
-                    "ts": int(time.time()),
-                    "trace_id": trace_id,
-                    "session_key": session_key,
-                    "op": "runtime_ensure",
-                    "provider": self.provider,
-                    "model": self.model,
-                    "ok": bool(ps.get("seen")),
-                    "latency_ms": 0,
-                    "prompt_sha256": "",
-                    "schema_version": "memq_brain_v1",
-                    "ps_snapshot": ps,
-                }
-            )
-            return {"ok": True, "seen": bool(ps.get("seen")), "trace_id": trace_id, "ps": ps}
-        except Exception as e:
-            self._mark_error(str(e), err_type=type(e).__name__, trace_id=trace_id)
-            self._append_trace(
-                {
-                    "ts": int(time.time()),
-                    "trace_id": trace_id,
-                    "session_key": session_key,
-                    "op": "runtime_ensure",
-                    "provider": self.provider,
-                    "model": self.model,
-                    "ok": False,
-                    "latency_ms": 0,
-                    "prompt_sha256": "",
-                    "schema_version": "memq_brain_v1",
-                    "err_type": type(e).__name__,
-                    "err_msg": str(e),
-                    "ps_snapshot": {"ok": False, "seen": False, "matched": None},
-                }
-            )
-            if self.required:
-                raise BrainUnavailable(str(e)) from e
-            return {"ok": False, "seen": False, "trace_id": trace_id, "err": str(e)}
+        import time
 
-    def build_recall_plan(
+        t0 = time.perf_counter()
+        async with self._lock:
+            try:
+                res = await self.client.chat_schema(system=system_prompt, user=user_prompt, schema_model=schema_model)
+                latency_ms = int((time.perf_counter() - t0) * 1000)
+                record = BrainCallRecord(
+                    trace_id=trace_id,
+                    op=op,
+                    ok=True,
+                    latency_ms=latency_ms,
+                    prompt_sha256=res.prompt_sha256,
+                    stats=res.stats,
+                    ps_snapshot=res.ps_snapshot,
+                    apply_summary={},
+                )
+                self._write_trace(session_key, op, record)
+                seen_model = str((res.ps_snapshot or {}).get("model") or (res.ps_snapshot or {}).get("name") or "")
+                self._note_call(ok=True, trace_id=trace_id, model_seen=seen_model)
+                return schema_model.model_validate(res.content), trace_id, res.stats
+            except Exception as exc:  # noqa: BLE001
+                latency_ms = int((time.perf_counter() - t0) * 1000)
+                prompt_sha = hashlib.sha256(user_prompt.encode("utf-8", "ignore")).hexdigest()
+                record = BrainCallRecord(
+                    trace_id=trace_id,
+                    op=op,
+                    ok=False,
+                    latency_ms=latency_ms,
+                    prompt_sha256=prompt_sha,
+                    stats={},
+                    ps_snapshot=None,
+                    apply_summary={"error": f"{type(exc).__name__}:{exc}"},
+                )
+                self._write_trace(session_key, op, record)
+                self._note_call(ok=False, trace_id=trace_id, err=f"{type(exc).__name__}:{exc}")
+                raise
+
+    def _prompt(self, name: str, fallback: str) -> str:
+        return load_prompt(self.prompt_dir / name, fallback)
+
+    async def build_ingest_plan(
+        self,
+        *,
+        session_key: str,
+        user_text: str,
+        assistant_text: str,
+        current_style: dict[str, str],
+        current_rules: dict[str, str],
+        recent_summary: str,
+    ) -> tuple[BrainIngestPlan, str, dict[str, Any]]:
+        system = self._prompt(
+            "ingest_system.txt",
+            "Return JSON only. Extract memory facts, timeline events, optional explicit style updates, optional explicit rules, and quarantine items. Do not invent facts. Use evidence quotes.",
+        )
+        user = json.dumps(
+            {
+                "session_key": session_key,
+                "user_text": user_text,
+                "assistant_text": assistant_text,
+                "current_style": current_style,
+                "current_rules": current_rules,
+                "recent_summary": recent_summary,
+            },
+            ensure_ascii=False,
+        )
+        return await self._call(session_key=session_key, op="ingest_plan", system_prompt=system, user_prompt=user, schema_model=BrainIngestPlan)
+
+    async def build_recall_plan(
         self,
         *,
         session_key: str,
         prompt: str,
-        recent_messages: List[Dict[str, Any]],
-        budgets: Dict[str, int],
-        top_k: int,
-        surface_threshold: float,
-        deep_enabled: bool,
-    ) -> Optional[BrainRecallPlan]:
-        prompt_compact = self._compact_text(prompt, 320)
-        recent_compact = self._compact_recent_messages(recent_messages)
-        payload = {
-            "session_key": session_key,
-            "prompt": prompt_compact,
-            "recent_messages": recent_compact,
-            "budgets": budgets,
-            "top_k": int(top_k),
-            "surface_threshold": float(surface_threshold),
-            "deep_enabled": bool(deep_enabled),
-        }
-        return self._call_plan(
-            op="recall_plan",
-            session_key=session_key,
-            payload=payload,
-            call=lambda: self.client.build_recall_plan(
-                session_key=session_key,
-                prompt=prompt_compact,
-                recent_messages=recent_compact,
-                budgets=budgets,
-                top_k=top_k,
-                surface_threshold=surface_threshold,
-                deep_enabled=deep_enabled,
-            ) if self.client else None,
+        recent_messages: list[dict[str, Any]],
+        current_style: dict[str, str],
+        current_rules: dict[str, str],
+        now_iso: str,
+    ) -> tuple[BrainRecallPlan, str, dict[str, Any]]:
+        system = self._prompt(
+            "recall_system.txt",
+            "Return JSON only. Produce intent weights, time range, fact keys, FTS queries, budget split, and retrieval settings for memory recall. Keep queries short and search-oriented.",
         )
-
-    def build_merge_plan(
-        self,
-        *,
-        session_key: str,
-        memory_candidates: List[Dict[str, Any]],
-        stats: Optional[Dict[str, Any]] = None,
-    ) -> Optional[BrainMergePlan]:
-        merge_limit = max(20, int(self.cfg.brain_merge_candidate_limit))
-        compact_candidates: List[Dict[str, Any]] = []
-        for r in (memory_candidates or [])[:merge_limit]:
-            compact_candidates.append(
-                {
-                    "id": str((r or {}).get("id") or ""),
-                    "session_key": str((r or {}).get("session_key") or ""),
-                    "layer": str((r or {}).get("layer") or ""),
-                    "summary": self._compact_text(str((r or {}).get("summary") or ""), 220),
-                    "updated_at": int((r or {}).get("updated_at") or 0),
-                    "importance": float((r or {}).get("importance") or 0.0),
-                    "usage_count": int((r or {}).get("usage_count") or 0),
-                }
-            )
-        payload = {
-            "session_key": session_key,
-            "memory_candidates": compact_candidates,
-            "stats": stats or {},
-        }
-        return self._call_plan(
-            op="merge_plan",
-            session_key=session_key,
-            payload=payload,
-            call=lambda: self.client.build_merge_plan(
-                session_key=session_key,
-                memory_candidates=compact_candidates,
-                stats=stats or {},
-            ) if self.client else None,
+        user = json.dumps(
+            {
+                "session_key": session_key,
+                "prompt": prompt,
+                "recent_messages": recent_messages[-6:],
+                "current_style": current_style,
+                "current_rules": current_rules,
+                "now": now_iso,
+            },
+            ensure_ascii=False,
         )
+        return await self._call(session_key=session_key, op="recall_plan", system_prompt=system, user_prompt=user, schema_model=BrainRecallPlan)
 
-    def build_audit_patch_plan(
-        self,
-        *,
-        text: str,
-        allowed_languages: List[str],
-        reasons: Optional[List[str]] = None,
-    ) -> Optional[BrainAuditPatchPlan]:
-        payload = {
-            "text": text,
-            "allowed_languages": allowed_languages,
-            "reasons": reasons or [],
-        }
-        return self._call_plan(
-            op="audit_patch_plan",
-            session_key="audit",
-            payload=payload,
-            call=lambda: self.client.build_audit_patch_plan(
-                text=text,
-                allowed_languages=allowed_languages,
-                reasons=reasons or [],
-            ) if self.client else None,
+    async def build_merge_plan(self, *, session_key: str, candidate_groups: list[dict[str, Any]]) -> tuple[BrainMergePlan, str, dict[str, Any]]:
+        system = self._prompt(
+            "merge_system.txt",
+            "Return JSON only. Decide which memory items should merge, keep, or prune. Prefer consolidating duplicates without losing facts.",
         )
+        user = json.dumps({"session_key": session_key, "candidate_groups": candidate_groups[:12]}, ensure_ascii=False)
+        return await self._call(session_key=session_key, op="merge_plan", system_prompt=system, user_prompt=user, schema_model=BrainMergePlan)
 
-    def apply_merge_plan(self, *, db: MemqDB, session_key: str, plan: BrainMergePlan) -> Dict[str, int]:
-        now = int(time.time())
-        stats = {"merged": 0, "pruned": 0, "quarantined": 0}
+    async def build_audit_patch(self, *, session_key: str, text: str, reasons: list[str]) -> tuple[BrainAuditPatchPlan, str, dict[str, Any]]:
+        system = self._prompt(
+            "audit_patch_system.txt",
+            "Return JSON only. Keep structure, patch only unsafe spans, and preserve meaning.",
+        )
+        user = json.dumps({"session_key": session_key, "text": text, "reasons": reasons}, ensure_ascii=False)
+        return await self._call(session_key=session_key, op="audit_patch", system_prompt=system, user_prompt=user, schema_model=BrainAuditPatchPlan)
 
-        for p in plan.prunes or []:
-            rid = str(p.id or "").strip()
-            if not rid:
+    def apply_ingest_plan(self, db: MemqDB, *, session_key: str, plan: BrainIngestPlan, ts: int, user_text: str = "") -> dict[str, int]:
+        wrote = {"facts": 0, "events": 0, "style": 0, "rules": 0, "quarantine": 0}
+        for item in plan.quarantine:
+            db.insert_quarantine(session_key, item.raw_snippet, item.reason, item.risk)
+            wrote["quarantine"] += 1
+        for fact in plan.facts:
+            if not fact.fact_key.startswith(FACT_KEY_PREFIXES):
+                db.insert_quarantine(session_key, fact.evidence_quote or fact.value, "unknown_fact_key", 0.8)
+                wrote["quarantine"] += 1
                 continue
-            rc = db.conn.execute("DELETE FROM memory_items WHERE id=?", (rid,)).rowcount
-            stats["pruned"] += int(rc or 0)
-
-        for m in plan.merges or []:
-            target_id = str(m.target_id or "").strip()
-            if not target_id:
-                continue
-            row = db.conn.execute("SELECT * FROM memory_items WHERE id=?", (target_id,)).fetchone()
-            if not row:
-                continue
-            text = " ".join(str(m.merged_text or row["text"] or "").split()).strip()[:1200]
-            summary = " ".join(str(m.merged_summary or row["summary"] or text).split()).strip()[:420]
-            try:
-                tags = json.loads(str(row["tags"] or "{}"))
-            except Exception:
-                tags = {}
-            if not isinstance(tags, dict):
-                tags = {}
-            new_tags = m.new_tags or {}
-            for k, v in new_tags.items():
-                tags[str(k)] = str(v)
-
-            quarantine_flag = str(new_tags.get("quarantine") or "").strip().lower() in {"1", "true", "yes", "on"}
-            if quarantine_flag:
-                db.add_quarantine(
-                    trace_id=target_id,
-                    raw_text=summary[:500],
-                    reason=str(new_tags.get("reason") or "merge_quarantine")[:80],
-                    risk_score=0.8,
-                )
-                stats["quarantined"] += 1
-                db.conn.execute("DELETE FROM memory_items WHERE id=?", (target_id,))
+            if fact.layer == "deep" and fact.confidence < 0.45:
+                layer = "surface"
             else:
-                db.conn.execute(
-                    "UPDATE memory_items SET text=?,summary=?,tags=?,updated_at=? WHERE id=?",
-                    (text, summary, json.dumps(tags, ensure_ascii=False), now, target_id),
-                )
-                stats["merged"] += 1
-
-            source_ids = [str(x).strip() for x in (m.source_ids or []) if str(x).strip() and str(x).strip() != target_id]
-            if bool(m.drop_source) and source_ids:
-                for sid in source_ids:
-                    db.conn.execute("DELETE FROM memory_items WHERE id=?", (sid,))
-                    stats["pruned"] += 1
-
-        db.conn.commit()
-        # Re-sync derived indices after merge application.
-        db.backfill_fact_keys(layer="deep", limit=30000)
-        db.backfill_fact_index(layer="deep", limit=30000)
-        db.cleanup_stale_fact_index()
-        return stats
-
-    def apply_ingest_plan(
-        self,
-        *,
-        db: MemqDB,
-        session_key: str,
-        ts: int,
-        plan: BrainIngestPlan,
-        user_text: str,
-        assistant_text: str,
-        metadata: Optional[Dict[str, Any]],
-    ) -> Dict[str, int]:
-        wrote = {"surface": 0, "deep": 0, "ephemeral": 0, "quarantined": 0, "events": 0, "style": 0, "rules": 0}
-        now = int(ts or time.time())
-
-        def quarantine(raw: str, reason: str, risk: float = 0.8) -> None:
-            nonlocal wrote
-            db.add_quarantine(None, raw_text=raw[:500], reason=reason[:80], risk_score=max(0.0, min(1.0, risk)))
-            wrote["quarantined"] += 1
-
-        for q in plan.quarantine or []:
-            raw = str(q.raw_snippet or "")
-            if raw:
-                quarantine(raw, str(q.reason or "brain_quarantine"), 0.75)
-
-        for fact in plan.facts or []:
-            fk = str(fact.fact_key or "").strip().lower()
-            if not fk or not fk.startswith(SAFE_FACT_KEY_PREFIX):
-                quarantine(str(fact.value or ""), "unknown_fact_key", 0.7)
-                continue
-            val = normalize_fact_value(str(fact.value or ""), max_len=96)
-            if not val:
-                continue
-            if SECRET_RE.search(val):
-                quarantine(val, "secret_like_fact", 0.95)
-                continue
-            if not plausible_fact_value(fk, val):
-                quarantine(val, "implausible_fact_value", 0.65)
-                continue
-            layer = str(fact.layer or "surface")
-            if layer not in {"surface", "deep", "ephemeral"}:
-                layer = "surface"
-            conf = float(fact.confidence)
-            if layer == "deep" and conf < 0.45:
-                layer = "surface"
-            ttl_days = max(1, int(fact.ttl_days or (365 if layer == "deep" else 14)))
-            ttl_expires_at = now + ttl_days * 86400
-            if layer == "deep" and ttl_days >= 365 and conf >= 0.75:
-                ttl_expires_at = None
-            summary_fact = {
-                "subject": str(fact.entity_id or "ent:user"),
-                "relation": fk.replace(".", "_"),
-                "value": val,
-                "fact_key": fk,
-                "confidence": conf,
-                "source": "brain_ingest",
-                "stable": layer == "deep",
-                "ttl_days": ttl_days,
-                "explicit": False,
-                "ts": now,
-            }
-            summary = structured_fact_summary(summary_fact)
-            item_id = db.add_memory_item(
+                layer = fact.layer
+            db.insert_memory(
                 session_key=session_key,
                 layer=layer,
-                text=summary,
-                summary=summary,
-                importance=max(0.45, min(0.95, conf)),
-                tags={
-                    "kind": "structured_fact",
-                    "from": "brain_ingest",
-                    "ts": now,
-                    "fact_keys": [fk],
-                    "fact": summary_fact,
-                    "keywords": list(fact.keywords or []),
-                    "evidence_quote": str(fact.evidence_quote or "")[:120],
-                },
-                emb_f16=None,
-                emb_q=None,
-                emb_dim=0,
-                ttl_expires_at=ttl_expires_at,
-                source="brain_ingest",
+                kind="fact",
+                fact_key=fact.fact_key,
+                value=fact.value,
+                text=fact.evidence_quote or fact.value,
+                summary=f"{fact.fact_key}:{fact.value}",
+                confidence=fact.confidence,
+                importance=fact.importance,
+                strength=fact.strength,
+                tags={"entity_id": fact.entity_id},
+                source_quote=fact.evidence_quote,
+                ttl_days=fact.ttl_days,
+                created_at=ts,
             )
-            wrote[layer] += 1
-            if layer == "deep":
-                db.expire_conflicting_fact_keys("deep", session_key, [fk], item_id)
-                if fk.startswith("profile.") and conf >= 0.75:
-                    gid = db.add_memory_item(
-                        session_key="global",
-                        layer="deep",
-                        text=summary,
-                        summary=summary,
-                        importance=max(0.6, min(0.96, conf)),
-                        tags={
-                            "kind": "durable_global_fact",
-                            "from": "brain_ingest",
-                            "ts": now,
-                            "fact_keys": [fk],
-                            "fact": summary_fact,
-                            "keywords": list(fact.keywords or []),
-                        },
-                        emb_f16=None,
-                        emb_q=None,
-                        emb_dim=0,
-                        ttl_expires_at=None,
-                        source="brain_ingest",
-                    )
-                    db.expire_conflicting_fact_keys("deep", "global", [fk], gid)
-
-        event_written = 0
-        for ev in plan.events or []:
-            sm = " ".join(str(ev.summary or "").split()).strip()
-            if not sm:
-                continue
-            if SECRET_RE.search(sm):
-                quarantine(sm, "secret_like_event", 0.9)
-                continue
-            ttl_days = max(1, int(ev.ttl_days or (30 if float(ev.salience) >= 0.7 else 14)))
-            if float(ev.salience) >= 0.9:
-                ttl = None
-            else:
-                ttl = now + ttl_days * 86400
-            db.add_event(
+            if layer == "deep" and session_key != "global" and fact.fact_key.startswith("profile."):
+                db.insert_memory(
+                    session_key="global",
+                    layer="deep",
+                    kind="fact",
+                    fact_key=fact.fact_key,
+                    value=fact.value,
+                    text=fact.evidence_quote or fact.value,
+                    summary=f"{fact.fact_key}:{fact.value}",
+                    confidence=fact.confidence,
+                    importance=fact.importance,
+                    strength=fact.strength,
+                    tags={"entity_id": fact.entity_id, "source": session_key},
+                    source_quote=fact.evidence_quote,
+                    ttl_days=fact.ttl_days,
+                    created_at=ts,
+                )
+            wrote["facts"] += 1
+        for event in plan.events:
+            db.insert_event(
                 session_key=session_key,
-                ts=int(ev.ts or now),
-                actor=str(ev.actor or "assistant"),
-                kind=str(ev.kind or "chat"),
-                summary=sm[:260],
-                tags={"from": "brain_ingest", "keywords": list(ev.keywords or [])},
-                importance=float(ev.salience),
-                ttl_expires_at=ttl,
+                ts=event.ts or ts,
+                actor=event.actor,
+                kind=event.kind,
+                summary=event.summary,
+                salience=event.salience,
+                keywords=event.keywords,
+                ttl_days=event.ttl_days,
             )
-            event_written += 1
-
-        if event_written == 0:
-            if user_text.strip():
-                db.add_event(
-                    session_key=session_key,
-                    ts=now,
-                    actor="user",
-                    kind="chat",
-                    summary=" ".join(user_text.split())[:260],
-                    tags={"from": "brain_fallback"},
-                    importance=0.4,
-                    ttl_expires_at=now + 14 * 86400,
-                )
-                event_written += 1
-            if assistant_text.strip():
-                db.add_event(
-                    session_key=session_key,
-                    ts=now,
-                    actor="assistant",
-                    kind="chat",
-                    summary=" ".join(assistant_text.split())[:260],
-                    tags={"from": "brain_fallback"},
-                    importance=0.35,
-                    ttl_expires_at=now + 14 * 86400,
-                )
-                event_written += 1
-            for a in ((metadata or {}).get("actions") or []):
-                sm = " ".join(str((a or {}).get("summary") or "").split()).strip()
-                if not sm:
+            wrote["events"] += 1
+        applied_style_keys: set[str] = set()
+        if plan.style_update and plan.style_update.apply and plan.style_update.explicit:
+            for key, value in plan.style_update.keys.items():
+                if key not in STYLE_KEYS:
                     continue
-                db.add_event(
-                    session_key=session_key,
-                    ts=now,
-                    actor="assistant",
-                    kind=str((a or {}).get("kind") or "action"),
-                    summary=sm[:260],
-                    tags={"from": "brain_fallback"},
-                    importance=0.65,
-                    ttl_expires_at=now + 30 * 86400,
-                )
-                event_written += 1
-
-        wrote["events"] += event_written
-
-        # Brain-orchestrated updates only:
-        # style/rules are applied from the Brain plan (with whitelist + secret guards).
-        su = plan.style_update
-        if su and su.apply:
-            wrote["style"] += int(
-                self.apply_style_update_plan(
-                    db=db,
-                    session_key=session_key,
-                    ts=now,
-                    style_plan=su,
-                )
-            )
-
-        ru = plan.rules_update
-        if ru and ru.apply:
-            rule_updates: List[tuple[str, str, int, str]] = []
-            for i, line in enumerate(ru.rules or []):
-                t = " ".join(str(line or "").split()).strip()
-                if "=" not in t:
+                db.upsert_style(session_key, key, value, updated_at=ts)
+                wrote["style"] += 1
+                applied_style_keys.add(key)
+        if explicit_style_requested(user_text):
+            for fact in plan.facts:
+                key = _style_key_alias(fact.fact_key)
+                if not key or key in applied_style_keys:
                     continue
-                k, v = t.split("=", 1)
-                k = k.strip()
-                v = v.strip()
-                if not k or not k.startswith(SAFE_RULE_PREFIX):
+                db.upsert_style(session_key, key, fact.value, updated_at=ts)
+                wrote["style"] += 1
+                applied_style_keys.add(key)
+        if plan.rules_update and plan.rules_update.apply and plan.rules_update.explicit:
+            for key, value in plan.rules_update.rules.items():
+                if not key.startswith(RULE_PREFIXES):
                     continue
-                if SECRET_RE.search(v):
-                    continue
-                kind = k.split(".", 1)[0]
-                # Brain updates are conservative priority.
-                rule_updates.append((k, v[:200], 75, kind))
-            if rule_updates:
-                # De-duplicate by key keeping the highest priority update.
-                by_key: Dict[str, tuple[str, str, int, str]] = {}
-                for k, v, prio, kind in rule_updates:
-                    cur = by_key.get(k)
-                    if cur is None or int(prio) >= int(cur[2]):
-                        by_key[k] = (k, v, int(prio), kind)
-                wrote["rules"] += int(apply_rule_updates(db, list(by_key.values())))
-
+                db.upsert_rule(session_key, key, value, updated_at=ts)
+                wrote["rules"] += 1
+        if explicit_rule_requested(user_text):
+            for fact in plan.facts:
+                if fact.fact_key.startswith(RULE_PREFIXES):
+                    db.upsert_rule(session_key, fact.fact_key, fact.value, updated_at=ts)
+                    wrote["rules"] += 1
+        db.refresh_recent_digests(session_key, days=3)
         return wrote
 
-    def apply_style_update_plan(
-        self,
-        *,
-        db: MemqDB,
-        session_key: str,
-        ts: int,
-        style_plan: StyleUpdatePlan,
-    ) -> int:
-        su = style_plan
-        if not su or not bool(su.apply):
-            return 0
-        now = int(ts or time.time())
-        style_updates: Dict[str, str] = {}
-        pref_updates: Dict[str, str] = {}
-        for k, v in (su.keys or {}).items():
-            kk = self._canonical_style_key(str(k or ""))
-            vv = " ".join(str(v or "").split()).strip()
-            if kk in SAFE_STYLE_KEYS and vv and not SECRET_RE.search(vv):
-                compact = vv[:180]
-                style_updates[kk] = compact
-                pref_key = STYLE_PREF_KEYS.get(kk)
-                if pref_key:
-                    pref_updates[pref_key] = compact
-        if not style_updates:
-            return 0
-        wrote = int(apply_style_updates(db, style_updates))
-        # Keep style updates stable against immediate profile refresh overwrite by
-        # adding strong preference events and profiles in the same turn.
-        pref_weight = 3.0 if bool(su.explicit) else 1.4
-        pref_conf = 0.97 if bool(su.explicit) else 0.78
-        for pk, pv in pref_updates.items():
-            db.add_preference_event(
-                key=pk,
-                value=pv,
-                weight=pref_weight,
-                explicit=bool(su.explicit),
-                source="brain_style",
-                evidence_uri=f"session:{session_key}:brain_style",
-                created_at=now,
-            )
-            db.upsert_preference_profile(pk, pv, pref_conf)
-        sanitize_style_profile(db)
-        return wrote
+    def apply_merge_plan(self, db: MemqDB, *, session_key: str, plan: BrainMergePlan) -> dict[str, int]:
+        applied = {"merged": 0, "pruned": 0}
+        for merge in plan.merges:
+            db.apply_merge(merge.target_id, merge.source_ids, merge.merged_summary, merge.merged_value)
+            applied["merged"] += 1
+        if plan.prunes:
+            ids = [item.id for item in plan.prunes]
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                db.conn.execute(f"UPDATE memory_items SET tombstoned=1 WHERE id IN ({placeholders})", ids)
+                db.conn.commit()
+                applied["pruned"] += len(ids)
+        return applied

@@ -1,148 +1,57 @@
-import type { MemqMessage } from "../types.js";
+export interface NormalizedMessage {
+  role: string;
+  text: string;
+  ts?: number;
+  raw?: any;
+}
+
+function flattenContent(value: any): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) {
+    const out: string[] = [];
+    for (const item of value) out.push(...flattenContent(item));
+    return out;
+  }
+  if (!value || typeof value !== "object") return [];
+  const type = String((value as any).type ?? "");
+  const parts: string[] = [];
+  if ((value as any).text) parts.push(String((value as any).text));
+  if ((value as any).content) parts.push(...flattenContent((value as any).content));
+  if ((value as any).output) parts.push(String((value as any).output));
+  if ((value as any).result) parts.push(String((value as any).result));
+  if ((value as any).arguments) parts.push(JSON.stringify((value as any).arguments));
+  if ((value as any).name && type.includes("tool")) parts.push(`tool:${String((value as any).name)}`);
+  if ((value as any).function?.name) parts.push(`fn:${String((value as any).function.name)}`);
+  if (parts.length === 0) parts.push(JSON.stringify(value));
+  return parts;
+}
+
+export function messageText(message: any): string {
+  const parts: string[] = [];
+  if (!message || typeof message !== "object") return "";
+  if (typeof message.text === "string") parts.push(message.text);
+  if (typeof message.content === "string") parts.push(message.content);
+  if (Array.isArray(message.content)) parts.push(...flattenContent(message.content));
+  if (Array.isArray((message as any).tool_calls)) parts.push(JSON.stringify((message as any).tool_calls));
+  if ((message as any).toolCallId) parts.push(String((message as any).toolCallId));
+  const joined = parts.join(" ").replace(/\s+/g, " ").trim();
+  return joined.slice(0, 6000);
+}
 
 export function estimateTokens(text: string): number {
-  const s = String(text || "");
-  if (!s) return 1;
-  const cjk = (s.match(/[\u3040-\u30ff\u3400-\u9fff]/g) || []).length;
-  const ascii = (s.match(/[A-Za-z0-9_]/g) || []).length;
-  const other = Math.max(0, s.length - cjk - ascii);
-  // Heuristic: CJK tends to tokenize denser than ascii chunks.
-  const est = Math.ceil(cjk * 1.05 + ascii / 3.6 + other / 2.4);
-  return Math.max(1, est);
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  if (!clean) return 0;
+  return Math.max(1, Math.ceil(clean.length / 4));
 }
 
-export function messageText(m: any): string {
-  if (!m || typeof m !== "object") return "";
-  const toText = (v: any, maxLen = 12000): string => {
-    if (v == null) return "";
-    if (typeof v === "string") return v.trim().slice(0, maxLen);
-    try {
-      return JSON.stringify(v).slice(0, maxLen);
-    } catch {
-      return String(v).slice(0, maxLen);
-    }
-  };
-  if (typeof m.content === "string") return m.content.trim();
-  if (Array.isArray(m.content)) {
-    return m.content
-      .map((b: any) => {
-        if (!b || typeof b !== "object") return "";
-        const t = String((b as any).type ?? "");
-        if (t === "text") return toText((b as any).text, 12000);
-        if (t === "toolResult" || t === "tool_result" || t === "function_call_output" || t === "tool-output" || t === "toolOutput") {
-          return toText((b as any).output ?? (b as any).result ?? (b as any).content ?? b, 18000);
-        }
-        if (t === "toolCall" || t === "tool_call" || t === "tool-use" || t === "function_call") {
-          const name = toText((b as any).name ?? (b as any).function?.name ?? "", 120);
-          const args = toText((b as any).args ?? (b as any).arguments ?? (b as any).function?.arguments ?? "", 1500);
-          return `tool_call:${name} args:${args}`.trim();
-        }
-        return toText(b, 1600);
-      })
-      .join(" ")
-      .trim();
-  }
-  if (Array.isArray((m as any).tool_calls)) {
-    return (m as any).tool_calls
-      .map((tc: any) => {
-        const name = toText(tc?.function?.name ?? tc?.name ?? "", 120);
-        const args = toText(tc?.function?.arguments ?? tc?.arguments ?? "", 480);
-        return `tool_call:${name} args:${args}`.trim();
-      })
-      .join(" ")
-      .trim();
-  }
-  if (typeof m.text === "string") return m.text.trim();
-  return "";
-}
-
-export function normalizeMessages(input: any[]): MemqMessage[] {
-  return input
-    .map((m) => ({
-      role: String(m?.role ?? "unknown"),
-      text: messageText(m),
-      ts: undefined,
+export function normalizeMessages(messages: any[]): NormalizedMessage[] {
+  if (!Array.isArray(messages)) return [];
+  return messages
+    .map((message) => ({
+      role: String(message?.role ?? "unknown"),
+      text: messageText(message),
+      ts: typeof message?.ts === "number" ? message.ts : undefined,
+      raw: message,
     }))
-    .filter((m) => m.text.length > 0);
-}
-
-export function estimateMessageTokens(m: MemqMessage): number {
-  return 4 + estimateTokens(m.role) + estimateTokens(m.text);
-}
-
-export function splitRecentByTokenBudget(messages: any[], maxTokens: number, minKeepMessages: number): {
-  keepStart: number;
-  kept: any[];
-  pruned: any[];
-  keptTokens: number;
-} {
-  const n = messages.length;
-  if (!n) return { keepStart: 0, kept: [], pruned: [], keptTokens: 0 };
-  const normalized = normalizeMessages(messages);
-  const tokenByIndex = messages.map((m, i) => {
-    const role = String(m?.role ?? "").toLowerCase();
-    const human = role === "user" || role === "assistant";
-    let t = estimateMessageTokens(normalized[i] ?? { role: String(m?.role ?? "x"), text: messageText(m) });
-
-    // Guard against severe under-estimation on rich non-text payloads.
-    let rawLen = 0;
-    try {
-      rawLen = JSON.stringify(m).length;
-    } catch {
-      rawLen = 0;
-    }
-    if (rawLen > 0) {
-      const rawTok = Math.ceil(rawLen / 3.4);
-      t = human ? Math.max(t, Math.ceil(rawTok * 0.65)) : Math.max(t, rawTok);
-    }
-
-    if (!human) {
-      // Tool/function messages generally serialize with larger protocol overhead.
-      t = Math.ceil(t * 1.22 + 20);
-    }
-    return Math.max(1, t);
-  });
-  const isHumanRole = (role: string): boolean => role === "user" || role === "assistant";
-
-  let sum = 0;
-  let keptHuman = 0;
-  const keepFlags = new Array<boolean>(n).fill(false);
-  for (let i = n - 1; i >= 0; i -= 1) {
-    const role = String(messages[i]?.role ?? "").toLowerCase();
-    const human = isHumanRole(role);
-    const mustKeep = human && keptHuman < Math.max(1, minKeepMessages);
-    const t = tokenByIndex[i] ?? 1;
-    if (mustKeep || sum + t <= Math.max(200, maxTokens)) {
-      keepFlags[i] = true;
-      sum += t;
-      if (human) keptHuman += 1;
-      continue;
-    }
-    // Oversized non-human payloads (tool outputs etc.) should be pruned first;
-    // do not stop walking, otherwise we may fail to keep required recent human turns.
-    if (!human) {
-      continue;
-    }
-    break;
-  }
-
-  const kept: any[] = [];
-  const pruned: any[] = [];
-  let keepStart = n;
-  for (let i = 0; i < n; i += 1) {
-    if (keepFlags[i]) {
-      if (keepStart > i) keepStart = i;
-      kept.push(messages[i]);
-    } else {
-      pruned.push(messages[i]);
-    }
-  }
-  if (keepStart === n && kept.length > 0) keepStart = 0;
-
-  return {
-    keepStart,
-    kept,
-    pruned,
-    keptTokens: sum,
-  };
+    .filter((message) => message.text.trim());
 }

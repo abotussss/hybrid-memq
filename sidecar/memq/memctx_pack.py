@@ -1,944 +1,313 @@
 from __future__ import annotations
 
-import json
-from typing import Any, Dict, Iterable, List, Sequence, Tuple
-import re
-import time
-from collections import defaultdict
-
-from .db import MemqDB
-from .fact_keys import infer_query_fact_keys
-from .intent import infer_intent
-from .rules import extract_allowed_languages_from_rules
-from .style import style_profile_lines
-from .text_sanitize import contains_runtime_noise, strip_memq_blocks, strip_runtime_noise
-from .timeline import day_key_from_ts, detect_timeline_range
-from .tokens import tokenize_lexical
+from sidecar.memq.brain.schemas import BrainRecallPlan
+from sidecar.memq.retrieval import RetrievalBundle
+from sidecar.memq.tokens import estimate_tokens, fit_lines
 
 
-def estimate_tokens(text: str) -> int:
-    return max(1, (len(text) + 3) // 4)
+STYLE_ORDER = ["firstPerson", "callUser", "persona", "tone", "speaking_style", "verbosity", "prefix"]
+STYLE_KEYS = set(STYLE_ORDER)
+RULE_PREFIXES = ("security.", "language.", "procedure.", "compliance.", "output.", "operation.")
+MEMCTX_PREFIXES = ("wm.", "p.snapshot", "t.", "s", "d", "e")
 
 
-_DAY_KEY_RE = re.compile(r"^20\d{2}-\d{2}-\d{2}$")
+
+def _compact(text: str, limit: int = 120) -> str:
+    text = " ".join(str(text or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
 
 
-def _is_day_key(v: str) -> bool:
-    return bool(_DAY_KEY_RE.fullmatch(str(v or "").strip()))
+def _line_cost(line: str) -> int:
+    return estimate_tokens(line) + 1
 
 
-def fit_budget(lines: Sequence[str], budget: int) -> List[str]:
-    out: List[str] = []
-    used = 0
+def _fits(line: str, remaining: int) -> bool:
+    return _line_cost(line) <= remaining
+
+
+def _valid_rule_key(key: str) -> bool:
+    return any(key.startswith(prefix) for prefix in RULE_PREFIXES)
+
+
+def _valid_style_key(key: str) -> bool:
+    return key in STYLE_KEYS
+
+
+def _valid_memctx_key(key: str) -> bool:
+    return any(key == prefix or key.startswith(prefix) for prefix in MEMCTX_PREFIXES)
+
+
+def _filter_memctx_lines(lines: list[str]) -> list[str]:
+    out: list[str] = []
     for line in lines:
-        ln = line.strip()
-        if not ln:
-            continue
-        cost = estimate_tokens(ln)
-        if used + cost > budget:
-            break
-        out.append(ln)
-        used += cost
+        key, _, _ = line.partition("=")
+        if _valid_memctx_key(key.strip()):
+            out.append(line)
     return out
 
 
-def _split_kv(line: str) -> Tuple[str, str]:
-    if "=" not in line:
-        return line.strip(), ""
-    k, v = line.split("=", 1)
-    return k.strip(), v.strip()
+def _scaled_budgets(requested: dict[str, int], available: int) -> dict[str, int]:
+    if available <= 0:
+        return {key: 0 for key in requested}
+    positive = {key: max(0, value) for key, value in requested.items()}
+    total_requested = sum(positive.values())
+    if total_requested <= 0:
+        return {key: 0 for key in requested}
+    if total_requested <= available:
+        return positive
+    scaled: dict[str, int] = {}
+    remaining = available
+    keys = [key for key, value in positive.items() if value > 0]
+    for index, key in enumerate(keys):
+        if index == len(keys) - 1:
+            scaled[key] = remaining
+            break
+        share = int(available * positive[key] / total_requested)
+        scaled[key] = min(remaining, max(0, share))
+        remaining -= scaled[key]
+    for key in requested:
+        scaled.setdefault(key, 0)
+    return scaled
 
 
-def _line_group(key: str) -> str:
-    if key.startswith("wm.") or key in {"convsurf", "convdeep"}:
-        return "anchor"
-    if key == "p.snapshot" or re.fullmatch(r"p\d+", key):
-        return "profile"
-    if key.startswith("t."):
-        return "timeline"
-    if re.fullmatch(r"s\d+", key):
-        return "surface"
-    if re.fullmatch(r"(d|g)\d+", key):
-        return "deep"
-    if re.fullmatch(r"e\d+", key):
-        return "ephemeral"
-    if key.startswith("meta.") or key.startswith("memory.fact_"):
-        return "meta"
-    return "misc"
+def _take_lines(lines: list[str], budget_tokens: int) -> tuple[list[str], list[str], int]:
+    if budget_tokens <= 0 or not lines:
+        return [], list(lines), 0
+    kept = fit_lines(lines, budget_tokens)
+    consumed = sum(_line_cost(line) for line in kept)
+    return kept, lines[len(kept) :], consumed
 
 
-def _pack_memctx_payload(
-    *,
-    base_lines: Sequence[str],
-    payload_lines: Sequence[str],
-    budget_tokens: int,
-    intent: Dict[str, float],
-    time_scoped: bool,
-    query_memory_overview: bool,
-    budget_split: Dict[str, int] | None = None,
-) -> List[str]:
-    out: List[str] = [ln for ln in base_lines if ln.strip()]
-    used = sum(estimate_tokens(ln) for ln in out)
-    budget = max(8, int(budget_tokens))
-    remain = max(0, budget - used)
-    if remain <= 0 or not payload_lines:
-        return fit_budget(out, budget)
-
+def _intent_priority(plan: BrainRecallPlan) -> list[str]:
     weights = {
-        "anchor": 0.55 + 0.28 * float(intent.get("state", 0.0)) + 0.24 * float(intent.get("overview", 0.0)),
-        "profile": 0.35 + 1.10 * float(intent.get("profile", 0.0)),
-        "timeline": 0.30 + 1.12 * float(intent.get("timeline", 0.0)),
-        "surface": 0.42 + 0.72 * float(intent.get("state", 0.0)) + 0.35 * float(intent.get("overview", 0.0)),
-        "deep": 0.50
-        + 0.95 * float(intent.get("fact_lookup", 0.0))
-        + 0.55 * float(intent.get("profile", 0.0))
-        + 0.30 * float(intent.get("overview", 0.0)),
-        "ephemeral": 0.12 + 0.25 * float(intent.get("state", 0.0)),
-        "meta": 0.15 + 0.80 * float(intent.get("meta", 0.0)),
-        "misc": 0.22,
+        "timeline": float(plan.intent.timeline),
+        "profile": float(plan.intent.profile),
+        "surface": float(plan.intent.state + plan.intent.overview),
+        "deep": float(plan.intent.fact),
+        "ephemeral": 0.0,
     }
-    if time_scoped:
-        weights["timeline"] *= 1.45
-        weights["anchor"] *= 0.78
-    if float(intent.get("profile", 0.0)) >= 0.45:
-        weights["profile"] *= 1.30
-    if float(intent.get("fact_lookup", 0.0)) >= 0.45:
-        weights["deep"] *= 1.25
-    if query_memory_overview:
-        weights["surface"] *= 1.18
-        weights["deep"] *= 1.18
-        weights["timeline"] *= 1.12
+    return [name for name, _ in sorted(weights.items(), key=lambda item: item[1], reverse=True)]
 
-    sum_w = sum(max(0.01, float(v)) for v in weights.values())
-    token_targets: Dict[str, int] = {
-        g: max(0, int(remain * (max(0.01, float(w)) / sum_w))) for g, w in weights.items()
-    }
-    if isinstance(budget_split, dict):
-        for src, dst in (
-            ("profile", "profile"),
-            ("timeline", "timeline"),
-            ("surface", "surface"),
-            ("deep", "deep"),
-            ("ephemeral", "ephemeral"),
-        ):
-            try:
-                raw = int(budget_split.get(src, token_targets.get(dst, 0)))
-            except Exception:
-                raw = token_targets.get(dst, 0)
-            token_targets[dst] = max(0, min(remain, raw))
-    if time_scoped:
-        token_targets["timeline"] = max(token_targets["timeline"], int(remain * 0.35))
-    if float(intent.get("profile", 0.0)) >= 0.55:
-        token_targets["profile"] = max(token_targets["profile"], int(remain * 0.24))
-    if float(intent.get("meta", 0.0)) >= 0.60:
-        token_targets["meta"] = max(token_targets["meta"], int(remain * 0.12))
 
-    candidates: List[Dict[str, Any]] = []
-    for idx, line in enumerate(payload_lines):
-        ln = (line or "").strip()
-        if not ln:
+def _dominant_intent(plan: BrainRecallPlan) -> str:
+    return _intent_priority(plan)[0]
+
+
+
+def build_memrules(rules: dict[str, str], budget_tokens: int) -> str:
+    lines = ["budget_tokens=" + str(budget_tokens)]
+    for key in sorted(rules):
+        if _valid_rule_key(key):
+            lines.append(f"{key}={rules[key]}")
+    return "\n".join(fit_lines(lines, budget_tokens))
+
+
+
+def build_memstyle(style: dict[str, str], budget_tokens: int) -> str:
+    lines = ["budget_tokens=" + str(budget_tokens)]
+    for key in STYLE_ORDER:
+        value = style.get(key)
+        if value:
+            lines.append(f"{key}={_compact(value, 96)}")
+    for key in sorted(style):
+        if key in STYLE_ORDER or not _valid_style_key(key):
             continue
-        key, value = _split_kv(ln)
-        if not key:
+        lines.append(f"{key}={_compact(style[key], 96)}")
+    return "\n".join(fit_lines(lines, budget_tokens))
+
+
+
+def _profile_lines(bundle: RetrievalBundle) -> list[str]:
+    lines: list[str] = []
+    snapshot = bundle.anchors.get("p.snapshot", "")
+    if snapshot:
+        lines.append(f"p.snapshot={_compact(snapshot, 160)}")
+    return lines
+
+
+def _deep_lines(bundle: RetrievalBundle) -> list[str]:
+    lines: list[str] = []
+    profile_items = [item for item in bundle.deep if (item.fact_key or "").startswith("profile.")]
+    other_items = [item for item in bundle.deep if not (item.fact_key or "").startswith("profile.")]
+    deep_items = profile_items + other_items
+    for idx, item in enumerate(deep_items[:4], start=1):
+        key = item.fact_key or f"d{idx}"
+        payload = item.value or item.summary
+        if not payload:
             continue
-        group = _line_group(key)
-        cost = estimate_tokens(ln)
-        val_toks = tokenize_lexical(value)
-        utility = float(weights.get(group, 0.2))
-        if key in {"wm.surf", "p.snapshot", "t.recent"}:
-            utility += 0.20
-        if key.startswith("t.digest"):
-            utility += 0.35
-        elif key.startswith("t.ev"):
-            utility += 0.20
-        elif key.startswith("d"):
-            utility += 0.16
-        elif key.startswith("s"):
-            utility += 0.08
-        candidates.append(
-            {
-                "idx": idx,
-                "line": ln,
-                "key": key,
-                "group": group,
-                "cost": max(1, int(cost)),
-                "utility": max(0.05, utility),
-                "tokens": val_toks,
-            }
-        )
+        lines.append(f"d{idx}={_compact(key + ':' + payload, 160)}")
+    return lines
 
-    selected: List[Dict[str, Any]] = []
-    selected_ids: set[int] = set()
-    selected_token_sets: List[set[str]] = []
-    used_by_group = defaultdict(int)
 
-    def _can_fit(cost: int) -> bool:
-        nonlocal remain
-        return cost <= remain
+def _timeline_fallback_detail(plan: BrainRecallPlan, bundle: RetrievalBundle) -> str:
+    if bundle.timeline:
+        digest = " | ".join(_compact(str(item.get("summary", "")), 80) for item in bundle.timeline[:2] if item.get("summary"))
+        if digest:
+            return f"t.digest={digest}"
+    recent = bundle.anchors.get("t.recent", "")
+    if recent:
+        return f"t.digest={_compact(recent, 96)}"
+    for item in bundle.deep:
+        if (item.fact_key or "").startswith("timeline.") and (item.value or item.summary):
+            return f"t.digest={_compact(item.value or item.summary, 96)}"
+    return ""
 
-    def _select(c: Dict[str, Any]) -> bool:
-        nonlocal remain
-        if c["idx"] in selected_ids:
-            return False
-        if not _can_fit(int(c["cost"])):
-            return False
-        selected_ids.add(int(c["idx"]))
-        selected.append(c)
-        remain -= int(c["cost"])
-        used_by_group[str(c["group"])] += int(c["cost"])
-        if c["tokens"]:
-            selected_token_sets.append(set(c["tokens"]))
-        return True
 
-    must_keys = {"wm.surf", "p.snapshot"}
-    if time_scoped:
-        must_keys.add("t.range")
-        must_keys.add("t.digest")
+
+def _timeline_lines(plan: BrainRecallPlan, bundle: RetrievalBundle) -> list[str]:
+    lines: list[str] = []
+    recent = bundle.anchors.get("t.recent", "")
+    if recent:
+        lines.append(f"t.recent={_compact(recent, 180)}")
+    if plan.time_range is not None:
+        lines.append(f"t.range={plan.time_range.start_day}..{plan.time_range.end_day}")
+        lines.append(f"t.label={plan.time_range.label}")
+    if bundle.timeline:
+        digest = " | ".join(_compact(str(item.get("summary", "")), 80) for item in bundle.timeline[:4] if item.get("summary"))
+        if digest:
+            lines.append(f"t.digest={digest}")
+        for idx, item in enumerate(bundle.timeline[:4], start=1):
+            lines.append(f"t.ev{idx}={_compact(str(item.get('summary', '')), 100)}")
+    elif recent:
+        lines.append(f"t.digest={_compact(recent, 96)}")
+    return lines
+
+
+
+def _surface_lines(bundle: RetrievalBundle) -> list[str]:
+    lines: list[str] = []
+    surf = bundle.anchors.get("wm.surf", "")
+    if surf:
+        lines.append(f"wm.surf={_compact(surf, 140)}")
+    deep = bundle.anchors.get("wm.deep", "")
+    if deep:
+        lines.append(f"wm.deep={_compact(deep, 140)}")
+    for idx, item in enumerate(bundle.surface[:3], start=1):
+        lines.append(f"s{idx}={_compact(item.summary, 110)}")
+    return lines
+
+
+def _required_anchor_lines(plan: BrainRecallPlan, bundle: RetrievalBundle) -> tuple[list[str], list[str]]:
+    anchors_by_key: dict[str, str] = {}
+    surf = bundle.anchors.get("wm.surf", "")
+    if surf:
+        anchors_by_key["wm.surf"] = f"wm.surf={_compact(surf, 140)}"
+    snapshot = bundle.anchors.get("p.snapshot", "")
+    if snapshot:
+        anchors_by_key["p.snapshot"] = f"p.snapshot={_compact(snapshot, 160)}"
+    recent = bundle.anchors.get("t.recent", "")
+    if recent:
+        anchors_by_key["t.recent"] = f"t.recent={_compact(recent, 180)}"
+    if plan.intent.timeline >= max(plan.intent.profile, plan.intent.state + plan.intent.overview):
+        order = ["t.recent", "wm.surf", "p.snapshot"]
+    elif plan.intent.profile >= max(plan.intent.timeline, plan.intent.state + plan.intent.overview):
+        order = ["p.snapshot", "wm.surf", "t.recent"]
     else:
-        must_keys.add("t.recent")
-    for c in sorted(candidates, key=lambda x: x["idx"]):
-        if c["key"] in must_keys:
-            _select(c)
-
-    while remain > 0:
-        best = None
-        best_score = -1.0
-        for c in candidates:
-            if c["idx"] in selected_ids:
-                continue
-            cost = int(c["cost"])
-            if cost > remain:
-                continue
-            group = str(c["group"])
-            target = max(1, int(token_targets.get(group, 0)))
-            scarcity = 1.15 if used_by_group[group] < target else 0.88
-            novelty = 1.0
-            tks = c["tokens"]
-            if tks and selected_token_sets:
-                max_j = 0.0
-                for prev in selected_token_sets:
-                    inter = len(tks & prev)
-                    union = max(1, len(tks | prev))
-                    max_j = max(max_j, float(inter) / float(union))
-                if max_j >= 0.88:
-                    novelty = 0.38
-                elif max_j >= 0.76:
-                    novelty = 0.62
-            score = (float(c["utility"]) / float(cost)) * scarcity * novelty
-            if score > best_score:
-                best = c
-                best_score = score
-        if best is None or best_score <= 0.0:
-            break
-        _select(best)
-
-    selected_groups = {str(c["group"]) for c in selected}
-    if not ({"surface", "deep", "timeline"} & selected_groups):
-        for pref_group in ("timeline", "deep", "surface"):
-            chosen = None
-            for c in candidates:
-                if c["idx"] in selected_ids or str(c["group"]) != pref_group:
-                    continue
-                if _can_fit(int(c["cost"])):
-                    chosen = c
-                    break
-            if chosen is not None:
-                _select(chosen)
-                break
-
-    selected.sort(key=lambda x: x["idx"])
-    out.extend([str(c["line"]) for c in selected])
-    return fit_budget(out, budget)
+        order = ["wm.surf", "p.snapshot", "t.recent"]
+    primary = [anchors_by_key[order[0]]] if order and order[0] in anchors_by_key else []
+    secondary = [anchors_by_key[key] for key in order[1:] if key in anchors_by_key]
+    return primary, secondary
 
 
-def _looks_fragmented_payload(text: str) -> bool:
-    t = (text or "").strip()
-    if not t:
-        return True
-    low = t.lower()
-    if "thinkingsignature" in low:
-        return True
-    if re.search(r"\b(call_id|tool_call_id|function_call_output|tool_result)\b", low):
-        return True
-    if re.search(r'"\w+"\s*:\s*', t):
-        # likely raw JSON/object fragment; keep only short balanced snippets
-        if t.count("{") != t.count("}") or t.count("[") != t.count("]"):
-            return True
-        if len(t) > 120:
-            return True
-    if re.search(r"[:,]\s*$", t):
-        return True
-    return False
 
+def build_memctx(plan: BrainRecallPlan, bundle: RetrievalBundle, budget_tokens: int) -> str:
+    base_line = f"budget_tokens={budget_tokens}"
+    available = max(0, budget_tokens - _line_cost(base_line))
 
-def _compact_ctx_value(value: str, limit: int = 160) -> str:
-    v = strip_runtime_noise(strip_memq_blocks(value or ""))
-    v = re.sub(r"```[^`]*```", " ", v)
-    v = re.sub(r"\s+", " ", v).strip()
-    return v[:limit]
-
-
-def _finalize_memctx_lines(
-    *,
-    packed_lines: Sequence[str],
-    budget_tokens: int,
-    intent: Dict[str, float],
-    time_scoped: bool,
-    q_fact_keys: set[str],
-) -> List[str]:
-    base = [ln for ln in packed_lines if ln.strip()]
-    if not base:
-        return []
-    budget_line = base[0] if base[0].startswith("budget_tokens=") else f"budget_tokens={budget_tokens}"
-
-    kv_map: Dict[str, str] = {}
-    order: List[str] = []
-    for ln in base[1:]:
-        if "=" not in ln:
-            continue
-        k, v = _split_kv(ln)
-        if not k:
-            continue
-        if k.startswith("meta.") or k.startswith("memory.fact_"):
-            continue
-        if k in {"wm.deep"}:
-            continue
-        vv = _compact_ctx_value(v, 180)
-        if not vv or _looks_fragmented_payload(vv):
-            continue
-        if k not in kv_map:
-            order.append(k)
-        kv_map[k] = vv
-
-    if ("t.range" in kv_map) and ("t.digest" not in kv_map):
-        kv_map["t.digest"] = kv_map.get("t.recent", "none")
-        if "t.digest" not in order:
-            order.append("t.digest")
-
-    if time_scoped:
-        priority = ["t.range", "t.digest", "t.ev1", "t.ev2", "wm.surf", "t.recent", "d1", "g1", "s1"]
-    elif float(intent.get("profile", 0.0)) >= 0.45 or bool(q_fact_keys):
-        priority = ["d1", "g1", "s1", "p.snapshot", "wm.surf", "t.recent", "t.digest", "t.ev1"]
-    else:
-        priority = ["wm.surf", "s1", "d1", "t.recent", "t.digest", "t.ev1", "g1"]
-
-    chosen: List[str] = []
-    picked = set()
-    for k in priority:
-        v = kv_map.get(k)
-        if not v:
-            continue
-        chosen.append(f"{k}={v}")
-        picked.add(k)
-        if len(chosen) >= 6:
-            break
-    if len(chosen) < 3:
-        for k in order:
-            if k in picked:
-                continue
-            v = kv_map.get(k)
-            if not v:
-                continue
-            chosen.append(f"{k}={v}")
-            picked.add(k)
-            if len(chosen) >= 3:
-                break
-    if len(chosen) < 3:
-        fallback_defaults = [
-            "wm.surf=none",
-            "t.recent=none",
-            "ctx.task=none",
-        ]
-        for ln in fallback_defaults:
-            k, _ = _split_kv(ln)
-            if k in picked:
-                continue
-            chosen.append(ln)
-            picked.add(k)
-            if len(chosen) >= 3:
-                break
-    if len(chosen) > 6:
-        chosen = chosen[:6]
-
-    return fit_budget([budget_line, *chosen], budget_tokens)
-
-
-def build_memrules(db: MemqDB, budget_tokens: int) -> str:
-    lines: List[str] = [f"budget_tokens={budget_tokens}"]
-    fixed = [
-        "identity.precedence=memstyle",
-        "identity.no_generic_assistant_label=true",
-        "security.never_output_secrets=true",
-        "operation.allow_user_requested_local_config=true",
-    ]
-    allowed_prefixes = ("language.", "security.", "procedure.", "compliance.", "output.", "operation.", "identity.")
-    style_keys = {
-        "tone",
-        "persona",
-        "verbosity",
-        "firstPerson",
-        "callUser",
-        "prefix",
-        "speakingStyle",
-        "avoid",
-    }
-
-    selected_by_key: Dict[str, str] = {}
-    for row in db.list_rules():
-        body = _compact_ctx_value(str(row["body"] or ""), 220)
-        if not body or _looks_fragmented_payload(body):
-            continue
-        if "=" not in body:
-            continue
-        key, value = _split_kv(body)
-        if not key or not value:
-            continue
-        low_key = key.lower()
-        if low_key in {k.lower() for k in style_keys} or low_key.startswith("style."):
-            continue
-        if not low_key.startswith(allowed_prefixes):
-            continue
-        if low_key not in selected_by_key:
-            selected_by_key[low_key] = f"{key}={value}"
-
-    if "language.allowed" not in selected_by_key:
-        langs = extract_allowed_languages_from_rules(db)
-        selected_by_key["language.allowed"] = f"language.allowed={','.join(langs)}"
-
-    payload: List[str] = []
+    selected: list[str] = []
+    used = 0
     seen = set()
-    for ln in [*fixed, *selected_by_key.values()]:
-        if not ln or ln in seen:
+    primary_anchors, secondary_anchors = _required_anchor_lines(plan, bundle)
+    for line in primary_anchors:
+        if line in seen:
             continue
-        seen.add(ln)
-        payload.append(ln)
-        if len(payload) >= 6:  # target: 5-7 lines incl. budget
+        if _fits(line, available - used):
+            selected.append(line)
+            used += _line_cost(line)
+            seen.add(line)
+
+    sections = {
+        "profile": [line for line in _profile_lines(bundle) if line not in seen],
+        "timeline": [line for line in _timeline_lines(plan, bundle) if line not in seen],
+        "surface": [line for line in _surface_lines(bundle) if line not in seen],
+        "deep": [line for line in _deep_lines(bundle) if line not in seen],
+        "ephemeral": [],
+    }
+    dominant = _dominant_intent(plan)
+    if dominant == "timeline":
+        priority_timeline = next((line for line in sections["timeline"] if line.startswith("t.digest=") or line.startswith("t.ev")), "")
+        if priority_timeline and _fits(priority_timeline, available - used):
+            selected.append(priority_timeline)
+            used += _line_cost(priority_timeline)
+            seen.add(priority_timeline)
+            sections["timeline"] = [line for line in sections["timeline"] if line != priority_timeline]
+    requested = {
+        "profile": plan.budget_split.profile,
+        "timeline": plan.budget_split.timeline,
+        "surface": plan.budget_split.surface,
+        "deep": plan.budget_split.deep,
+        "ephemeral": plan.budget_split.ephemeral,
+    }
+    budgets = _scaled_budgets(requested, max(0, available - used))
+
+    leftovers: dict[str, list[str]] = {}
+    for key, lines in sections.items():
+        kept, remaining, consumed = _take_lines(lines, budgets.get(key, 0))
+        selected.extend(kept)
+        used += consumed
+        leftovers[key] = remaining
+
+    remaining_budget = max(0, available - used)
+    for key in _intent_priority(plan):
+        if remaining_budget <= 0:
             break
-
-    lines = fit_budget([lines[0], *payload], budget_tokens)
-    return "\n".join(lines)
-
-
-def build_memstyle(db: MemqDB, budget_tokens: int) -> str:
-    lines = [f"budget_tokens={budget_tokens}"]
-    style_lines = style_profile_lines(db)
-    rule_has_avoid = any(str(r["body"] or "").startswith("procedure.avoid_extra_suggestions=") for r in db.list_rules())
-    selected: List[str] = []
-    seen_keys = set()
-    for ln in style_lines:
-        if "=" not in ln:
+        if key not in leftovers:
             continue
-        k, v = _split_kv(ln)
-        if not k or not v:
+        kept, remaining, consumed = _take_lines(leftovers[key], remaining_budget)
+        selected.extend(kept)
+        leftovers[key] = remaining
+        remaining_budget -= consumed
+
+    for line in secondary_anchors:
+        if line in seen:
             continue
-        if rule_has_avoid and k == "avoid":
-            continue
-        if k in seen_keys:
-            continue
-        vv = _compact_ctx_value(v, 120)
-        if not vv or _looks_fragmented_payload(vv):
-            continue
-        selected.append(f"{k}={vv}")
-        seen_keys.add(k)
-        if len(selected) >= 5:  # target: around 5 lines
-            break
-    lines.extend(selected)
-    lines = fit_budget(lines, budget_tokens)
-    return "\n".join(lines)
+        if _fits(line, remaining_budget):
+            selected.append(line)
+            remaining_budget -= _line_cost(line)
+            seen.add(line)
+
+    selected = _filter_memctx_lines(selected)
+    if dominant == "timeline" and plan.time_range is not None and not any(line.startswith("t.digest=") or line.startswith("t.ev") for line in selected):
+        fallback_detail = _timeline_fallback_detail(plan, bundle)
+        if fallback_detail:
+            selected.append(fallback_detail)
+            current_budget = budget_tokens - _line_cost(base_line)
+            protected_prefixes = ("t.recent=", "t.range=", "t.label=", "t.digest=", "t.ev")
+            while sum(_line_cost(line) for line in selected) > current_budget:
+                removable_index = next(
+                    (index for index in range(len(selected) - 1, -1, -1) if not selected[index].startswith(protected_prefixes)),
+                    None,
+                )
+                if removable_index is None:
+                    break
+                selected.pop(removable_index)
+    if not selected:
+        return ""
+    final_lines = fit_lines([base_line] + selected, budget_tokens)
+    if len(final_lines) <= 1:
+        return ""
+    return "\n".join(final_lines)
 
 
-def build_memctx(
-    *,
-    db: MemqDB,
-    session_key: str,
-    prompt: str,
-    surface: Sequence[Dict[str, Any]],
-    deep: Sequence[Dict[str, Any]],
-    budget_tokens: int,
-    brain_plan: Dict[str, Any] | None = None,
-) -> str:
-    rule_like = re.compile(r"(language\\.allowed=|security\\.|procedure\\.|compliance\\.|rules\\.)", re.IGNORECASE)
-    style_like = re.compile(r"(tone=|persona=|verbosity=|speakingStyle=|style\\.)", re.IGNORECASE)
-    runtime_meta = re.compile(
-        r"(read\s+(?:agents|soul|identity|heartbeat)\.md|workspace context|follow it strictly|do not infer or repeat old tasks|memstyleを更新してください|memrulesを更新してください)",
-        re.IGNORECASE,
-    )
-    noise_meta = re.compile(
-        r"(\[\[reply_to_current\]\]|^u:\s*$|^a:\s*$|^x:\s*$)",
-        re.IGNORECASE,
-    )
-    durable_like = re.compile(
-        r"(覚えて|remember|必ず|always|ルール|方針|制約|callUser|一人称|language\.primary|検索は|search)",
-        re.IGNORECASE,
-    )
-    q_tokens = tokenize_lexical(prompt or "")
-    has_brain_plan = isinstance(brain_plan, dict)
-    if has_brain_plan:
-        intent = {"timeline": 0.0, "profile": 0.0, "state": 0.0, "fact_lookup": 0.0, "meta": 0.0, "overview": 0.0}
-        p_intent = brain_plan.get("intent") if isinstance(brain_plan.get("intent"), dict) else {}
-        for k in ("timeline", "profile", "state", "fact_lookup", "meta", "overview"):
-            try:
-                intent[k] = max(0.0, min(1.0, float(p_intent.get(k, 0.0))))
-            except Exception:
-                intent[k] = 0.0
-        q_fact_keys = {
-            str(fk or "").strip().lower()
-            for fk in (brain_plan.get("fact_keys") or [])
-            if str(fk or "").strip()
-        }
-    else:
-        q_fact_keys = set(infer_query_fact_keys(prompt))
-        intent = infer_intent(prompt)
 
-    def _lex_rel(s: str) -> float:
-        tks = set(re.findall(r"[a-z0-9_]{2,}", (s or "").lower()))
-        tks.update(re.findall(r"[ぁ-んァ-ヶ一-龠]{1,8}", s or ""))
-        if not q_tokens or not tks:
-            return 0.0
-        return float(len(q_tokens & tks)) / float(max(1, len(q_tokens)))
-
-    def _allow_ctx_line(s: str) -> bool:
-        t = (s or "").strip()
-        if not t:
-            return False
-        if contains_runtime_noise(t):
-            return False
-        # Structured factual lines are allowed even if they contain tokens like persona=.
-        if "| subject=" in t and "| conf=" in t:
-            return True
-        if rule_like.search(t):
-            return False
-        if style_like.search(t):
-            return False
-        if runtime_meta.search(t):
-            return False
-        if noise_meta.search(t):
-            return False
-        return True
-
-    def _clean_summary(s: str, limit: int = 180) -> str:
-        t = strip_runtime_noise(strip_memq_blocks(str(s or "")))
-        # Strip only the metadata header line; do not erase broad multiline content.
-        t = re.sub(r"Conversation info \(untrusted metadata\):[^\n]*", " ", t, flags=re.IGNORECASE)
-        t = re.sub(r"```[^`]*```", " ", t)
-        t = re.sub(r"https?://\S+", " ", t)
-        t = re.sub(r"\bsha256:[0-9a-f]{16,}\b", " ", t, flags=re.IGNORECASE)
-        t = re.sub(r"/Users/\S+", " ", t)
-        t = re.sub(r"(?:^|\|)\s*x:[^|]+", " ", t, flags=re.IGNORECASE)
-        t = re.sub(r"\[\[reply_to_current\]\]", " ", t, flags=re.IGNORECASE)
-        t = re.sub(r"\*{1,3}", "", t)
-        t = re.sub(r"`+", "", t)
-        t = re.sub(r"を優先する", "優先", t)
-        t = re.sub(r"を優先して", "優先", t)
-        t = re.sub(r"優先で進める", "優先", t)
-        t = re.sub(r"\s+", " ", t).strip()
-        t = re.sub(r"(?:\s*\|\s*)?了解(?:しました)?[。.!！?？]?$", "", t).strip()
-        if t[:2].lower() in {"u:", "a:", "x:"}:
-            t = t[2:].strip()
-        if not t:
-            return ""
-        if t.lower().startswith("x:"):
-            return ""
-        return t[:limit]
-
-    seen_sig: set[str] = set()
-    seen_token_sets: List[set[str]] = []
-    seen_values: List[str] = []
-
-    def _tokset(v: str) -> set[str]:
-        return tokenize_lexical(v)
-
-    def _push_kv(lines_ref: List[str], key: str, value: str, *, dedupe_by_value: bool = True) -> bool:
-        v = " ".join((value or "").split()).strip()
-        if not v:
-            return False
-        if dedupe_by_value:
-            sig = re.sub(r"[^a-z0-9ぁ-んァ-ヶ一-龠]+", "", v.lower())
-            if len(sig) < 6:
-                sig = v.lower()
-            if sig in seen_sig:
-                return False
-            low = v.lower()
-            for prev in seen_values:
-                if len(low) >= 20 and len(prev) >= 20 and (low in prev or prev in low):
-                    return False
-            ts = _tokset(v)
-            if ts:
-                for prev in seen_token_sets:
-                    inter = len(ts & prev)
-                    union = max(1, len(ts | prev))
-                    if float(inter) / float(union) >= 0.78:
-                        return False
-                seen_token_sets.append(ts)
-            seen_sig.add(sig)
-            seen_values.append(low)
-        lines_ref.append(f"{key}={v}")
-        return True
-
-    def _profile_snapshot_line() -> str:
-        return str(db.get_profile_snapshot(session_key, max_parts=8) or "")[:220]
-
-    def _recent_timeline_line() -> str:
-        now_ts = int(time.time())
-        end_day = day_key_from_ts(now_ts)
-        start_day = day_key_from_ts(now_ts - 2 * 86400)
-        rows = db.list_daily_digests_range(
-            session_key=session_key,
-            start_day=start_day,
-            end_day=end_day,
-            scope="session",
-            limit=6,
-            include_global=True,
-        )
-        parts: List[str] = []
-        seen_days = set()
-        for r in rows:
-            dk = str(r["day_key"] or "")
-            if not dk or dk in seen_days:
-                continue
-            seen_days.add(dk)
-            compact = _clean_summary(str(r["compact_text"] or "").replace("\n", " | "), 120)
-            if not compact:
-                continue
-            parts.append(f"{dk}:{compact}")
-            if len(parts) >= 2:
-                break
-        if parts:
-            return " || ".join(parts)[:220]
-        ev = db.list_events_range(
-            session_key=session_key,
-            start_day=start_day,
-            end_day=end_day,
-            limit=16,
-            include_global=True,
-        )
-        ev_parts: List[str] = []
-        for r in ev:
-            summary = _clean_summary(str(r["summary"] or ""), 90)
-            if not summary:
-                continue
-            dk = str(r["day_key"] or "")
-            kind = str(r["kind"] or "chat")
-            ev_parts.append(f"{dk}:{kind}:{summary}")
-            if len(ev_parts) >= 2:
-                break
-        return " || ".join(ev_parts)[:220]
-
-    lines: List[str] = [f"budget_tokens={budget_tokens}"]
-    timeline_range = None
-    if has_brain_plan:
-        tr = brain_plan.get("time_range")
-        if isinstance(tr, dict):
-            sd = str(tr.get("startDay") or "").strip()
-            ed = str(tr.get("endDay") or "").strip()
-            label = str(tr.get("label") or "brain")
-            if sd and ed:
-                from .timeline import TimelineRange  # local import to avoid cycle at module load
-                if _is_day_key(sd) and _is_day_key(ed):
-                    timeline_range = TimelineRange(start_day=sd, end_day=ed, label=label, explicit=True)
-    if timeline_range is None:
-        timeline_range = detect_timeline_range(prompt)
-    time_scoped = bool(timeline_range and timeline_range.explicit)
-    query_memory_overview = bool(
-        intent["overview"] >= 0.55
-        or (
-            not has_brain_plan
-            and re.search(r"(記憶|覚えてる|これまで|要点|summary|what.*remember|memory overview)", prompt, re.IGNORECASE)
-        )
-    )
-    need_meta = bool(
-        intent["meta"] >= 0.60
-        or (not has_brain_plan and re.search(r"(件数|count|pool|stats?)", prompt, re.IGNORECASE))
-    )
-    # Tiny observability hints to avoid "memory is only 1-2 lines" misconceptions.
-    surface_pool = len(db.list_memory_items("surface", session_key, limit=5000))
-    deep_pool = len(db.list_memory_items("deep", session_key, limit=5000))
-    if need_meta:
-        _push_kv(lines, "meta.surface_pool", str(surface_pool), dedupe_by_value=False)
-        _push_kv(lines, "meta.deep_pool", str(deep_pool), dedupe_by_value=False)
-        deep_verified = len([x for x in deep if bool(x.get("verification_ok", True))])
-        _push_kv(lines, "meta.deep_verified", str(deep_verified), dedupe_by_value=False)
-
-    def _push_timeline_block() -> None:
-        if not timeline_range:
-            return
-        digest_day_cap = 2 if time_scoped else 4
-        digest_item_limit = 120 if time_scoped else 180
-        event_cap = 6 if time_scoped else 4
-        event_item_limit = 96 if time_scoped else 120
-        _push_kv(lines, "t.range", f"{timeline_range.start_day}..{timeline_range.end_day}", dedupe_by_value=False)
-        _push_kv(lines, "t.label", timeline_range.label, dedupe_by_value=False)
-        dg_rows = db.list_daily_digests_range(
-            session_key=session_key,
-            start_day=timeline_range.start_day,
-            end_day=timeline_range.end_day,
-            scope="session",
-            limit=14,
-            include_global=True,
-        )
-        digest_parts: List[str] = []
-        seen_days = set()
-        for r in dg_rows:
-            day_key = str(r["day_key"] or "")
-            if not day_key or day_key in seen_days:
-                continue
-            seen_days.add(day_key)
-            compact = _clean_summary(str(r["compact_text"] or "").replace("\n", " | "), digest_item_limit)
-            if not compact:
-                continue
-            digest_parts.append(f"{day_key}:{compact}")
-            if len(digest_parts) >= digest_day_cap:
-                break
-        if digest_parts:
-            _push_kv(lines, "t.digest", " || ".join(digest_parts), dedupe_by_value=False)
-
-        ev_rows = db.list_events_range(
-            session_key=session_key,
-            start_day=timeline_range.start_day,
-            end_day=timeline_range.end_day,
-            limit=64,
-            include_global=True,
-        )
-        ev_count = 0
-        ev_seen = set()
-        for r in ev_rows:
-            if ev_count >= event_cap:
-                break
-            day_key = str(r["day_key"] or "")
-            actor = str(r["actor"] or "assistant")
-            kind = str(r["kind"] or "chat")
-            summary = _clean_summary(str(r["summary"] or ""), event_item_limit)
-            if not summary:
-                continue
-            sig = summary.lower()
-            if sig in ev_seen:
-                continue
-            ev_seen.add(sig)
-            ev_count += 1
-            _push_kv(lines, f"t.ev{ev_count}", f"{day_key} {actor}/{kind}: {summary}")
-
-        if not digest_parts and ev_count == 0:
-            fallback = _clean_summary(_recent_timeline_line(), digest_item_limit)
-            _push_kv(lines, "t.digest", fallback or "none", dedupe_by_value=False)
-
-    # For explicit time-scoped queries, prioritize timeline recall before anchors.
-    if time_scoped:
-        _push_timeline_block()
-
-    # Anchor lines: always keep minimum continuity, but avoid over-injecting
-    # when query intent does not require heavy memory context.
-    # In explicit time-scoped mode keep anchors shorter so t.* survives budget trimming.
-    anchor_limit = 80 if time_scoped else 120
-    convsurf_anchor = _clean_summary((db.get_conv_summary(session_key, "surface_only") or "").replace(chr(10), " | "), 90 if time_scoped else 110)
-    convdeep_anchor = _clean_summary((db.get_conv_summary(session_key, "deep") or "").replace(chr(10), " | "), 90 if time_scoped else 110)
-    profile_anchor = _clean_summary(_profile_snapshot_line(), anchor_limit)
-    recent_anchor = _clean_summary(_recent_timeline_line(), anchor_limit)
-
-    need_profile_anchor = True
-    need_timeline_anchor = bool(time_scoped or intent["timeline"] >= 0.25 or query_memory_overview)
-    need_deep_anchor = bool(intent["overview"] >= 0.55 or intent["fact_lookup"] >= 0.45 or bool(q_fact_keys))
-
-    _push_kv(lines, "wm.surf", convsurf_anchor or "none", dedupe_by_value=False)
-    if need_deep_anchor:
-        _push_kv(lines, "wm.deep", convdeep_anchor or "none", dedupe_by_value=False)
-    if need_profile_anchor:
-        _push_kv(lines, "p.snapshot", profile_anchor or "unknown", dedupe_by_value=False)
-    if need_timeline_anchor:
-        _push_kv(lines, "t.recent", recent_anchor or "none", dedupe_by_value=False)
-
-    # Non-explicit timeline prompts can still attach compact t.* context after anchors.
-    if timeline_range and not time_scoped:
-        _push_timeline_block()
-
-    # Stable profile hints (non-style/rule) for deterministic long-horizon behavior.
-    profile = db.get_preference_profile()
-    p_count = 0
-    for k in ("language.primary", "policy.retention.default", "policy.ttl.default_days"):
-        pv = profile.get(k)
-        if not pv:
-            continue
-        if float(pv.get("confidence", 0.0)) < 0.55:
-            continue
-        p_count += 1
-        _push_kv(lines, f"p{p_count}", f"{k}:{pv.get('value')}", dedupe_by_value=False)
-        if p_count >= 3:
-            break
-
-    # Keep surface/deep memory facts before long summaries so they survive budget trimming.
-    s_count = 0
-    if q_fact_keys:
-        # Keep at least one surface clue so profile/fact questions don't collapse
-        # into "no memory" when deep verification gets strict.
-        s_limit = 1
-    else:
-        s_limit = 1 if query_memory_overview else 2
-    for item in surface[:12]:
-        if s_count >= s_limit:
-            break
-        summary = _clean_summary(item.get("summary", ""), 140)
-        rel = _lex_rel(summary)
-        key_overlap = int(item.get("key_overlap", 0) or 0)
-        has_intent_match = bool(q_fact_keys) and key_overlap > 0
-        if _allow_ctx_line(summary) and (
-            has_intent_match
-            or rel >= 0.10
-            or (query_memory_overview and durable_like.search(summary))
-        ):
-            s_count += 1
-            _push_kv(lines, f"s{s_count}", summary)
-
-    d_count = 0
-    profile_query = intent["profile"] >= 0.45
-    if query_memory_overview:
-        d_limit = 3
-    else:
-        d_limit = 4 if len(q_fact_keys) >= 3 else (3 if len(q_fact_keys) >= 2 else 2)
-    used_deep_fact_keys: set[str] = set()
-    for item in deep[:16]:
-        if d_count >= d_limit:
-            break
-        summary = _clean_summary(item.get("summary", ""), 140)
-        rel = _lex_rel(summary)
-        key_overlap = int(item.get("key_overlap", 0))
-        tag_overlap = int(item.get("tag_overlap", 0))
-        row_keys = set(item.get("fact_keys") or [])
-        verification_ok = bool(item.get("verification_ok", True))
-        verification_score = float(item.get("verification_score", 0.0) or 0.0)
-        fact_conf = float(item.get("fact_confidence", 0.0) or 0.0)
-        fact_ts = int(item.get("fact_ts", 0) or 0)
-        src = str(item.get("source", "") or "")
-        overlap_keys = row_keys & q_fact_keys if q_fact_keys else set()
-        if overlap_keys and overlap_keys.issubset(used_deep_fact_keys):
-            continue
-        has_intent_match = bool(q_fact_keys) and tag_overlap > 0
-        # Pre-response verification gate:
-        # for intented factual recalls, avoid low-confidence / weak-evidence deep rows.
-        weak_rel_gate = 0.08 if profile_query else 0.18
-        if bool(q_fact_keys) and not verification_ok and not has_intent_match and rel < weak_rel_gate:
-            continue
-        verify_gate = 0.35 if profile_query else 0.46
-        if bool(q_fact_keys) and has_intent_match and verification_score < verify_gate:
-            continue
-        no_tag_rel_gate = 0.06 if profile_query else 0.12
-        if bool(q_fact_keys) and not has_intent_match and rel < no_tag_rel_gate:
-            continue
-        if _allow_ctx_line(summary) and (rel >= 0.05 or durable_like.search(summary) or has_intent_match):
-            if has_intent_match:
-                ts_s = time.strftime("%Y-%m-%d", time.gmtime(fact_ts)) if fact_ts > 0 else "na"
-                if "src=" not in summary:
-                    summary = f"{summary} | src={src or 'na'} | ts={ts_s} | conf={max(fact_conf, verification_score):.2f}"
-            if not verification_ok and "conf=" not in summary:
-                summary = f"{summary} | conf={verification_score:.2f}"
-            d_count += 1
-            _push_kv(lines, f"d{d_count}", summary)
-            if overlap_keys:
-                used_deep_fact_keys.update(overlap_keys)
-    if d_count == 0 and len(deep) > 0:
-        for item in deep[:16]:
-            fallback = _clean_summary(item.get("summary", ""), 140)
-            key_overlap = int(item.get("key_overlap", 0))
-            tag_overlap = int(item.get("tag_overlap", 0))
-            verification_ok = bool(item.get("verification_ok", True))
-            verification_score = float(item.get("verification_score", 0.0) or 0.0)
-            fact_conf = float(item.get("fact_confidence", 0.0) or 0.0)
-            fact_ts = int(item.get("fact_ts", 0) or 0)
-            src = str(item.get("source", "") or "")
-            if bool(q_fact_keys) and tag_overlap == 0 and not profile_query:
-                continue
-            if bool(q_fact_keys) and not verification_ok and tag_overlap == 0 and not profile_query:
-                continue
-            if fallback and _allow_ctx_line(fallback):
-                if bool(q_fact_keys):
-                    ts_s = time.strftime("%Y-%m-%d", time.gmtime(fact_ts)) if fact_ts > 0 else "na"
-                    if "src=" not in fallback:
-                        fallback = f"{fallback} | src={src or 'na'} | ts={ts_s} | conf={max(fact_conf, verification_score):.2f}"
-                if not verification_ok and "conf=" not in fallback:
-                    fallback = f"{fallback} | conf={verification_score:.2f}"
-                _push_kv(lines, "d1", fallback)
-                d_count = 1
-                break
-
-    # Always carry a tiny slice of durable global memory so long-term identity/preferences survive.
-    durable_rows = db.list_memory_items("deep", "global", limit=256)
-    g_count = 0
-    g_limit = 1 if (query_memory_overview or profile_query or bool(q_fact_keys) or d_count == 0) else 0
-    for row in durable_rows:
-        if g_count >= g_limit:
-            break
-        if str(row["session_key"]) != "global":
-            continue
-        try:
-            tags = json.loads(str(row["tags"] or "{}"))
-        except Exception:
-            tags = {}
-        kind = str(tags.get("kind", ""))
-        # Keep global lines strictly structured/fact-bearing to avoid free-text drift.
-        if kind not in {"durable_global_fact", "structured_fact"}:
-            continue
-        clean = _clean_summary(row["summary"], 120)
-        rel = _lex_rel(clean)
-        if not clean or not _allow_ctx_line(clean):
-            continue
-        if q_fact_keys:
-            try:
-                tags = json.loads(str(row["tags"] or "{}"))
-            except Exception:
-                tags = {}
-            row_keys = set(tags.get("fact_keys") or [])
-            if (q_fact_keys & row_keys) == set() and rel < 0.08:
-                continue
-        if rel < 0.05 and not durable_like.search(clean):
-            continue
-        g_count += 1
-        _push_kv(lines, f"g{g_count}", clean)
-
-    if time_scoped:
-        _push_kv(lines, "scope.time", "explicit", dedupe_by_value=False)
-    elif d_count == 0 and not q_fact_keys:
-        convsurf = db.get_conv_summary(session_key, "surface_only")
-        if convsurf:
-            clean = _clean_summary(convsurf.replace(chr(10), " | "), 120)
-            if clean and (_lex_rel(clean) >= 0.08 or query_memory_overview):
-                _push_kv(lines, "convsurf", clean)
-
-        convdeep = db.get_conv_summary(session_key, "deep")
-        if convdeep:
-            clean = _clean_summary(convdeep.replace(chr(10), " | "), 120)
-            if clean and (_lex_rel(clean) >= 0.08 or query_memory_overview):
-                _push_kv(lines, "convdeep", clean)
-    elif d_count == 0 and q_fact_keys and g_count == 0:
-        _push_kv(lines, "memory.fact_status", "weak_or_missing", dedupe_by_value=False)
-
-    # Mark ephemeral only for directly relevant prompts.
-    plan_budget_split = brain_plan.get("budget_split") if has_brain_plan and isinstance(brain_plan.get("budget_split"), dict) else {}
-    eph_budget = 0
-    try:
-        eph_budget = int(plan_budget_split.get("ephemeral", 0))
-    except Exception:
-        eph_budget = 0
-    if eph_budget > 0 or (not has_brain_plan and re.search(r"(直近|recent|temporary|一時|ephemeral)", prompt, re.IGNORECASE)):
-        eph = db.list_memory_items("ephemeral", session_key, limit=2)
-        for idx, row in enumerate(eph):
-            summary = str(row["summary"])[:120].replace("\n", " ")
-            if _lex_rel(summary) > 0.0:
-                _push_kv(lines, f"e{idx+1}", summary)
-
-    base_lines = lines[:2]
-    payload_lines = lines[2:]
-    packed = _pack_memctx_payload(
-        base_lines=base_lines,
-        payload_lines=payload_lines,
-        budget_tokens=budget_tokens,
-        intent=intent,
-        time_scoped=time_scoped,
-        query_memory_overview=query_memory_overview,
-        budget_split=(plan_budget_split if plan_budget_split else None),
-    )
-    finalized = _finalize_memctx_lines(
-        packed_lines=packed,
-        budget_tokens=budget_tokens,
-        intent=intent,
-        time_scoped=time_scoped,
-        q_fact_keys=q_fact_keys,
-    )
-    return "\n".join(finalized)
+def compose_blocks(memrules: str, memstyle: str, memctx: str) -> str:
+    blocks: list[str] = []
+    if memrules.strip():
+        blocks.append(f"<MEMRULES v1>\n{memrules}\n</MEMRULES>")
+    if memstyle.strip():
+        blocks.append(f"<MEMSTYLE v1>\n{memstyle}\n</MEMSTYLE>")
+    if memctx.strip():
+        blocks.append(f"<MEMCTX v1>\n{memctx}\n</MEMCTX>")
+    return "\n\n".join(blocks)

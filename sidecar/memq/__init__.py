@@ -1,4 +1,4 @@
-from .config import MemqConfig, load_config
+from .config import Config, load_config
 from .db import MemqDB
 
-__all__ = ["MemqConfig", "load_config", "MemqDB"]
+__all__ = ["Config", "load_config", "MemqDB"]

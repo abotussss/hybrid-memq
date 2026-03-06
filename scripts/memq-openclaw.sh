@@ -3,13 +3,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PLUGIN_ID="openclaw-memory-memq"
-PLUGIN_PATH="$ROOT_DIR/plugin/openclaw-memory-memq"
+PLUGIN_DIR="$ROOT_DIR/plugin/openclaw-memory-memq"
 STATE_DIR="$ROOT_DIR/.memq"
-STATE_FILE="$STATE_DIR/openclaw_switch_state.json"
+STATE_FILE="$STATE_DIR/openclaw_plugins_backup.json"
 PID_FILE="$STATE_DIR/minisidecar.pid"
-SIDECAR_ENV="$STATE_DIR/sidecar.env"
-SIDECAR_LOG="/tmp/memq-v2-sidecar.log"
-SUPERVISOR_LOG="/tmp/memq-v2-sidecar-supervisor.log"
+ENV_FILE="$STATE_DIR/sidecar.env"
+SIDECAR_LOG="$STATE_DIR/minisidecar.log"
 
 mkdir -p "$STATE_DIR"
 
@@ -18,195 +17,11 @@ need_cmd() {
 }
 
 need_cmd openclaw
-need_cmd python3
 need_cmd pnpm
+need_cmd python3
+need_cmd curl
 
-print_banner() {
-  cat <<'EOF'
- __  __ ______ __  __  ___
-|  \/  |  ____|  \/  |/ _ \
-| \  / | |__  | \  / | | | |
-| |\/| |  __| | |\/| | | | |
-| |  | | |____| |  | | |_| |
-|_|  |_|______|_|  |_|\___/
-Hybrid MEMQ v2 :: MEMRULES + MEMSTYLE + MEMCTX
-EOF
-}
-
-get_plugins_json() {
-  openclaw config get plugins 2>/dev/null || echo '{}'
-}
-
-save_switch_state() {
-  local before_json="$1"
-  python3 - "$STATE_FILE" "$PLUGIN_ID" "$before_json" <<'PY'
-import json,sys,time,os
-path,pid,raw=sys.argv[1],sys.argv[2],sys.argv[3]
-try: obj=json.loads(raw)
-except Exception: obj={}
-out={
-  "saved_at": int(time.time()),
-  "plugin_id": pid,
-  "plugins_before": obj,
-  "previous_memory_slot": ((obj or {}).get("slots") or {}).get("memory"),
-}
-os.makedirs(os.path.dirname(path), exist_ok=True)
-with open(path, "w", encoding="utf-8") as f:
-  json.dump(out, f, ensure_ascii=False, indent=2)
-PY
-}
-
-build_enabled_plugins_json() {
-  local before_json="$1"
-  python3 - "$PLUGIN_ID" "$PLUGIN_PATH" "$before_json" <<'PY'
-import json,sys
-pid,pp,raw=sys.argv[1],sys.argv[2],sys.argv[3]
-try: obj=json.loads(raw)
-except Exception: obj={}
-if not isinstance(obj,dict): obj={}
-allow=obj.get("allow") or []
-if pid not in allow: allow.append(pid)
-load=obj.get("load") or {}
-paths=load.get("paths") or []
-if pp not in paths: paths.append(pp)
-load["paths"]=paths
-entries=obj.get("entries") or {}
-entries.setdefault(pid,{})
-entries[pid]["enabled"]=True
-slots=obj.get("slots") or {}
-slots["memory"]=pid
-obj["allow"]=allow
-obj["load"]=load
-obj["entries"]=entries
-obj["slots"]=slots
-print(json.dumps(obj,separators=(",",":")))
-PY
-}
-
-set_plugin_cfg_key() {
-  local key="$1"
-  local value_json="$2"
-  local cur next
-  cur="$(openclaw config get "plugins.entries.$PLUGIN_ID.config" 2>/dev/null || echo '{}')"
-  next="$(python3 - "$cur" "$key" "$value_json" <<'PY'
-import json,sys
-raw,key,val_raw=sys.argv[1],sys.argv[2],sys.argv[3]
-try: obj=json.loads(raw)
-except Exception: obj={}
-if not isinstance(obj,dict): obj={}
-try:
-  val=json.loads(val_raw)
-except Exception:
-  val=val_raw
-obj[key]=val
-print(json.dumps(obj,separators=(",",":")))
-PY
-)"
-  openclaw config set "plugins.entries.$PLUGIN_ID.config" "$next" >/dev/null
-}
-
-cmd_install() {
-  print_banner
-  pnpm --dir "$PLUGIN_PATH" install >/dev/null
-  pnpm --dir "$PLUGIN_PATH" build >/dev/null
-  openclaw plugins install -l "$PLUGIN_PATH" >/dev/null
-  echo "installed: $PLUGIN_ID"
-}
-
-cmd_reset_config() {
-  local cfg
-  cfg="$(python3 - <<'PY'
-import json
-cfg = {
-  "memq.sidecarUrl": "http://127.0.0.1:7781",
-  "memq.workspaceRoot": "__ROOT__",
-  "memq.brain.mode": "required",
-  "memq.brain.provider": "ollama",
-  "memq.brain.baseUrl": "http://127.0.0.1:11434",
-  "memq.brain.model": "gpt-oss:20b",
-  "memq.brain.keepAlive": "30m",
-  "memq.brain.timeoutMs": 60000,
-  "memq.brain.maxTokens": 256,
-  "memq.brain.autoRestart": True,
-  "memq.brain.restartCooldownSec": 30,
-  "memq.brain.restartWaitMs": 2000,
-  "memq.budgets.memctxTokens": 120,
-  "memq.budgets.rulesTokens": 80,
-  "memq.budgets.styleTokens": 120,
-  "memq.total.maxInputTokens": 4200,
-  "memq.total.reserveTokens": 1800,
-  "memq.total.capSafetyRatio": 0.72,
-  "memq.recent.maxTokens": 2600,
-  "memq.recent.minKeepMessages": 4,
-  "memq.retrieval.topK": 5,
-  "memq.retrieval.surfaceThreshold": 0.85,
-  "memq.retrieval.deepEnabled": True,
-  "memq.archive.enabled": True,
-  "memq.archive.maxFileBytes": 8000000,
-  "memq.archive.maxFiles": 30,
-  "memq.degraded.enabled": False,
-  "memq.security.primaryRulesEnabled": True,
-  "memq.security.llmAuditEnabled": False,
-  "memq.security.llmAuditThreshold": 0.2,
-  "memq.security.blockThreshold": 0.85,
-  "memq.style.enabled": True,
-  "memq.style.maxBudgetTokens": 120,
-  "memq.idle.enabled": True,
-  "memq.idle.idleSeconds": 120,
-}
-print(json.dumps(cfg, separators=(',',':')))
-PY
-)"
-  cfg="${cfg/__ROOT__/$ROOT_DIR}"
-  openclaw config set "plugins.entries.$PLUGIN_ID.config" "$cfg" >/dev/null
-  echo "plugin config reset to v2 defaults"
-}
-
-cmd_enable() {
-  local before merged
-  before="$(get_plugins_json)"
-  save_switch_state "$before"
-  merged="$(build_enabled_plugins_json "$before")"
-  openclaw config set plugins "$merged" >/dev/null
-  echo "enabled memory slot: $PLUGIN_ID"
-}
-
-cmd_disable() {
-  if [[ ! -f "$STATE_FILE" ]]; then
-    echo "no saved state: $STATE_FILE" >&2
-    exit 1
-  fi
-  local restore prev_slot
-  restore="$(python3 - "$STATE_FILE" <<'PY'
-import json,sys
-st=json.load(open(sys.argv[1],"r",encoding="utf-8"))
-print(json.dumps(st.get("plugins_before",{}),separators=(",",":")))
-PY
-)"
-  openclaw config set plugins "$restore" >/dev/null
-  prev_slot="$(python3 - "$STATE_FILE" <<'PY'
-import json,sys
-st=json.load(open(sys.argv[1],"r",encoding="utf-8"))
-v=st.get("previous_memory_slot")
-print("" if v is None else str(v))
-PY
-)"
-  if [[ -n "$prev_slot" ]]; then
-    openclaw config set plugins.slots.memory "$prev_slot" >/dev/null || true
-  fi
-  echo "restored previous plugins config"
-}
-
-load_sidecar_env() {
-  if [[ -f "$SIDECAR_ENV" ]]; then
-    while IFS='=' read -r k v; do
-      [[ -z "${k:-}" ]] && continue
-      export "$k=$v"
-    done < "$SIDECAR_ENV"
-  fi
-}
-
-choose_sidecar_python() {
+choose_python() {
   if [[ -x "$ROOT_DIR/sidecar/.venv/bin/python" ]]; then
     echo "$ROOT_DIR/sidecar/.venv/bin/python"
   else
@@ -214,366 +29,203 @@ choose_sidecar_python() {
   fi
 }
 
-kill_port_7781() {
+current_plugins_json() {
+  openclaw config get plugins 2>/dev/null || echo '{}'
+}
+
+save_plugins_backup() {
+  current_plugins_json > "$STATE_FILE"
+}
+
+write_profile_env() {
+  local mode="$1"
+  local degraded="false"
+  if [[ "$mode" == "brain-optional" ]]; then
+    degraded="true"
+  fi
+  cat > "$ENV_FILE" <<ENV
+export MEMQ_ROOT='$ROOT_DIR'
+export MEMQ_DB_PATH='.memq/memq_v3.sqlite3'
+export MEMQ_HOST='127.0.0.1'
+export MEMQ_PORT='7781'
+export MEMQ_TIMEZONE='Asia/Tokyo'
+export MEMQ_BRAIN_ENABLED='1'
+export MEMQ_BRAIN_MODE='$mode'
+export MEMQ_BRAIN_PROVIDER='ollama'
+export MEMQ_BRAIN_BASE_URL='http://127.0.0.1:11434'
+export MEMQ_BRAIN_MODEL='gpt-oss:20b'
+export MEMQ_BRAIN_KEEP_ALIVE='30m'
+export MEMQ_BRAIN_TIMEOUT_MS='60000'
+export MEMQ_BRAIN_MAX_TOKENS='640'
+export MEMQ_BRAIN_CONCURRENT='1'
+export MEMQ_MEMCTX_TOKENS='120'
+export MEMQ_RULES_TOKENS='80'
+export MEMQ_STYLE_TOKENS='120'
+export MEMQ_TOTAL_MAX_INPUT_TOKENS='4200'
+export MEMQ_TOTAL_RESERVE_TOKENS='1800'
+export MEMQ_RECENT_TOKENS='2600'
+export MEMQ_RECENT_MIN_KEEP_MESSAGES='4'
+export MEMQ_TOP_K='5'
+export MEMQ_ARCHIVE_ENABLED='1'
+export MEMQ_IDLE_ENABLED='1'
+export MEMQ_IDLE_SECONDS='120'
+export MEMQ_AUDIT_PRIMARY_ENABLED='1'
+export MEMQ_AUDIT_SECONDARY_ENABLED='0'
+export MEMQ_AUDIT_RISK_THRESHOLD='0.35'
+export MEMQ_AUDIT_BLOCK_THRESHOLD='0.85'
+export MEMQ_DEGRADED_ENABLED='$degraded'
+ENV
+}
+
+load_env_file() {
+  if [[ -f "$ENV_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$ENV_FILE"
+    set +a
+  fi
+}
+
+set_plugin_profile() {
+  local mode="$1"
+  local degraded="false"
+  if [[ "$mode" == "brain-optional" ]]; then
+    degraded="true"
+  fi
+  local cfg
+  cfg="$(cat <<JSON
+{"memq.sidecarUrl":"http://127.0.0.1:7781","memq.workspaceRoot":"$ROOT_DIR","memq.brain.mode":"$mode","memq.brain.provider":"ollama","memq.brain.baseUrl":"http://127.0.0.1:11434","memq.brain.model":"gpt-oss:20b","memq.brain.keepAlive":"30m","memq.brain.timeoutMs":60000,"memq.budgets.memctxTokens":120,"memq.budgets.rulesTokens":80,"memq.budgets.styleTokens":120,"memq.total.maxInputTokens":4200,"memq.total.reserveTokens":1800,"memq.recent.maxTokens":2600,"memq.recent.minKeepMessages":4,"memq.retrieval.topK":5,"memq.degraded.enabled":$degraded,"memq.style.enabled":true,"memq.idle.enabled":true,"memq.security.primaryRulesEnabled":true,"memq.security.llmAuditEnabled":false}
+JSON
+)"
+  openclaw config set "plugins.entries.$PLUGIN_ID.config" "$cfg" >/dev/null
+}
+
+enable_plugin_slot() {
+  local before merged
+  before="$(current_plugins_json)"
+  save_plugins_backup
+  merged="$(python3 - <<PY
+import json
+pid = ${PLUGIN_ID@Q}
+pp = ${PLUGIN_DIR@Q}
+raw = ${before@Q}
+obj = json.loads(raw) if raw.strip() else {}
+if not isinstance(obj, dict):
+    obj = {}
+allow = obj.get("allow") or []
+if pid not in allow:
+    allow.append(pid)
+load = obj.get("load") or {}
+paths = load.get("paths") or []
+if pp not in paths:
+    paths.append(pp)
+load["paths"] = paths
+entries = obj.get("entries") or {}
+entry = entries.get(pid) or {}
+entry["enabled"] = True
+entries[pid] = entry
+slots = obj.get("slots") or {}
+slots["memory"] = pid
+obj["allow"] = allow
+obj["load"] = load
+obj["entries"] = entries
+obj["slots"] = slots
+print(json.dumps(obj, separators=(",", ":")))
+PY
+)"
+  openclaw config set plugins "$merged" >/dev/null
+}
+
+restore_plugin_slot() {
+  if [[ -f "$STATE_FILE" ]]; then
+    openclaw config set plugins "$(cat "$STATE_FILE")" >/dev/null
+  fi
+}
+
+stop_sidecar() {
+  if [[ -f "$PID_FILE" ]]; then
+    kill "$(cat "$PID_FILE")" 2>/dev/null || true
+    rm -f "$PID_FILE"
+  fi
   local pids
   pids="$(lsof -nP -iTCP:7781 -sTCP:LISTEN -t 2>/dev/null || true)"
   if [[ -n "$pids" ]]; then
-    for pid in $pids; do
-      kill "$pid" 2>/dev/null || true
-    done
-    sleep 1
+    for pid in $pids; do kill "$pid" 2>/dev/null || true; done
   fi
 }
 
-cmd_start_sidecar() {
-  if curl -fsS http://127.0.0.1:7781/health >/dev/null 2>&1; then
-    echo "sidecar already running"
-    return
-  fi
+start_sidecar() {
+  load_env_file
+  stop_sidecar
   local py
-  py="$(choose_sidecar_python)"
-  load_sidecar_env
-  nohup env \
-    MEMQ_ROOT="$ROOT_DIR" \
-    MEMQ_DB_PATH=".memq/sidecar.sqlite3" \
-    MEMQ_BRAIN_ENABLED="${MEMQ_BRAIN_ENABLED:-1}" \
-    MEMQ_BRAIN_MODE="${MEMQ_BRAIN_MODE:-required}" \
-    MEMQ_BRAIN_PROVIDER="${MEMQ_BRAIN_PROVIDER:-ollama}" \
-    MEMQ_BRAIN_BASE_URL="${MEMQ_BRAIN_BASE_URL:-http://127.0.0.1:11434}" \
-    MEMQ_BRAIN_MODEL="${MEMQ_BRAIN_MODEL:-gpt-oss:20b}" \
-    MEMQ_BRAIN_KEEP_ALIVE="${MEMQ_BRAIN_KEEP_ALIVE:-30m}" \
-    MEMQ_BRAIN_TIMEOUT_MS="${MEMQ_BRAIN_TIMEOUT_MS:-60000}" \
-    MEMQ_BRAIN_MAX_TOKENS="${MEMQ_BRAIN_MAX_TOKENS:-256}" \
-    MEMQ_BRAIN_AUTO_RESTART="${MEMQ_BRAIN_AUTO_RESTART:-1}" \
-    MEMQ_BRAIN_RESTART_COOLDOWN_SEC="${MEMQ_BRAIN_RESTART_COOLDOWN_SEC:-30}" \
-    MEMQ_BRAIN_RESTART_WAIT_MS="${MEMQ_BRAIN_RESTART_WAIT_MS:-2000}" \
-    MEMQ_LLM_AUDIT_ENABLED="${MEMQ_LLM_AUDIT_ENABLED:-0}" \
-    MEMQ_LLM_AUDIT_URL="${MEMQ_LLM_AUDIT_URL:-https://api.openai.com/v1/chat/completions}" \
-    MEMQ_LLM_AUDIT_MODEL="${MEMQ_LLM_AUDIT_MODEL:-gpt-5.2}" \
-    MEMQ_LLM_AUDIT_API_KEY="${MEMQ_LLM_AUDIT_API_KEY:-}" \
-    MEMQ_LLM_AUDIT_TIMEOUT_SEC="${MEMQ_LLM_AUDIT_TIMEOUT_SEC:-20}" \
-    "$py" "$ROOT_DIR/sidecar/supervisor.py" \
-      --python "$py" \
-      --app "$ROOT_DIR/sidecar/minisidecar.py" \
-      --log "$SIDECAR_LOG" \
-      --restart-delay-sec 1.0 >"$SUPERVISOR_LOG" 2>&1 < /dev/null &
-  echo "$!" > "$PID_FILE"
-
-  for _ in $(seq 1 25); do
+  py="$(choose_python)"
+  nohup "$py" -m sidecar.minisidecar > "$SIDECAR_LOG" 2>&1 < /dev/null &
+  echo $! > "$PID_FILE"
+  for _ in $(seq 1 60); do
     if curl -fsS http://127.0.0.1:7781/health >/dev/null 2>&1; then
-      echo "sidecar started"
-      return
+      return 0
     fi
     sleep 1
   done
-
-  echo "failed to start sidecar; logs: $SIDECAR_LOG, $SUPERVISOR_LOG" >&2
-  tail -n 80 "$SIDECAR_LOG" >&2 || true
-  tail -n 80 "$SUPERVISOR_LOG" >&2 || true
+  echo "sidecar failed to start" >&2
   exit 1
 }
 
-cmd_stop_sidecar() {
-  if [[ -f "$PID_FILE" ]]; then
-    local pid
-    pid="$(cat "$PID_FILE" || true)"
-    if [[ -n "$pid" ]]; then
-      kill "$pid" 2>/dev/null || true
-    fi
-    rm -f "$PID_FILE"
-  fi
-  # Best-effort cleanup in case PID file is stale or multiple supervisors were spawned.
-  pkill -f "$ROOT_DIR/sidecar/supervisor.py" 2>/dev/null || true
-  pkill -f "$ROOT_DIR/sidecar/minisidecar.py" 2>/dev/null || true
-  kill_port_7781
-  echo "sidecar stopped"
-}
-
-cmd_restart_sidecar() {
-  cmd_stop_sidecar
-  cmd_start_sidecar
-}
-
-cmd_status() {
-  echo "plugin:"
-  openclaw plugins list | rg -n "$PLUGIN_ID|Hybrid MEMQ|Memory MEMQ" -N || true
-  echo "memory_slot: $(openclaw config get plugins.slots.memory 2>/dev/null || echo '<unset>')"
-  echo "plugin_config: $(openclaw config get "plugins.entries.$PLUGIN_ID.config" 2>/dev/null || echo '{}')"
-  echo "sidecar_health: $(curl -sS http://127.0.0.1:7781/health 2>/dev/null || echo '{"ok":false}')"
-  echo "brain_stats: $(curl -sS http://127.0.0.1:7781/brain/stats 2>/dev/null || echo '{"ok":false}')"
-}
-
-cmd_audit_on() {
-  local url model risk block
-  url="${2:-}"
-  model="${3:-}"
-  risk="${4:-0.20}"
-  block="${5:-0.85}"
-  if [[ -z "$url" || -z "$model" ]]; then
-    echo "usage: scripts/memq-openclaw.sh audit-on <url> <model> [risk_threshold] [block_threshold]" >&2
-    exit 1
-  fi
-
-  set_plugin_cfg_key "memq.security.llmAuditEnabled" "true"
-  set_plugin_cfg_key "memq.security.llmAuditThreshold" "$risk"
-  set_plugin_cfg_key "memq.security.blockThreshold" "$block"
-
-  {
-    echo "MEMQ_ROOT=$ROOT_DIR"
-    echo "MEMQ_DB_PATH=.memq/sidecar.sqlite3"
-    echo "MEMQ_BRAIN_ENABLED=${MEMQ_BRAIN_ENABLED:-1}"
-    echo "MEMQ_BRAIN_MODE=${MEMQ_BRAIN_MODE:-best_effort}"
-    echo "MEMQ_BRAIN_PROVIDER=${MEMQ_BRAIN_PROVIDER:-ollama}"
-    echo "MEMQ_BRAIN_BASE_URL=${MEMQ_BRAIN_BASE_URL:-http://127.0.0.1:11434}"
-    echo "MEMQ_BRAIN_MODEL=${MEMQ_BRAIN_MODEL:-gpt-oss:20b}"
-    echo "MEMQ_BRAIN_KEEP_ALIVE=${MEMQ_BRAIN_KEEP_ALIVE:-30m}"
-    echo "MEMQ_BRAIN_TIMEOUT_MS=${MEMQ_BRAIN_TIMEOUT_MS:-60000}"
-    echo "MEMQ_BRAIN_MAX_TOKENS=${MEMQ_BRAIN_MAX_TOKENS:-256}"
-    echo "MEMQ_BRAIN_AUTO_RESTART=${MEMQ_BRAIN_AUTO_RESTART:-1}"
-    echo "MEMQ_BRAIN_RESTART_COOLDOWN_SEC=${MEMQ_BRAIN_RESTART_COOLDOWN_SEC:-30}"
-    echo "MEMQ_BRAIN_RESTART_WAIT_MS=${MEMQ_BRAIN_RESTART_WAIT_MS:-2000}"
-    echo "MEMQ_LLM_AUDIT_ENABLED=1"
-    echo "MEMQ_LLM_AUDIT_URL=$url"
-    echo "MEMQ_LLM_AUDIT_MODEL=$model"
-    echo "MEMQ_LLM_AUDIT_TIMEOUT_SEC=20"
-    echo "MEMQ_LLM_AUDIT_API_KEY=${MEMQ_LLM_AUDIT_API_KEY:-}"
-  } > "$SIDECAR_ENV"
-
-  cmd_restart_sidecar
-  echo "secondary audit enabled"
-}
-
-cmd_audit_off() {
-  set_plugin_cfg_key "memq.security.llmAuditEnabled" "false"
-  {
-    echo "MEMQ_ROOT=$ROOT_DIR"
-    echo "MEMQ_DB_PATH=.memq/sidecar.sqlite3"
-    echo "MEMQ_BRAIN_ENABLED=${MEMQ_BRAIN_ENABLED:-1}"
-    echo "MEMQ_BRAIN_MODE=${MEMQ_BRAIN_MODE:-best_effort}"
-    echo "MEMQ_BRAIN_PROVIDER=${MEMQ_BRAIN_PROVIDER:-ollama}"
-    echo "MEMQ_BRAIN_BASE_URL=${MEMQ_BRAIN_BASE_URL:-http://127.0.0.1:11434}"
-    echo "MEMQ_BRAIN_MODEL=${MEMQ_BRAIN_MODEL:-gpt-oss:20b}"
-    echo "MEMQ_BRAIN_KEEP_ALIVE=${MEMQ_BRAIN_KEEP_ALIVE:-30m}"
-    echo "MEMQ_BRAIN_TIMEOUT_MS=${MEMQ_BRAIN_TIMEOUT_MS:-60000}"
-    echo "MEMQ_BRAIN_MAX_TOKENS=${MEMQ_BRAIN_MAX_TOKENS:-256}"
-    echo "MEMQ_BRAIN_AUTO_RESTART=${MEMQ_BRAIN_AUTO_RESTART:-1}"
-    echo "MEMQ_BRAIN_RESTART_COOLDOWN_SEC=${MEMQ_BRAIN_RESTART_COOLDOWN_SEC:-30}"
-    echo "MEMQ_BRAIN_RESTART_WAIT_MS=${MEMQ_BRAIN_RESTART_WAIT_MS:-2000}"
-    echo "MEMQ_LLM_AUDIT_ENABLED=0"
-    echo "MEMQ_LLM_AUDIT_URL=https://api.openai.com/v1/chat/completions"
-    echo "MEMQ_LLM_AUDIT_MODEL=gpt-5.2"
-    echo "MEMQ_LLM_AUDIT_TIMEOUT_SEC=20"
-    echo "MEMQ_LLM_AUDIT_API_KEY="
-  } > "$SIDECAR_ENV"
-  cmd_restart_sidecar
-  echo "secondary audit disabled"
-}
-
-cmd_audit_primary_on() {
-  set_plugin_cfg_key "memq.security.primaryRulesEnabled" "true"
-  echo "primary audit (rule-based) enabled"
-}
-
-cmd_audit_primary_off() {
-  set_plugin_cfg_key "memq.security.primaryRulesEnabled" "false"
-  echo "primary audit (rule-based) disabled"
-}
-
-cmd_audit_status() {
-  echo "plugin audit config:"
-  openclaw config get "plugins.entries.$PLUGIN_ID.config" 2>/dev/null || echo '{}'
-  echo "sidecar env:"
-  if [[ -f "$SIDECAR_ENV" ]]; then
-    cat "$SIDECAR_ENV"
-  else
-    echo "<none>"
-  fi
-}
-
-cmd_memstyle_on() {
-  set_plugin_cfg_key "memq.style.enabled" "true"
-  echo "memstyle enabled"
-}
-
-cmd_memstyle_off() {
-  set_plugin_cfg_key "memq.style.enabled" "false"
-  echo "memstyle disabled"
-}
-
-cmd_memstyle_status() {
-  local cur
-  cur="$(openclaw config get "plugins.entries.$PLUGIN_ID.config" 2>/dev/null || echo '{}')"
-  python3 - "$cur" <<'PY'
-import json,sys
-try: obj=json.loads(sys.argv[1])
-except Exception: obj={}
-print("memstyle.enabled:", obj.get("memq.style.enabled", "<unset>"))
-PY
+cmd_install() {
+  pnpm --dir "$PLUGIN_DIR" install
+  pnpm --dir "$PLUGIN_DIR" build
+  openclaw plugins install -l "$PLUGIN_DIR"
 }
 
 cmd_brain_required_on() {
-  set_plugin_cfg_key "memq.brain.mode" "\"required\""
-  set_plugin_cfg_key "memq.degraded.enabled" "false"
-  load_sidecar_env
-  {
-    echo "MEMQ_ROOT=$ROOT_DIR"
-    echo "MEMQ_DB_PATH=.memq/sidecar.sqlite3"
-    echo "MEMQ_BRAIN_ENABLED=1"
-    echo "MEMQ_BRAIN_MODE=required"
-    echo "MEMQ_BRAIN_PROVIDER=${MEMQ_BRAIN_PROVIDER:-ollama}"
-    echo "MEMQ_BRAIN_BASE_URL=${MEMQ_BRAIN_BASE_URL:-http://127.0.0.1:11434}"
-    echo "MEMQ_BRAIN_MODEL=${MEMQ_BRAIN_MODEL:-gpt-oss:20b}"
-    echo "MEMQ_BRAIN_KEEP_ALIVE=${MEMQ_BRAIN_KEEP_ALIVE:-30m}"
-    echo "MEMQ_BRAIN_TIMEOUT_MS=${MEMQ_BRAIN_TIMEOUT_MS:-60000}"
-    echo "MEMQ_BRAIN_MAX_TOKENS=${MEMQ_BRAIN_MAX_TOKENS:-256}"
-    echo "MEMQ_BRAIN_AUTO_RESTART=${MEMQ_BRAIN_AUTO_RESTART:-1}"
-    echo "MEMQ_BRAIN_RESTART_COOLDOWN_SEC=${MEMQ_BRAIN_RESTART_COOLDOWN_SEC:-30}"
-    echo "MEMQ_BRAIN_RESTART_WAIT_MS=${MEMQ_BRAIN_RESTART_WAIT_MS:-2000}"
-    echo "MEMQ_LLM_AUDIT_ENABLED=${MEMQ_LLM_AUDIT_ENABLED:-0}"
-    echo "MEMQ_LLM_AUDIT_URL=${MEMQ_LLM_AUDIT_URL:-https://api.openai.com/v1/chat/completions}"
-    echo "MEMQ_LLM_AUDIT_MODEL=${MEMQ_LLM_AUDIT_MODEL:-gpt-5.2}"
-    echo "MEMQ_LLM_AUDIT_TIMEOUT_SEC=${MEMQ_LLM_AUDIT_TIMEOUT_SEC:-20}"
-    echo "MEMQ_LLM_AUDIT_API_KEY=${MEMQ_LLM_AUDIT_API_KEY:-}"
-  } > "$SIDECAR_ENV"
-  cmd_restart_sidecar
-  echo "brain required mode enabled"
+  write_profile_env "brain-required"
+  set_plugin_profile "brain-required"
+  start_sidecar
 }
 
-cmd_brain_required_off() {
-  set_plugin_cfg_key "memq.brain.mode" "\"best_effort\""
-  set_plugin_cfg_key "memq.degraded.enabled" "true"
-  load_sidecar_env
-  {
-    echo "MEMQ_ROOT=$ROOT_DIR"
-    echo "MEMQ_DB_PATH=.memq/sidecar.sqlite3"
-    echo "MEMQ_BRAIN_ENABLED=1"
-    echo "MEMQ_BRAIN_MODE=best_effort"
-    echo "MEMQ_BRAIN_PROVIDER=${MEMQ_BRAIN_PROVIDER:-ollama}"
-    echo "MEMQ_BRAIN_BASE_URL=${MEMQ_BRAIN_BASE_URL:-http://127.0.0.1:11434}"
-    echo "MEMQ_BRAIN_MODEL=${MEMQ_BRAIN_MODEL:-gpt-oss:20b}"
-    echo "MEMQ_BRAIN_KEEP_ALIVE=${MEMQ_BRAIN_KEEP_ALIVE:-30m}"
-    echo "MEMQ_BRAIN_TIMEOUT_MS=${MEMQ_BRAIN_TIMEOUT_MS:-60000}"
-    echo "MEMQ_BRAIN_MAX_TOKENS=${MEMQ_BRAIN_MAX_TOKENS:-256}"
-    echo "MEMQ_BRAIN_AUTO_RESTART=${MEMQ_BRAIN_AUTO_RESTART:-1}"
-    echo "MEMQ_BRAIN_RESTART_COOLDOWN_SEC=${MEMQ_BRAIN_RESTART_COOLDOWN_SEC:-30}"
-    echo "MEMQ_BRAIN_RESTART_WAIT_MS=${MEMQ_BRAIN_RESTART_WAIT_MS:-2000}"
-    echo "MEMQ_LLM_AUDIT_ENABLED=${MEMQ_LLM_AUDIT_ENABLED:-0}"
-    echo "MEMQ_LLM_AUDIT_URL=${MEMQ_LLM_AUDIT_URL:-https://api.openai.com/v1/chat/completions}"
-    echo "MEMQ_LLM_AUDIT_MODEL=${MEMQ_LLM_AUDIT_MODEL:-gpt-5.2}"
-    echo "MEMQ_LLM_AUDIT_TIMEOUT_SEC=${MEMQ_LLM_AUDIT_TIMEOUT_SEC:-20}"
-    echo "MEMQ_LLM_AUDIT_API_KEY=${MEMQ_LLM_AUDIT_API_KEY:-}"
-  } > "$SIDECAR_ENV"
-  cmd_restart_sidecar
-  echo "brain required mode disabled (best_effort)"
+cmd_brain_optional_on() {
+  write_profile_env "brain-optional"
+  set_plugin_profile "brain-optional"
+  start_sidecar
+}
+
+cmd_status() {
+  echo "plugin.slot: $(openclaw config get plugins.slots.memory 2>/dev/null || echo '<unset>')"
+  echo "env.file: $ENV_FILE"
+  [[ -f "$ENV_FILE" ]] && cat "$ENV_FILE"
+  echo "--- health ---"
+  curl -fsS http://127.0.0.1:7781/health || true
 }
 
 cmd_brain_proof() {
-  if ! curl -fsS http://127.0.0.1:7781/health >/dev/null 2>&1; then
-    echo "sidecar not healthy; starting..."
-    cmd_start_sidecar || true
-    sleep 1
-  fi
-  echo "brain ensure:"
-  curl -sS -X POST "http://127.0.0.1:7781/brain/ensure?sessionKey=brain-proof" || true
+  echo "--- /brain/stats ---"
+  curl -fsS http://127.0.0.1:7781/brain/stats
   echo
-  echo "brain stats:"
-  curl -sS http://127.0.0.1:7781/brain/stats || true
+  echo "--- /brain/trace/recent?n=10 ---"
+  curl -fsS 'http://127.0.0.1:7781/brain/trace/recent?n=10'
   echo
-  echo "brain trace recent:"
-  curl -sS "http://127.0.0.1:7781/brain/trace/recent?n=10" || true
-  echo
-  echo "ollama /api/ps:"
-  curl -sS http://127.0.0.1:11434/api/ps || true
-  echo
-}
-
-cmd_brain_proof_openclaw() {
-  local log_file="${HOME}/.openclaw/logs/gateway.log"
-  if [ ! -f "$log_file" ]; then
-    echo "gateway.log not found: $log_file"
-    return 1
-  fi
-  echo "openclaw brain-proof markers (last 80):"
-  grep "\[memq\]\[brain-proof\]" "$log_file" | tail -n 80 || true
-  echo
-  echo "openclaw brain-proof summary:"
-  local total
-  total="$(grep -c "\[memq\]\[brain-proof\]" "$log_file" || true)"
-  local ps_seen_ok
-  ps_seen_ok="$(grep "\[memq\]\[brain-proof\]" "$log_file" | grep -c "ps_seen=1" || true)"
-  local errors
-  errors="$(grep "\[memq\]\[brain-proof\]" "$log_file" | grep -c "err=1" || true)"
-  echo "total_markers=$total ps_seen_ok=$ps_seen_ok err_markers=$errors"
-  echo
+  echo "--- ollama /api/ps ---"
+  curl -fsS http://127.0.0.1:11434/api/ps
 }
 
 cmd_setup() {
-  print_banner
   cmd_install
-  cmd_reset_config
-  cmd_start_sidecar
-  cmd_enable
+  cmd_brain_required_on
+  enable_plugin_slot
   cmd_status
 }
 
-cmd_quickstart() {
-  cmd_setup
-}
-
-usage() {
-  cat <<EOF
-usage: scripts/memq-openclaw.sh <command>
-
-commands:
-  setup               install + start-sidecar + enable + status
-  quickstart          same as setup
-  install             install/link plugin into OpenClaw
-  reset-config        reset plugin config to MEMQ v2 defaults
-  enable              enable MEMQ memory slot (saves previous state)
-  disable             restore previous plugin/memory-slot state
-  start-sidecar       start local sidecar
-  stop-sidecar        stop local sidecar
-  restart-sidecar     restart local sidecar
-  status              show plugin/slot/sidecar status
-  audit-on <url> <model> [risk] [block]
-                      enable secondary LLM audit (high-risk path)
-  audit-off           disable secondary LLM audit
-  audit-primary-on    enable primary rule-based output audit
-  audit-primary-off   disable primary rule-based output audit
-  audit-status        print audit settings
-  memstyle-on         enable MEMSTYLE injection
-  memstyle-off        disable MEMSTYLE injection
-  memstyle-status     print MEMSTYLE enabled status
-  brain-required-on   force brain required mode (fail-closed)
-  brain-required-off  return to best_effort mode
-  brain-proof         print /brain/stats + /brain/trace + ollama /api/ps
-  brain-proof-openclaw
-                      print OpenClaw gateway.log memq brain-proof markers
-EOF
-}
-
-case "${1:-}" in
-  setup) cmd_setup ;;
-  quickstart) cmd_quickstart ;;
+case "${1:-status}" in
   install) cmd_install ;;
-  reset-config) cmd_reset_config ;;
-  enable) cmd_enable ;;
-  disable) cmd_disable ;;
-  start-sidecar) cmd_start_sidecar ;;
-  stop-sidecar) cmd_stop_sidecar ;;
-  restart-sidecar) cmd_restart_sidecar ;;
-  status) cmd_status ;;
-  audit-on) cmd_audit_on "$@" ;;
-  audit-off) cmd_audit_off ;;
-  audit-primary-on) cmd_audit_primary_on ;;
-  audit-primary-off) cmd_audit_primary_off ;;
-  audit-status) cmd_audit_status ;;
-  memstyle-on) cmd_memstyle_on ;;
-  memstyle-off) cmd_memstyle_off ;;
-  memstyle-status) cmd_memstyle_status ;;
+  enable) enable_plugin_slot ;;
+  disable) restore_plugin_slot ;;
+  start-sidecar) start_sidecar ;;
+  stop-sidecar) stop_sidecar ;;
+  restart-sidecar) stop_sidecar; start_sidecar ;;
   brain-required-on) cmd_brain_required_on ;;
-  brain-required-off) cmd_brain_required_off ;;
+  brain-optional-on) cmd_brain_optional_on ;;
+  status) cmd_status ;;
   brain-proof) cmd_brain_proof ;;
-  brain-proof-openclaw) cmd_brain_proof_openclaw ;;
-  *) usage; exit 1 ;;
+  setup|quickstart) cmd_setup ;;
+  *) echo "unknown command: ${1:-}" >&2; exit 1 ;;
 esac

@@ -1,52 +1,34 @@
 {
   "id": "openclaw-memory-memq",
-  "name": "Hybrid MEMQ v2",
-  "version": "2.0.0",
+  "name": "Hybrid MEMQ v3",
+  "version": "3.0.0",
   "kind": "memory",
   "entry": "dist/index.js",
-  "description": "Surface/Deep/Ephemeral memory plugin with fixed-budget MEMRULES+MEMSTYLE+MEMCTX injection",
+  "description": "Thin OpenClaw memory plugin for Hybrid MEMQ v3 with MemBrain-orchestrated MEMRULES, MEMSTYLE, and MEMCTX.",
   "configSchema": {
     "type": "object",
     "properties": {
       "memq.sidecarUrl": { "type": "string", "default": "http://127.0.0.1:7781" },
       "memq.workspaceRoot": { "type": "string", "default": "" },
-      "memq.brain.mode": { "type": "string", "default": "best_effort" },
+      "memq.brain.mode": { "type": "string", "default": "brain-required" },
+      "memq.brain.provider": { "type": "string", "default": "ollama" },
+      "memq.brain.baseUrl": { "type": "string", "default": "http://127.0.0.1:11434" },
+      "memq.brain.model": { "type": "string", "default": "gpt-oss:20b" },
+      "memq.brain.keepAlive": { "type": "string", "default": "30m" },
       "memq.brain.timeoutMs": { "type": "number", "default": 60000 },
-      "memq.brain.maxTokens": { "type": "number", "default": 256 },
-      "memq.brain.autoRestart": { "type": "boolean", "default": true },
-      "memq.brain.restartCooldownSec": { "type": "number", "default": 30 },
-      "memq.brain.restartWaitMs": { "type": "number", "default": 2000 },
-
       "memq.budgets.memctxTokens": { "type": "number", "default": 120 },
       "memq.budgets.rulesTokens": { "type": "number", "default": 80 },
       "memq.budgets.styleTokens": { "type": "number", "default": 120 },
       "memq.total.maxInputTokens": { "type": "number", "default": 4200 },
       "memq.total.reserveTokens": { "type": "number", "default": 1800 },
-      "memq.total.capSafetyRatio": { "type": "number", "default": 0.72 },
-
       "memq.recent.maxTokens": { "type": "number", "default": 2600 },
       "memq.recent.minKeepMessages": { "type": "number", "default": 4 },
-
       "memq.retrieval.topK": { "type": "number", "default": 5 },
-      "memq.retrieval.surfaceFirst": { "type": "boolean", "default": true },
-      "memq.retrieval.surfaceThreshold": { "type": "number", "default": 0.85 },
-      "memq.retrieval.deepEnabled": { "type": "boolean", "default": true },
-
-      "memq.archive.enabled": { "type": "boolean", "default": true },
-      "memq.archive.maxFileBytes": { "type": "number", "default": 8000000 },
-      "memq.archive.maxFiles": { "type": "number", "default": 30 },
-
-      "memq.degraded.enabled": { "type": "boolean", "default": true },
-
-      "memq.security.primaryRulesEnabled": { "type": "boolean", "default": true },
-      "memq.security.llmAuditEnabled": { "type": "boolean", "default": false },
-      "memq.security.llmAuditThreshold": { "type": "number", "default": 0.2 },
-      "memq.security.blockThreshold": { "type": "number", "default": 0.85 },
+      "memq.degraded.enabled": { "type": "boolean", "default": false },
       "memq.style.enabled": { "type": "boolean", "default": true },
-      "memq.style.maxBudgetTokens": { "type": "number", "default": 120 },
-
       "memq.idle.enabled": { "type": "boolean", "default": true },
-      "memq.idle.idleSeconds": { "type": "number", "default": 120 }
+      "memq.security.primaryRulesEnabled": { "type": "boolean", "default": true },
+      "memq.security.llmAuditEnabled": { "type": "boolean", "default": false }
     }
   }
 }

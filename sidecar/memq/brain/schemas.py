@@ -1,177 +1,140 @@
 from __future__ import annotations
 
-from typing import Dict, List, Literal, Optional
-
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator
+from typing import Literal
 
 
 class FactCandidate(BaseModel):
     entity_id: str = "ent:user"
     fact_key: str
     value: str
-    confidence: float = Field(default=0.6, ge=0.0, le=1.0)
-    layer: Literal["surface", "deep", "ephemeral"] = "surface"
-    ttl_days: int = Field(default=30, ge=1, le=3650)
-    keywords: List[str] = Field(default_factory=list)
+    confidence: float = Field(ge=0.0, le=1.0)
+    layer: Literal["surface", "deep", "ephemeral"] = "deep"
+    ttl_days: int | None = None
+    keywords: list[str] = Field(default_factory=list)
     evidence_quote: str = ""
-
-    @field_validator("entity_id")
-    @classmethod
-    def _entity_norm(cls, v: str) -> str:
-        t = (v or "").strip()
-        if not t:
-            return "ent:user"
-        return t[:64]
-
-    @field_validator("fact_key")
-    @classmethod
-    def _fact_key_norm(cls, v: str) -> str:
-        t = (v or "").strip().lower()
-        return t[:96]
-
-    @field_validator("value")
-    @classmethod
-    def _value_norm(cls, v: str) -> str:
-        return " ".join((v or "").split())[:160]
-
-    @field_validator("keywords")
-    @classmethod
-    def _kw_norm(cls, v: List[str]) -> List[str]:
-        out: List[str] = []
-        for x in v or []:
-            s = " ".join(str(x).split()).strip().lower()
-            if not s or len(s) > 40:
-                continue
-            if s not in out:
-                out.append(s)
-            if len(out) >= 16:
-                break
-        return out
+    importance: float = Field(default=0.6, ge=0.0, le=1.0)
+    strength: float = Field(default=0.6, ge=0.0, le=1.0)
 
 
 class EventCandidate(BaseModel):
-    day: str = ""
-    ts: int
-    summary: str
-    salience: float = Field(default=0.5, ge=0.0, le=1.0)
-    ttl_days: int = Field(default=14, ge=1, le=3650)
-    keywords: List[str] = Field(default_factory=list)
-    kind: Literal["chat", "action", "decision", "progress", "error", "plan"] = "chat"
-    actor: Literal["user", "assistant", "tool"] = "assistant"
-
-    @field_validator("summary")
-    @classmethod
-    def _sum_norm(cls, v: str) -> str:
-        return " ".join((v or "").split())[:320]
+    day: str | None = None
+    ts: int | None = None
+    actor: Literal["user", "assistant", "tool"] = Field(default="user", validation_alias=AliasChoices("actor", "role"))
+    kind: str = Field(default="chat", validation_alias=AliasChoices("kind", "event_type"))
+    summary: str = Field(validation_alias=AliasChoices("summary", "description"))
+    salience: float = Field(default=0.4, ge=0.0, le=1.0)
+    ttl_days: int | None = None
+    keywords: list[str] = Field(default_factory=list)
 
 
-class StyleUpdatePlan(BaseModel):
+class StyleUpdate(BaseModel):
     apply: bool = False
     explicit: bool = False
-    keys: Dict[str, str] = Field(default_factory=dict)
+    keys: dict[str, str] = Field(default_factory=dict)
 
 
-class RulesUpdatePlan(BaseModel):
+class RuleUpdate(BaseModel):
     apply: bool = False
     explicit: bool = False
-    rules: List[str] = Field(default_factory=list)
+    rules: dict[str, str] = Field(default_factory=dict)
 
 
-class QuarantinePlan(BaseModel):
-    reason: str = "brain_suspect"
-    raw_snippet: str = ""
+class QuarantineItem(BaseModel):
+    reason: str
+    raw_snippet: str
+    risk: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
 class BrainIngestPlan(BaseModel):
-    version: str = "memq_brain_v1"
-    facts: List[FactCandidate] = Field(default_factory=list, max_length=8)
-    events: List[EventCandidate] = Field(default_factory=list, max_length=8)
-    style_update: Optional[StyleUpdatePlan] = None
-    rules_update: Optional[RulesUpdatePlan] = None
-    quarantine: List[QuarantinePlan] = Field(default_factory=list, max_length=8)
+    version: str = "memq_brain_v3"
+    facts: list[FactCandidate] = Field(default_factory=list)
+    events: list[EventCandidate] = Field(default_factory=list)
+    style_update: StyleUpdate | None = None
+    rules_update: RuleUpdate | None = None
+    quarantine: list[QuarantineItem] = Field(default_factory=list)
+
+    @field_validator("events", mode="before")
+    @classmethod
+    def _coerce_events(cls, value):
+        if not isinstance(value, list):
+            return value
+        out = []
+        for item in value:
+            if isinstance(item, str):
+                out.append({"summary": item, "kind": "chat", "actor": "user"})
+            else:
+                out.append(item)
+        return out
 
 
 class IntentWeights(BaseModel):
     timeline: float = Field(default=0.0, ge=0.0, le=1.0)
     profile: float = Field(default=0.0, ge=0.0, le=1.0)
     state: float = Field(default=0.0, ge=0.0, le=1.0)
-    fact_lookup: float = Field(default=0.0, ge=0.0, le=1.0)
-    meta: float = Field(default=0.0, ge=0.0, le=1.0)
     fact: float = Field(default=0.0, ge=0.0, le=1.0)
-    procedure: float = Field(default=0.0, ge=0.0, le=1.0)
     overview: float = Field(default=0.0, ge=0.0, le=1.0)
 
-    @field_validator("fact_lookup")
-    @classmethod
-    def _fact_lookup_norm(cls, v: float) -> float:
-        return float(max(0.0, min(1.0, v)))
 
-    @model_validator(mode="after")
-    def _backfill_fact_lookup(self) -> "IntentWeights":
-        if float(self.fact_lookup) <= 0.0 and float(self.fact) > 0.0:
-            self.fact_lookup = float(max(0.0, min(1.0, self.fact)))
-        return self
+class TimeRange(BaseModel):
+    start_day: str
+    end_day: str
+    label: str
 
 
-class TimeRangePlan(BaseModel):
-    startDay: str
-    endDay: str
-    label: str = "recent"
-
-
-class BudgetSplitPlan(BaseModel):
-    profile: int = Field(default=20, ge=0, le=400)
-    timeline: int = Field(default=30, ge=0, le=400)
-    surface: int = Field(default=20, ge=0, le=400)
-    deep: int = Field(default=40, ge=0, le=400)
-    ephemeral: int = Field(default=10, ge=0, le=400)
+class BudgetSplit(BaseModel):
+    profile: int = 24
+    timeline: int = 24
+    surface: int = 24
+    deep: int = 24
+    ephemeral: int = 8
 
 
 class RetrievalPlan(BaseModel):
-    topk_surface: int = Field(default=4, ge=1, le=50)
-    topk_deep: int = Field(default=5, ge=1, le=50)
-    topk_events: int = Field(default=4, ge=1, le=50)
+    allow_surface: bool = True
     allow_deep: bool = True
+    allow_timeline: bool = True
+    topk_surface: int = 4
+    topk_deep: int = 4
+    topk_events: int = 4
 
 
 class BrainRecallPlan(BaseModel):
-    version: str = "memq_brain_v1"
+    version: str = "memq_brain_v3"
     intent: IntentWeights = Field(default_factory=IntentWeights)
-    time_range: Optional[TimeRangePlan] = None
-    entity_hints: List[str] = Field(default_factory=list, max_length=12)
-    fact_keys: List[str] = Field(default_factory=list, max_length=16)
-    fts_queries: List[str] = Field(default_factory=list, max_length=6)
-    budget_split: BudgetSplitPlan = Field(default_factory=BudgetSplitPlan)
+    time_range: TimeRange | None = None
+    entity_hints: list[str] = Field(default_factory=list)
+    fact_keys: list[str] = Field(default_factory=list)
+    fts_queries: list[str] = Field(default_factory=list)
+    budget_split: BudgetSplit = Field(default_factory=BudgetSplit)
     retrieval: RetrievalPlan = Field(default_factory=RetrievalPlan)
 
 
-class BrainMergeItem(BaseModel):
-    target_id: str
-    source_ids: List[str] = Field(default_factory=list)
-    merged_text: str = ""
-    merged_summary: str = ""
-    new_tags: Dict[str, str] = Field(default_factory=dict)
-    drop_source: bool = True
+class MergeAction(BaseModel):
+    target_id: int
+    source_ids: list[int] = Field(default_factory=list)
+    merged_summary: str
+    merged_value: str | None = None
 
 
-class BrainPruneItem(BaseModel):
-    id: str
-    reason: str = "low_value"
+class PruneAction(BaseModel):
+    id: int
+    reason: str
 
 
 class BrainMergePlan(BaseModel):
-    version: str = "memq_brain_v1"
-    merges: List[BrainMergeItem] = Field(default_factory=list, max_length=20)
-    prunes: List[BrainPruneItem] = Field(default_factory=list, max_length=40)
+    version: str = "memq_brain_v3"
+    merges: list[MergeAction] = Field(default_factory=list)
+    prunes: list[PruneAction] = Field(default_factory=list)
 
 
-class BrainSpanPatch(BaseModel):
-    start: int = Field(ge=0)
-    end: int = Field(ge=0)
-    reason: str = ""
+class ChangedSpan(BaseModel):
+    start: int
+    end: int
+    reason: str
 
 
 class BrainAuditPatchPlan(BaseModel):
-    version: str = "memq_brain_v1"
-    patched_text: str = ""
-    changed_spans: List[BrainSpanPatch] = Field(default_factory=list)
+    version: str = "memq_brain_v3"
+    patched_text: str
+    changed_spans: list[ChangedSpan] = Field(default_factory=list)
