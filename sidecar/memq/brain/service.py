@@ -181,6 +181,49 @@ def _extract_quoted_name(text: str) -> str:
     return ""
 
 
+def _sanitize_call_user(value: str) -> str:
+    clean = " ".join(str(value or "").split()).strip("「」\"' ")
+    if not clean:
+        return ""
+    clean = re.split(r"\s+\d+\.\s*", clean, maxsplit=1)[0]
+    clean = re.split(r"\s+(?:基本トーン|口調|トーン|性格|特徴的な|思考回路|行動原理|役割|関係性)\b", clean, maxsplit=1)[0]
+    clean = re.split(r"[、。!！?？\n]", clean, maxsplit=1)[0]
+    clean = clean.strip("「」\"' ")
+    if len(clean) > 24:
+        return ""
+    return clean
+
+
+def _strip_following_sections(value: str) -> str:
+    clean = " ".join(str(value or "").split()).strip()
+    if not clean:
+        return ""
+    clean = re.split(r"\s+\d+\.\s*", clean, maxsplit=1)[0]
+    clean = re.split(
+        r"\s*(?:二人称|ユーザーに対する呼称|基本トーン|口調|トーン|ユーザーへの接し方|感情表現|特徴的な語尾・言い回し|思考回路|行動原理|役割|関係性)\s*[:：]?",
+        clean,
+        maxsplit=1,
+    )[0]
+    return clean.strip("「」\"' ")
+
+
+def _sanitize_first_person(value: str) -> str:
+    clean = _strip_following_sections(value)
+    clean = re.split(r"[、。!！?？\s]", clean, maxsplit=1)[0]
+    clean = clean.strip("「」\"' ")
+    if len(clean) > 16:
+        return ""
+    return clean
+
+
+def _sanitize_style_sentence(value: str) -> str:
+    clean = _strip_following_sections(value)
+    clean = clean.strip("「」\"' ")
+    if len(clean) > 180:
+        clean = clean[:180].rstrip()
+    return clean
+
+
 def _style_value_is_noise(key: str, value: str) -> bool:
     clean = " ".join(str(value or "").split()).strip()
     if not clean:
@@ -199,15 +242,19 @@ def _extract_explicit_style_hints(text: str) -> dict[str, str]:
     lines = [line.strip() for line in raw.splitlines() if line.strip()]
 
     if match := re.search(r"(?:一人称|first ?person)\s*(?:は|:|：)\s*([^\s、。]+)", raw, re.IGNORECASE):
-        hints["firstPerson"] = match.group(1).strip("「」\"' ")
+        candidate = _sanitize_first_person(match.group(1))
+        if candidate:
+            hints["firstPerson"] = candidate
     if match := re.search(r"(?:呼び方|呼称)(?:は|:|：)\s*[「\"]?([^」\"\n。]{1,24})", raw):
-        candidate = match.group(1).strip("「」\"' ")
+        candidate = _sanitize_call_user(match.group(1))
         if candidate:
             hints["callUser"] = candidate
     elif match := re.search(r"([^\s、。]{1,24})って呼んで", raw):
-        hints["callUser"] = match.group(1).strip("「」\"' ")
+        candidate = _sanitize_call_user(match.group(1))
+        if candidate:
+            hints["callUser"] = candidate
     elif match := re.search(r"(?:俺|ぼく|僕|私|わたし)の名前は\s*([^\s、。！!？?\n]{1,24})", raw):
-        candidate = match.group(1).strip("「」\"' ")
+        candidate = _sanitize_call_user(match.group(1))
         if candidate:
             hints["callUser"] = candidate
 
@@ -231,9 +278,26 @@ def _extract_explicit_style_hints(text: str) -> dict[str, str]:
 
     for line in lines:
         if line.startswith("基本トーン:") or line.startswith("基本トーン："):
-            hints["tone"] = line.split(":", 1)[1].strip() if ":" in line else line.split("：", 1)[1].strip()
+            raw_tone = line.split(":", 1)[1].strip() if ":" in line else line.split("：", 1)[1].strip()
+            candidate = _sanitize_style_sentence(raw_tone)
+            if candidate:
+                hints["tone"] = candidate
         elif line.startswith("特徴的な語尾・言い回し") and ("：" in line or ":" in line):
-            hints["speaking_style"] = line.split("：", 1)[1].strip() if "：" in line else line.split(":", 1)[1].strip()
+            raw_style = line.split("：", 1)[1].strip() if "：" in line else line.split(":", 1)[1].strip()
+            candidate = _sanitize_style_sentence(raw_style)
+            if candidate:
+                hints["speaking_style"] = candidate
+
+    if "tone" not in hints:
+        if match := re.search(r"基本トーン\s*(?:は|:|：)\s*(.+)", raw):
+            candidate = _sanitize_style_sentence(match.group(1))
+            if candidate:
+                hints["tone"] = candidate
+    if "speaking_style" not in hints:
+        if match := re.search(r"特徴的な語尾・言い回し\s*(?:は|:|：)\s*(.+)", raw):
+            candidate = _sanitize_style_sentence(match.group(1))
+            if candidate:
+                hints["speaking_style"] = candidate
 
     for key, value in list(hints.items()):
         clean = " ".join(str(value or "").split()).strip("「」\"' ")
@@ -555,11 +619,12 @@ class BrainService:
         )
         is_explicit_style = explicit_style_requested(user_text)
         is_explicit_rule = explicit_rule_requested(user_text)
+        style_or_rule_install = is_explicit_style or is_explicit_rule
         explicit_style_hints = _extract_explicit_style_hints(user_text) if is_explicit_style else {}
         user = json.dumps(
             {
                 "session_key": session_key,
-                "style_text_excerpt": _compact_text(user_text, limit=520),
+                "style_text_excerpt": _compact_text(user_text, limit=1400 if style_or_rule_install else 520),
                 "current_style": _compact_mapping(current_style, max_items=2, max_value_chars=48),
                 "current_rules": _compact_mapping(current_rules, max_items=2, max_value_chars=48),
                 "style_install_hints": explicit_style_hints,
@@ -569,14 +634,41 @@ class BrainService:
             },
             ensure_ascii=False,
         )
-        return await self._call(
-            session_key=session_key,
-            op="preview_ingest_plan",
-            system_prompt=system,
-            user_prompt=user,
-            schema_model=BrainPreviewPlan,
-            max_tokens=min(self.cfg.brain.ingest_max_tokens, 160),
-        )
+        max_tokens = min(self.cfg.brain.ingest_max_tokens, 224 if style_or_rule_install else 160)
+        try:
+            return await self._call(
+                session_key=session_key,
+                op="preview_ingest_plan",
+                system_prompt=system,
+                user_prompt=user,
+                schema_model=BrainPreviewPlan,
+                max_tokens=max_tokens,
+            )
+        except BrainUnavailable:
+            if not style_or_rule_install:
+                raise
+            recovery_user = json.dumps(
+                {
+                    "session_key": session_key,
+                    "style_text_excerpt": _compact_text(user_text, limit=320),
+                    "current_style": _compact_mapping(current_style, max_items=2, max_value_chars=40),
+                    "current_rules": _compact_mapping(current_rules, max_items=2, max_value_chars=40),
+                    "style_install_hints": explicit_style_hints,
+                    "explicit_style_request": is_explicit_style,
+                    "explicit_rule_request": is_explicit_rule,
+                    "preview_only": True,
+                    "recovery_mode": True,
+                },
+                ensure_ascii=False,
+            )
+            return await self._call(
+                session_key=session_key,
+                op="preview_ingest_plan_recovery",
+                system_prompt=system,
+                user_prompt=recovery_user,
+                schema_model=BrainPreviewPlan,
+                max_tokens=min(max_tokens, 160),
+            )
 
     async def build_recall_plan(
         self,

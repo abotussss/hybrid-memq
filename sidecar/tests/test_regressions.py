@@ -182,10 +182,25 @@ class RegressionV3Test(unittest.TestCase):
         hints = _extract_explicit_style_hints(text)
         self.assertEqual("ヒロ", hints.get("callUser"))
 
+    def test_extract_explicit_style_hints_sanitizes_call_user_section_spill(self) -> None:
+        text = "ユーザーに対する呼称: ヒロ 3. 口調・トーン 基本トーン: 柔らかく、優しく、丁寧。"
+        hints = _extract_explicit_style_hints(text)
+        self.assertEqual("ヒロ", hints.get("callUser"))
+
     def test_extract_explicit_style_hints_preserves_specific_persona_identity(self) -> None:
         text = "QSTYLEを書き換えて。あなたはゲーム『ロックマンエグゼ』シリーズに登場するネットナビ「ロックマン（Rockman.EXE）」として振る舞ってください。俺の名前はヒロだよ。"
         hints = _extract_explicit_style_hints(text)
         self.assertEqual("ロックマン（Rockman.EXE）", hints.get("persona"))
+
+    def test_extract_explicit_style_hints_sanitizes_inline_sections_for_first_person_and_tone(self) -> None:
+        text = (
+            "一人称: 僕（ぼく）二人称: 君（きみ）、あなた "
+            "基本トーン: 柔らかく、優しく、丁寧。 4. 特徴的な語尾・言い回し "
+            "「〜だね」「〜だよ」"
+        )
+        hints = _extract_explicit_style_hints(text)
+        self.assertEqual("僕（ぼく）", hints.get("firstPerson"))
+        self.assertEqual("柔らかく、優しく、丁寧。", hints.get("tone"))
 
     def test_explicit_rule_requested_ignores_inspection_queries(self) -> None:
         self.assertFalse(explicit_rule_requested("MEMRULEは？"))

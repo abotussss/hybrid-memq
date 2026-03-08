@@ -332,12 +332,15 @@ async def memory_preview_prompt(req: PreviewRequest) -> dict[str, Any]:
     overrides = load_local_overrides(cfg.root)
     style = {**list_qstyle(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides.qstyle}
     rules = {**list_qrule(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides.qrule}
+    recent_summary = recent_brain_context(db, memory_backend if _use_memory_backend() else None, req.sessionKey)
     try:
-        plan, trace_id, _ = await brain.build_preview_ingest_plan(
+        plan, trace_id, _ = await brain.build_ingest_plan(
             session_key=req.sessionKey,
             user_text=req.userText,
+            assistant_text="",
             current_style=style,
             current_rules=rules,
+            recent_summary=recent_summary,
         )
     except Exception as exc:
         if cfg.brain_required:

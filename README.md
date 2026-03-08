@@ -166,8 +166,17 @@ These files are **local-only** and **user-specific**:
 
 - `QSTYLE.local.json`
 - `QRULE.local.json`
+- `QSTYLE.current.json`
+- `QRULE.current.json`
+- `QCTX.current.txt`
 
-They are gitignored.
+`QSTYLE.local.json` and `QRULE.local.json` are optional user overrides.
+
+`QSTYLE.current.json`, `QRULE.current.json`, and `QCTX.current.txt` are visible runtime snapshots.
+They are mirrors of the effective state for inspection, not the source of truth used for orchestration.
+QBRAIN still reads and writes the effective state through LanceDB-backed memory plus local overrides.
+
+All of these files are gitignored.
 
 Tracked examples for OSS:
 
@@ -357,6 +366,16 @@ QBRAIN が作るのは plan だけです。
 
 - `QSTYLE.local.json`
 - `QRULE.local.json`
+- `QSTYLE.current.json`
+- `QRULE.current.json`
+- `QCTX.current.txt`
+
+`QSTYLE.local.json` と `QRULE.local.json` は任意のローカル上書きです。
+
+`QSTYLE.current.json` / `QRULE.current.json` / `QCTX.current.txt` は、
+現在有効な状態を確認するための visible mirror です。
+実際の source of truth は QBRAIN が扱う記憶ストアであり、
+これらの current ファイルは inspection 用のスナップショットです。
 
 これらは gitignore 対象です。
 OSS 配布用には example を使います。
