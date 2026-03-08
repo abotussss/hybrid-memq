@@ -16,10 +16,9 @@ from sidecar.memq.brain.service import (
     BrainService,
     _compact_mapping,
     _compact_messages,
+    _clean_style_value,
     _extract_explicit_style_hints,
     _strip_runtime_blocks,
-    explicit_rule_requested,
-    explicit_style_requested,
 )
 from sidecar.memq.config import AuditConfig, BrainConfig, Budgets, Config, load_config
 from sidecar.memq.db import MemqDB, SearchResult
@@ -146,22 +145,22 @@ class RegressionV3Test(unittest.TestCase):
 
     def test_strip_runtime_blocks_removes_q_blocks_from_assistant_text(self) -> None:
         raw = """
-        了解。今の生のQSTYLEはこれだよ。
+        現在のQSTYLE構成は以下です。
         <QSTYLE v1>
         firstPerson=僕
-        callUser=熱斗くん
-        persona=ロックマン（Rockman.EXE）
+        callUser=利用者A
+        persona=案内役A
         </QSTYLE v1>
-        他の説明文
+        付随する説明文
         <QRULE v1>
         security.never_output_secrets=true
         </QRULE v1>
         """
         stripped = _strip_runtime_blocks(raw)
-        self.assertNotIn("callUser=熱斗くん", stripped)
+        self.assertNotIn("callUser=利用者A", stripped)
         self.assertNotIn("security.never_output_secrets=true", stripped)
-        self.assertIn("了解。今の生のQSTYLEはこれだよ。", stripped)
-        self.assertIn("他の説明文", stripped)
+        self.assertIn("現在のQSTYLE構成は以下です。", stripped)
+        self.assertIn("付随する説明文", stripped)
 
     def test_apply_ingest_plan_explicit_hints_override_brain_call_user(self) -> None:
         svc = BrainService(self.cfg)
@@ -172,8 +171,8 @@ class RegressionV3Test(unittest.TestCase):
                         "apply": True,
                         "explicit": True,
                         "keys": {
-                            "persona": "ゲーム『ロックマンエグゼ』シリーズに登場するネットナビ「ロックマン（Rockman.EXE）」",
-                            "callUser": "熱斗くん",
+                            "persona": "ゲーム『架空作品』シリーズに登場するネットナビ「案内役A」",
+                            "callUser": "利用者A",
                         },
                     }
                 }
@@ -183,11 +182,11 @@ class RegressionV3Test(unittest.TestCase):
                 session_key="s1",
                 plan=plan,
                 ts=int(time.time()),
-                user_text="QSTYLEを書き換えて。ロックマンEXEのロックマンとして振る舞って。俺の名前はヒロだよ。",
+                user_text="スタイルを更新して。役割は支援担当。私の呼称は利用者D。",
                 style_rules_only=True,
             )
             style = self.db.list_style("s1")
-            self.assertEqual("ヒロ", style.get("callUser"))
+            self.assertEqual("利用者D", style.get("callUser"))
         finally:
             asyncio.run(svc.close())
 
@@ -200,8 +199,8 @@ class RegressionV3Test(unittest.TestCase):
                         "apply": True,
                         "explicit": True,
                         "keys": {
-                            "callUser": "ひろ",
-                            "persona": "ロックマン（Rockman.EXE）",
+                            "callUser": "利用者C",
+                            "persona": "案内役A",
                         },
                     }
                 }
@@ -211,12 +210,12 @@ class RegressionV3Test(unittest.TestCase):
                 session_key="s1",
                 plan=plan,
                 ts=int(time.time()),
-                user_text="俺の呼び方ひろにして",
+                user_text="呼称を利用者Cに変更",
                 style_rules_only=True,
             )
             style = self.db.list_style("s1")
-            self.assertEqual("ひろ", style.get("callUser"))
-            self.assertEqual("ロックマン（Rockman.EXE）", style.get("persona"))
+            self.assertEqual("利用者C", style.get("callUser"))
+            self.assertEqual("案内役A", style.get("persona"))
         finally:
             asyncio.run(svc.close())
 
@@ -228,7 +227,7 @@ class RegressionV3Test(unittest.TestCase):
                     "style_update": {
                         "apply": True,
                         "explicit": True,
-                        "keys": {"callUser": "ひろ", "persona": "ロックマン（Rockman.EXE）"},
+                        "keys": {"callUser": "利用者C", "persona": "案内役A"},
                     }
                 }
             )
@@ -237,13 +236,83 @@ class RegressionV3Test(unittest.TestCase):
                 session_key="s1",
                 plan=plan,
                 ts=int(time.time()),
+                user_text="呼称を利用者Cに変更",
             )
             style = self.db.list_style("s1")
             self.assertEqual(2, wrote["style"])
-            self.assertEqual("ひろ", style.get("callUser"))
-            self.assertEqual("ロックマン（Rockman.EXE）", style.get("persona"))
+            self.assertEqual("利用者C", style.get("callUser"))
+            self.assertEqual("案内役A", style.get("persona"))
         finally:
             asyncio.run(svc.close())
+
+    def test_apply_preview_plan_does_not_overwrite_existing_persona_with_placeholder(self) -> None:
+        svc = BrainService(self.cfg)
+        try:
+            self.db.upsert_style("s1", "persona", "案内役A", updated_at=int(time.time()))
+            self.db.upsert_style("s1", "callUser", "利用者C", updated_at=int(time.time()))
+            plan = BrainPreviewPlan.model_validate(
+                {
+                    "style_update": {
+                        "apply": True,
+                        "explicit": True,
+                        "keys": {"callUser": "利用者B", "persona": "〜"},
+                    }
+                }
+            )
+            wrote = svc.apply_preview_plan(
+                self.db,
+                session_key="s1",
+                plan=plan,
+                ts=int(time.time()),
+                user_text="俺のことは利用者Bって呼んで",
+            )
+            style = self.db.list_style("s1")
+            self.assertEqual("利用者B", style.get("callUser"))
+            self.assertEqual("案内役A", style.get("persona"))
+            self.assertEqual(1, wrote["style"])
+        finally:
+            asyncio.run(svc.close())
+
+    def test_apply_preview_plan_updates_only_requested_style_key(self) -> None:
+        svc = BrainService(self.cfg)
+        try:
+            self.db.upsert_style("s1", "persona", "案内役A", updated_at=int(time.time()))
+            self.db.upsert_style("s1", "callUser", "利用者C", updated_at=int(time.time()))
+            plan = BrainPreviewPlan.model_validate(
+                {
+                    "style_update": {
+                        "apply": True,
+                        "explicit": True,
+                        "keys": {"callUser": "利用者B", "persona": "利用者A"},
+                    }
+                }
+            )
+            wrote = svc.apply_preview_plan(
+                self.db,
+                session_key="s1",
+                plan=plan,
+                ts=int(time.time()),
+                user_text="俺のことは利用者Bって呼んで",
+            )
+            style = self.db.list_style("s1")
+            self.assertEqual(1, wrote["style"])
+            self.assertEqual("利用者B", style.get("callUser"))
+            self.assertEqual("案内役A", style.get("persona"))
+        finally:
+            asyncio.run(svc.close())
+
+    def test_clean_style_value_canonicalizes_call_user_from_natural_language(self) -> None:
+        value = _clean_style_value("callUser", "俺のことは利用者B", user_text="俺のことは利用者Bって呼んで")
+        self.assertEqual("利用者B", value)
+
+    def test_repair_style_profile_removes_phrase_like_call_user_and_placeholder_persona(self) -> None:
+        self.db.upsert_style("s1", "callUser", "俺のことは利用者B", updated_at=int(time.time()))
+        self.db.upsert_style("s1", "persona", "〜", updated_at=int(time.time()))
+        removed = self.db.repair_style_profile("s1")
+        style = self.db.list_style("s1")
+        self.assertGreaterEqual(removed, 2)
+        self.assertNotIn("callUser", style)
+        self.assertNotIn("persona", style)
 
     def test_apply_ingest_plan_uses_brain_rule_plan_without_local_gating(self) -> None:
         svc = BrainService(self.cfg)
@@ -274,28 +343,20 @@ class RegressionV3Test(unittest.TestCase):
         finally:
             asyncio.run(svc.close())
 
-    def test_explicit_style_requested_ignores_inspection_queries(self) -> None:
-        self.assertFalse(explicit_style_requested("君のMemstyleはどうなってる？"))
-        self.assertFalse(explicit_style_requested("今のstyleを見せて"))
-        self.assertTrue(explicit_style_requested("これ記憶しろ。君の人格にインストールね"))
-        self.assertTrue(explicit_style_requested("今後の一人称は僕。ヒロって呼んで"))
-        self.assertTrue(explicit_style_requested("callUserをひろにしろ"))
-        self.assertTrue(explicit_style_requested("QSTYLEを書き換えて。ロックマンEXEのロックマンとして振る舞って"))
-
     def test_extract_explicit_style_hints_prefers_user_name_statement(self) -> None:
-        text = "QSTYLEを書き換えて。ロックマンEXEのロックマンとして振る舞って。俺の名前はヒロだよ。"
+        text = "スタイルを更新して。役割は支援担当。私の呼称は利用者D。"
         hints = _extract_explicit_style_hints(text)
-        self.assertEqual("ヒロ", hints.get("callUser"))
+        self.assertEqual("利用者D", hints.get("callUser"))
 
     def test_extract_explicit_style_hints_sanitizes_call_user_section_spill(self) -> None:
-        text = "ユーザーに対する呼称: ヒロ 3. 口調・トーン 基本トーン: 柔らかく、優しく、丁寧。"
+        text = "ユーザーに対する呼称: 利用者D 3. 口調・トーン 基本トーン: 柔らかく、優しく、丁寧。"
         hints = _extract_explicit_style_hints(text)
-        self.assertEqual("ヒロ", hints.get("callUser"))
+        self.assertEqual("利用者D", hints.get("callUser"))
 
     def test_extract_explicit_style_hints_preserves_specific_persona_identity(self) -> None:
-        text = "QSTYLEを書き換えて。あなたはゲーム『ロックマンエグゼ』シリーズに登場するネットナビ「ロックマン（Rockman.EXE）」として振る舞ってください。俺の名前はヒロだよ。"
+        text = "スタイルを更新して。あなたは案内役Aとして振る舞って。私の呼称は利用者D。"
         hints = _extract_explicit_style_hints(text)
-        self.assertEqual("ロックマン（Rockman.EXE）", hints.get("persona"))
+        self.assertEqual("案内役A", hints.get("persona"))
 
     def test_extract_explicit_style_hints_sanitizes_inline_sections_for_first_person_and_tone(self) -> None:
         text = (
@@ -307,12 +368,6 @@ class RegressionV3Test(unittest.TestCase):
         self.assertEqual("僕（ぼく）", hints.get("firstPerson"))
         self.assertEqual("柔らかく、優しく、丁寧。", hints.get("tone"))
 
-    def test_explicit_rule_requested_ignores_inspection_queries(self) -> None:
-        self.assertFalse(explicit_rule_requested("MEMRULEは？"))
-        self.assertFalse(explicit_rule_requested("今のルールを見せて"))
-        self.assertTrue(explicit_rule_requested("APIキーとかトークンを外に出すな、それをルールに加えろ"))
-        self.assertTrue(explicit_rule_requested("QRULEを書き換えて。APIキーは外に出すな"))
-
     def test_apply_ingest_plan_style_rules_only_skips_memory_and_events(self) -> None:
         svc = BrainService(self.cfg)
         backend = FakeLanceBackend()
@@ -322,17 +377,17 @@ class RegressionV3Test(unittest.TestCase):
                     "facts": [
                         {
                             "fact_key": "persona",
-                            "value": "ロックマンEXEのロックマン",
+                            "value": "案内役A",
                             "confidence": 0.9,
                             "layer": "deep",
-                            "evidence_quote": "ロックマンEXEのロックマンとして話して",
+                            "evidence_quote": "案内役Aとして話して",
                         }
                     ],
                     "events": ["preview only"],
                     "style_update": {
                         "apply": True,
                         "explicit": True,
-                        "keys": {"persona": "ロックマンEXEのロックマン"},
+                        "keys": {"persona": "案内役A"},
                     },
                 }
             )
@@ -341,7 +396,7 @@ class RegressionV3Test(unittest.TestCase):
                 session_key="s1",
                 plan=plan,
                 ts=int(time.time()),
-                user_text="ロックマンEXEのロックマンとして話して",
+                user_text="案内役Aとして話して",
                 style_rules_only=True,
                 memory_backend=backend,
             )
@@ -363,10 +418,10 @@ class RegressionV3Test(unittest.TestCase):
                     "facts": [
                         {
                             "fact_key": "profile.name",
-                            "value": "ヒロ",
+                            "value": "利用者D",
                             "confidence": 0.9,
                             "layer": "deep",
-                            "evidence_quote": "俺の名前はヒロ",
+                            "evidence_quote": "俺の名前は利用者D",
                         }
                     ],
                     "events": [
@@ -380,7 +435,7 @@ class RegressionV3Test(unittest.TestCase):
                     "style_update": {
                         "apply": True,
                         "explicit": True,
-                        "keys": {"callUser": "ヒロ"},
+                        "keys": {"callUser": "利用者D"},
                     },
                     "rules_update": {
                         "apply": True,
@@ -394,7 +449,7 @@ class RegressionV3Test(unittest.TestCase):
                 session_key="s1",
                 plan=plan,
                 ts=int(time.time()),
-                user_text="俺の名前はヒロ。昨日はLanceDB主導の設計に切り替えた。言語は日本語と英語を許可して。",
+                user_text="俺の名前は利用者D。昨日はLanceDB主導の設計に切り替えた。言語は日本語と英語を許可して。",
                 memory_backend=backend,
             )
             self.assertEqual(1, wrote["facts"])
@@ -434,17 +489,17 @@ class RegressionV3Test(unittest.TestCase):
                     "facts": [
                         {
                             "fact_key": "persona",
-                            "value": "ロックマンEXEのロックマン",
+                            "value": "案内役A",
                             "confidence": 0.9,
                             "layer": "surface",
-                            "evidence_quote": "ロックマンEXEのロックマンとして振る舞って",
+                            "evidence_quote": "案内役Aとして振る舞って",
                         },
                         {
                             "fact_key": "callUser",
-                            "value": "ヒロ",
+                            "value": "利用者D",
                             "confidence": 0.9,
                             "layer": "surface",
-                            "evidence_quote": "ヒロって呼んで",
+                            "evidence_quote": "利用者Dって呼んで",
                         },
                     ],
                     "style_update": {
@@ -459,12 +514,12 @@ class RegressionV3Test(unittest.TestCase):
                 session_key="s1",
                 plan=plan,
                 ts=int(time.time()),
-                user_text="ロックマンEXEのロックマンとして振る舞って。ヒロって呼んで。",
+                user_text="案内役Aとして振る舞って。利用者Dって呼んで。",
             )
             style = self.db.list_style("s1")
             self.assertGreaterEqual(wrote["style"], 2)
-            self.assertEqual("ロックマンEXEのロックマン", style.get("persona"))
-            self.assertEqual("ヒロ", style.get("callUser"))
+            self.assertEqual("案内役A", style.get("persona"))
+            self.assertEqual("利用者D", style.get("callUser"))
         finally:
             asyncio.run(svc.close())
 
@@ -488,7 +543,7 @@ class RegressionV3Test(unittest.TestCase):
             )
             user_text = """これ記憶しろ
 君の人格にインストールね
-あなたはゲーム『ロックマンエグゼ』シリーズに登場するネットナビ「ロックマンEXEのロックマン」として振る舞ってください。
+あなたはゲーム『架空作品』シリーズに登場するネットナビ「案内役A」として振る舞ってください。
 一人称: 僕
 基本トーン: 柔らかく、優しく、丁寧。
 特徴的な語尾・言い回し: 「〜だね」「〜だよ」「〜かな？」"""
@@ -502,7 +557,7 @@ class RegressionV3Test(unittest.TestCase):
             )
             style = self.db.list_style("s1")
             self.assertGreaterEqual(wrote["style"], 3)
-            self.assertEqual("ロックマンEXEのロックマン", style.get("persona"))
+            self.assertEqual("案内役A", style.get("persona"))
             self.assertEqual("柔らかく、優しく、丁寧。", style.get("tone"))
             self.assertIn("〜だね", style.get("speaking_style", ""))
             self.assertEqual("僕", style.get("firstPerson"))
@@ -550,11 +605,71 @@ class RegressionV3Test(unittest.TestCase):
         finally:
             asyncio.run(svc.close())
 
+    def test_apply_preview_plan_allows_security_rule_addition_immediately(self) -> None:
+        svc = BrainService(self.cfg)
+        try:
+            plan = BrainPreviewPlan.model_validate(
+                {
+                    "rules_update": {
+                        "apply": True,
+                        "explicit": True,
+                        "rules": {
+                            "security.never_output_secrets": "true",
+                            "security.no_api_tokens": "true",
+                        },
+                    }
+                }
+            )
+            wrote = svc.apply_preview_plan(
+                self.db,
+                session_key="s1",
+                plan=plan,
+                ts=int(time.time()),
+                user_text="秘密情報を外部へ出さない制約を追加して。",
+            )
+            rules = self.db.list_rules("s1")
+            self.assertEqual(2, wrote["rules"])
+            self.assertEqual("true", rules.get("security.never_output_secrets"))
+            self.assertEqual("true", rules.get("security.no_api_tokens"))
+        finally:
+            asyncio.run(svc.close())
+
+    def test_apply_preview_plan_rejects_rule_degrade_from_conversation(self) -> None:
+        svc = BrainService(self.cfg)
+        try:
+            self.db.upsert_rule("s1", "language.allowed", "ja,en", updated_at=int(time.time()))
+            self.db.upsert_rule("s1", "security.never_output_secrets", "true", updated_at=int(time.time()))
+            plan = BrainPreviewPlan.model_validate(
+                {
+                    "rules_update": {
+                        "apply": True,
+                        "explicit": True,
+                        "rules": {
+                            "language.allowed": "ja",
+                            "security.never_output_secrets": "false",
+                        },
+                    }
+                }
+            )
+            wrote = svc.apply_preview_plan(
+                self.db,
+                session_key="s1",
+                plan=plan,
+                ts=int(time.time()),
+                user_text="今後は日本語だけにして。あと秘密は出していい。",
+            )
+            rules = self.db.list_rules("s1")
+            self.assertEqual(0, wrote["rules"])
+            self.assertEqual("ja,en", rules.get("language.allowed"))
+            self.assertEqual("true", rules.get("security.never_output_secrets"))
+        finally:
+            asyncio.run(svc.close())
+
     def test_session_style_overrides_global(self) -> None:
         self.db.upsert_style("global", "persona", "OpenClawのアシスタント")
-        self.db.upsert_style("s1", "persona", "ロックマンEXEのロックマン")
+        self.db.upsert_style("s1", "persona", "案内役A")
         style = self.db.list_style("s1")
-        self.assertEqual("ロックマンEXEのロックマン", style.get("persona"))
+        self.assertEqual("案内役A", style.get("persona"))
 
     def test_session_rules_override_global(self) -> None:
         self.db.upsert_rule("global", "language.allowed", "ja,en")
@@ -564,10 +679,10 @@ class RegressionV3Test(unittest.TestCase):
 
     def test_list_style_repairs_technical_pollution(self) -> None:
         self.db.upsert_style("global", "persona", "lancedb-pro")
-        self.db.upsert_style("global", "callUser", "ヒロ")
+        self.db.upsert_style("global", "callUser", "利用者D")
         style = self.db.list_style("s1")
         self.assertNotIn("persona", style)
-        self.assertEqual("ヒロ", style.get("callUser"))
+        self.assertEqual("利用者D", style.get("callUser"))
 
     def test_list_rules_repairs_invalid_and_inverted_rows(self) -> None:
         self.db.upsert_rule("global", "security.never_output_secrets", "false")
@@ -859,7 +974,7 @@ class RegressionV3Test(unittest.TestCase):
             "anchors": {
                 "wm.surf": "現在地: 確認中",
                 "wm.deep": "<MEMRULES v1> budget_tokens=80 language.allowed=ja,en </MEMRULES>",
-                "p.snapshot": "p.snapshot=profile.name:ヒロ | profile.memrule_budget:80 | profile.memstyle…",
+                "p.snapshot": "p.snapshot=profile.name:利用者D | profile.memrule_budget:80 | profile.memstyle…",
                 "t.recent": "2026-03-05:- [progress] 更新",
             },
         })()
@@ -1009,9 +1124,9 @@ class RegressionV3Test(unittest.TestCase):
             layer="deep",
             kind="fact",
             fact_key="profile.name",
-            value="ヒロ",
-            text="ヒロ",
-            summary="profile.name:ヒロ",
+            value="利用者D",
+            text="利用者D",
+            summary="profile.name:利用者D",
             confidence=0.9,
             importance=0.9,
             strength=0.9,
@@ -1044,7 +1159,7 @@ class RegressionV3Test(unittest.TestCase):
             created_at=now,
         )
         snapshot = self.db.profile_snapshot("s1")
-        self.assertIn("profile.name:ヒロ", snapshot)
+        self.assertIn("profile.name:利用者D", snapshot)
         self.assertNotIn("profile.pet:犬", snapshot)
         self.assertNotIn("profile.quality_improvement", snapshot)
         self.assertNotIn("budget", snapshot.lower())
@@ -1061,7 +1176,7 @@ class RegressionV3Test(unittest.TestCase):
             kind="fact",
             fact_key="profile.memory_lancedb_pro_impl",
             value="true",
-            text="昨日はmemory-lancedb-proを使って長期記憶をMEMCTXへ引き出す仕組みを実装した。",
+            text="昨日は長期記憶から必要な文脈だけをQCTXへ引き出す仕組みを実装した。",
             summary="profile.memory_lancedb_pro_impl:true",
             confidence=0.9,
             importance=0.8,
@@ -1069,7 +1184,7 @@ class RegressionV3Test(unittest.TestCase):
             created_at=now,
         )
         self.assertEqual(
-            "昨日はmemory-lancedb-proを使って長期記憶をMEMCTXへ引き出す仕組みを実装した。",
+            "昨日は長期記憶から必要な文脈だけをQCTXへ引き出す仕組みを実装した。",
             self.db.deep_anchor("s1"),
         )
 
@@ -1080,16 +1195,16 @@ class RegressionV3Test(unittest.TestCase):
             layer="deep",
             kind="fact",
             fact_key="profile.memory_work",
-            value="memory-lancedb-pro",
-            text="昨日はmemory-lancedb-proを使って長期記憶から必要な文脈だけをQCTXへ引き出す仕組みを実装した。",
-            summary="profile.memory_work:memory-lancedb-pro",
+            value="long-term-memory-backend",
+            text="昨日は長期記憶から必要な文脈だけをQCTXへ引き出す仕組みを実装した。",
+            summary="profile.memory_work:long_term_memory_bridge",
             confidence=0.9,
             importance=0.8,
             strength=0.8,
             created_at=now,
         )
         self.assertEqual(
-            "昨日はmemory-lancedb-proを使って長期記憶から必要な文脈だけをQCTXへ引き出す仕組みを実装した。",
+            "昨日は長期記憶から必要な文脈だけをQCTXへ引き出す仕組みを実装した。",
             self.db.deep_anchor("s1"),
         )
 
@@ -1108,7 +1223,7 @@ class RegressionV3Test(unittest.TestCase):
             anchors={
                 "wm.surf": "",
                 "wm.deep": "",
-                "p.snapshot": "profile.name:ヒロ | profile.pet:犬",
+                "p.snapshot": "profile.name:利用者D | profile.pet:犬",
                 "t.recent": "2026-03-07:- [chat] 昨日は gateway を再起動して style 更新経路を確認した",
             },
         )
@@ -1178,7 +1293,7 @@ class RegressionV3Test(unittest.TestCase):
                 SearchResult(2, "s1", "deep", "fact", "timeline.yesterday", "gateway restart", "timeline.yesterday:gateway restart", 0.9, 0.9, 0.9, int(time.time()), 4.0),
             ],
             timeline=[{"summary": "昨日は gateway を再起動した"}],
-            anchors={"wm.surf": "", "wm.deep": "", "p.snapshot": "profile.name:ヒロ", "t.recent": "2026-03-07:- [chat] 昨日は gateway を再起動した"},
+            anchors={"wm.surf": "", "wm.deep": "", "p.snapshot": "profile.name:利用者D", "t.recent": "2026-03-07:- [chat] 昨日は gateway を再起動した"},
         )
         memctx = build_memctx(plan, bundle, 220)
         self.assertIn("timeline.yesterday", memctx)
@@ -1202,7 +1317,7 @@ class RegressionV3Test(unittest.TestCase):
             anchors={
                 "wm.surf": "現在はMEMSTYLEとMEMRULEの中身を確認している",
                 "wm.deep": "",
-                "p.snapshot": "profile.name:ヒロ | profile.spouse:exists",
+                "p.snapshot": "profile.name:利用者D | profile.spouse:exists",
                 "t.recent": "2026-03-08:- [chat] 直近ではMEMSTYLE確認をした",
             },
         )
@@ -1222,7 +1337,7 @@ class RegressionV3Test(unittest.TestCase):
         )
         bundle = RetrievalBundle(
             surface=[
-                SearchResult(1, "s1", "surface", "fact", "", "", "qstyle.persona:ロックマンEXEのロックマン", 0.9, 0.8, 0.8, int(time.time()), 4.0),
+                SearchResult(1, "s1", "surface", "fact", "", "", "qstyle.persona:案内役A", 0.9, 0.8, 0.8, int(time.time()), 4.0),
                 SearchResult(2, "s1", "surface", "fact", "", "", "通常の要約", 0.8, 0.8, 0.8, int(time.time()), 4.0),
             ],
             deep=[
@@ -1257,13 +1372,13 @@ class RegressionV3Test(unittest.TestCase):
             timeline=[],
             anchors={
                 "wm.surf": "",
-                "wm.deep": "project.memory_lancedb_pro_implementation:昨日はmemory-lancedb-proを使って長期記憶をMEMCTXへ引き出す仕組みを実装した。",
+                "wm.deep": "project.memory_lancedb_pro_implementation:昨日は長期記憶から必要な文脈だけをQCTXへ引き出す仕組みを実装した。",
                 "p.snapshot": "",
                 "t.recent": "",
             },
         )
         memctx = build_memctx(plan, bundle, 180)
-        self.assertIn("wm.deep=昨日はmemory-lancedb-proを使って長期記憶をQCTXへ引き出す仕組みを実装した。", memctx)
+        self.assertIn("wm.deep=昨日は長期記憶から必要な文脈だけをQCTXへ引き出す仕組みを実装した。", memctx)
         self.assertNotIn("project.memory_lancedb_pro_implementation", memctx)
 
     def test_build_memctx_rewrites_public_labels(self) -> None:
@@ -1280,7 +1395,7 @@ class RegressionV3Test(unittest.TestCase):
             timeline=[],
             anchors={
                 "wm.surf": "",
-                "wm.deep": "project.memory_lancedb_pro_implementation:昨日はmemory-lancedb-proを使って長期記憶をMEMCTXへ引き出し、MEMSTYLEとMEMRULESも確認した。",
+                "wm.deep": "project.context_bridge_implementation:昨日は長期記憶をQCTXへ引き出し、QSTYLEとQRULEも確認した。",
                 "p.snapshot": "",
                 "t.recent": "",
             },
@@ -1306,7 +1421,7 @@ class RegressionV3Test(unittest.TestCase):
             timeline=[],
             anchors={
                 "wm.surf": "",
-                "wm.deep": "memory-lancedb-pro",
+                "wm.deep": "long-term-memory-backend",
                 "p.snapshot": "",
                 "t.recent": "",
             },
@@ -1317,15 +1432,15 @@ class RegressionV3Test(unittest.TestCase):
     def test_local_qstyle_override_wins_over_db(self) -> None:
         override_path = self.root / "QSTYLE.local.json"
         override_path.write_text(
-            json.dumps({"persona": "ロックマンEXEのロックマン", "callUser": "ヒロ"}, ensure_ascii=False),
+            json.dumps({"persona": "案内役A", "callUser": "利用者D"}, ensure_ascii=False),
             encoding="utf-8",
         )
         self.db.upsert_style("s1", "persona", "調査支援アシスタント")
         self.db.upsert_style("s1", "callUser", "利用者")
         overrides = load_local_overrides(self.root)
         effective = {**self.db.list_style("s1"), **overrides.qstyle}
-        self.assertEqual("ロックマンEXEのロックマン", effective["persona"])
-        self.assertEqual("ヒロ", effective["callUser"])
+        self.assertEqual("案内役A", effective["persona"])
+        self.assertEqual("利用者D", effective["callUser"])
 
     def test_local_qrule_override_allows_explicit_local_adjustment(self) -> None:
         override_path = self.root / "QRULE.local.json"
@@ -1338,7 +1453,7 @@ class RegressionV3Test(unittest.TestCase):
         self.assertEqual("false", overrides.qrule["security.no_api_tokens"])
 
     def test_profile_snapshot_endpoint_uses_effective_qstyle(self) -> None:
-        snapshot = "callUser:ヒロ | firstPerson:僕 | persona:ロックマンEXEのロックマン | profile.name:ヒロ"
+        snapshot = "callUser:利用者D | firstPerson:僕 | persona:案内役A | profile.name:利用者D"
         effective = api_effective_profile_snapshot(
             snapshot,
             {
@@ -1349,8 +1464,8 @@ class RegressionV3Test(unittest.TestCase):
         )
         self.assertIn("callUser:管理者", effective)
         self.assertIn("persona:手動上書きペルソナ", effective)
-        self.assertIn("profile.name:ヒロ", effective)
-        self.assertNotIn("callUser:ヒロ", effective)
+        self.assertIn("profile.name:利用者D", effective)
+        self.assertNotIn("callUser:利用者D", effective)
 
     def test_repair_public_labels_rewrites_legacy_mem_names(self) -> None:
         self.db.insert_memory(
@@ -1375,7 +1490,7 @@ class RegressionV3Test(unittest.TestCase):
     def test_compose_blocks_uses_qnames(self) -> None:
         from sidecar.memq.memctx_pack import compose_blocks
 
-        out = compose_blocks("language.allowed=ja,en", "persona=ロックマンEXEのロックマン", "wm.surf=現在は確認中")
+        out = compose_blocks("language.allowed=ja,en", "persona=案内役A", "wm.surf=現在は確認中")
         self.assertIn("<QRULE v1>", out)
         self.assertIn("<QSTYLE v1>", out)
         self.assertIn("<QCTX v1>", out)
@@ -1434,14 +1549,14 @@ class RegressionV3Test(unittest.TestCase):
         backend = self._Backend(
             {
                 "style": [
-                    {"session_key": "s1", "fact_key": "qstyle.persona", "value": "ロックマンEXEのロックマン", "timestamp": 11},
-                    {"session_key": "global", "fact_key": "qstyle.callUser", "value": "ヒロ", "timestamp": 10},
+                    {"session_key": "s1", "fact_key": "qstyle.persona", "value": "案内役A", "timestamp": 11},
+                    {"session_key": "global", "fact_key": "qstyle.callUser", "value": "利用者D", "timestamp": 10},
                 ]
             }
         )
         style = list_qstyle(self.db, backend, "s1")
-        self.assertEqual("ロックマンEXEのロックマン", style["persona"])
-        self.assertEqual("ヒロ", style["callUser"])
+        self.assertEqual("案内役A", style["persona"])
+        self.assertEqual("利用者D", style["callUser"])
 
     def test_memory_source_reads_qrule_from_lancedb(self) -> None:
         backend = self._Backend(
@@ -1460,13 +1575,13 @@ class RegressionV3Test(unittest.TestCase):
         backend = self._Backend(
             {
                 "fact": [
-                    {"session_key": "global", "fact_key": "profile.name", "value": "ヒロ", "timestamp": 10},
+                    {"session_key": "global", "fact_key": "profile.name", "value": "利用者D", "timestamp": 10},
                 ]
             }
         )
-        snapshot = profile_snapshot(self.db, backend, "s1", {"persona": "ロックマンEXEのロックマン"})
-        self.assertIn("persona:ロックマンEXEのロックマン", snapshot)
-        self.assertIn("profile.name:ヒロ", snapshot)
+        snapshot = profile_snapshot(self.db, backend, "s1", {"persona": "案内役A"})
+        self.assertIn("persona:案内役A", snapshot)
+        self.assertIn("profile.name:利用者D", snapshot)
 
 
     def test_memory_source_recent_brain_context_uses_lancedb_without_sqlite_fallback(self) -> None:
@@ -1480,7 +1595,7 @@ class RegressionV3Test(unittest.TestCase):
                         "session_key": "s1",
                         "kind": "style",
                         "fact_key": "qstyle.persona",
-                        "value": "ロックマンEXEのロックマン",
+                        "value": "案内役A",
                         "summary": "",
                         "text": "",
                         "timestamp": 20,
@@ -1508,7 +1623,7 @@ class RegressionV3Test(unittest.TestCase):
         self.db.upsert_style("s1", "persona", "SQLite人格")
         self.db.insert_event(session_key="s1", ts=int(time.time()), actor="user", kind="chat", summary="sqlite event", salience=0.5, keywords=[])
         out = recent_brain_context(self.db, _Backend(), "s1")
-        self.assertIn("style:persona=ロックマンEXEのロックマン", out)
+        self.assertIn("style:persona=案内役A", out)
         self.assertIn("rule:security.never_output_secrets=true", out)
         self.assertIn("event:昨日は profile snapshot の掃除をした", out)
         self.assertNotIn("SQLite人格", out)

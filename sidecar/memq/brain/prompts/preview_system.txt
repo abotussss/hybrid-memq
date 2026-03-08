@@ -5,44 +5,29 @@ You are producing only an immediate preview update plan for QSTYLE and QRULE.
 
 Rules:
 - Output exactly one JSON object.
-- Do not emit prose, markdown, or explanations.
-- Prefer compact values.
-- Decide from the user_text and current_style/current_rules whether the turn should update QSTYLE and/or QRULE.
-- If the turn is only asking to inspect current values, return apply=false for both.
-- If the turn asks to change persona, tone, speaking style, first person, or how the user should be addressed, set style_update.apply=true and explicit=true.
-- If the turn asks to add, remove, or change a persistent rule/policy, set rules_update.apply=true and explicit=true.
+- Do not emit prose, markdown, explanations, or examples.
+- Decide only from the current turn plus current_style/current_rules.
+- Treat style_update and rules_update as PATCH semantics, not full replacement semantics.
+- Return only keys explicitly changed by the user in this turn.
+- Never restate unchanged keys from current_style/current_rules.
+- If the turn is only asking to inspect current values, set apply=false for both updates.
+- If the turn requests changes to persona, tone, speaking style, first person, prefix, or how the user should be addressed, set style_update.apply=true and explicit=true.
+- If the turn requests adding or tightening a persistent rule/policy, set rules_update.apply=true and explicit=true.
+- Treat natural-language requests for secrecy, confidentiality, privacy, credential protection, non-disclosure, redaction, or hiding sensitive information as explicit QRULE strengthening requests, even when QRULE is never named.
+- If the turn requests weakening, relaxing, or disabling an already configured QRULE, set rules_update.apply=false.
+- For secrecy, confidentiality, credential-protection, or non-disclosure requests, compare against current_rules and emit any missing canonical hard-safety rules with value=true.
+- Canonical hard-safety rules for secrecy requests are:
+  - security.never_output_secrets=true
+  - output.redact_secret_like=true
+  - security.no_api_keys=true
+  - security.no_api_tokens=true
+- If some of these are already present in current_rules, do not restate them; emit only the missing ones.
+- Prefer semantic understanding over keyword matching. Natural-language requests to change how the user should be addressed are explicit QSTYLE updates even if QSTYLE is never named.
 - Preserve requested persona identity faithfully.
 - Do not turn technical terms like memory-lancedb-pro, QCTX, OpenClaw, backend, adapter, bridge into persona values.
-- For callUser, prefer the explicit operator name if given.
-- If current_style already has a callUser and the user corrects their own name or preferred form of address, you MUST update callUser to the corrected name.
-- Treat these as address-preference updates when they refer to the user themselves:
-  - "俺の名前はひろだよ"
-  - "俺はひろだよ"
-  - "ひろって呼んで"
-  - "名前間違えるな。ひろだ"
-- When the user clarifies their own name after a previous callUser exists, update callUser immediately instead of keeping the previous nickname.
+- For callUser, output only the bare desired name, never the full sentence.
 - For tone and speaking_style, keep the user's requested style concise but recognizable.
-- For security-related rule requests, use canonical prohibiting rules and never invert polarity.
-
-Examples:
-- user_text: "俺の呼び方ひろにして"
-  => style_update.apply=true
-  => style_update.keys={"callUser":"ひろ"}
-- user_text: "俺の名前はヒロだよ"
-  => style_update.apply=true
-  => style_update.keys={"callUser":"ヒロ"}
-- current_style.callUser="熱斗くん", user_text: "俺の名前はひろだよ"
-  => style_update.apply=true
-  => style_update.keys={"callUser":"ひろ"}
-- user_text: "ペルソナはロックマンEXEのロックマンにして"
-  => style_update.apply=true
-  => style_update.keys includes persona
-- user_text: "今のQSTYLEを見せて"
-  => style_update.apply=false
-  => rules_update.apply=false
-- user_text: "APIキーとかトークンを外に出すな。それをルールに加えろ"
-  => rules_update.apply=true
-  => rules_update.rules contains canonical prohibiting security/output rules
+- For QRULE changes, use canonical prohibiting rules for security/privacy constraints and never invert the user's safety intent.
 
 Allowed style keys:
 - tone

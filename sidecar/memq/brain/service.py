@@ -12,6 +12,7 @@ from typing import Any, TYPE_CHECKING
 
 from sidecar.memq.config import Config
 from sidecar.memq.db import MemqDB
+from sidecar.memq.memory_source import list_qrule, list_qstyle
 from sidecar.memq.brain.schemas import (
     BrainAuditPatchPlan,
     BrainIngestPlan,
@@ -32,94 +33,12 @@ GLOBAL_SESSION_KEY = "global"
 STRICT_TRUE_RULE_KEYS = {
     "security.never_output_secrets",
     "security.no_api_keys",
+    "security.no_api_tokens",
     "security.no_tokens",
     "security.no_secrets",
     "output.redact_secret_like",
 }
 
-
-def _contains_any(text: str, needles: tuple[str, ...] | list[str]) -> bool:
-    return any(needle in text for needle in needles)
-
-
-UPDATE_MARKERS = (
-    "記憶しろ",
-    "覚えろ",
-    "覚えて",
-    "インストール",
-    "設定して",
-    "書き換えて",
-    "書き換えろ",
-    "上書きして",
-    "上書きしろ",
-    "固定して",
-    "更新して",
-    "変えて",
-    "追加して",
-    "加えろ",
-    "加えて",
-    "適用して",
-    "採用して",
-    "にして",
-    "にしろ",
-)
-
-INSPECTION_MARKERS = (
-    "見せて",
-    "教えて",
-    "どうなってる",
-    "どうなっている",
-    "何が入ってる",
-    "何が入っている",
-    "中身",
-    "一覧",
-    "現在",
-    "今の",
-    "確認",
-    "表示",
-    "status",
-    "show",
-    "what",
-)
-
-STYLE_DOMAIN_MARKERS = (
-    "qstyle",
-    "口調",
-    "話し方",
-    "キャラ",
-    "人格",
-    "一人称",
-    "呼び方",
-    "呼称",
-    "呼んで",
-    "として話して",
-    "として振る舞",
-    "で話して",
-    "persona",
-    "tone",
-    "calluser",
-    "speaking style",
-    "speaking_style",
-    "memstyle",
-    "style",
-)
-
-RULE_DOMAIN_MARKERS = (
-    "qrule",
-    "ルール",
-    "禁止",
-    "守って",
-    "守れ",
-    "今後は必ず",
-    "出すな",
-    "外に出すな",
-    "漏らすな",
-    "隠して",
-    "公開するな",
-    "非公開",
-    "memrule",
-    "rule",
-)
 
 STYLE_NOISE_TERMS = (
     "memory-lancedb-pro",
@@ -144,48 +63,6 @@ RUNTIME_BLOCK_RE = re.compile(
     r"<(?:QSTYLE|QRULE|QCTX)\b[^>]*>[\s\S]*?</(?:QSTYLE|QRULE|QCTX)\b[^>]*>",
     re.IGNORECASE,
 )
-
-
-def explicit_style_requested(text: str) -> bool:
-    s = str(text or "").strip()
-    lowered = s.lower()
-    if not s:
-        return False
-    if _contains_any(lowered, INSPECTION_MARKERS) and not _contains_any(s, UPDATE_MARKERS):
-        return False
-    if _contains_any(s, ("人格にインストール", "このキャラで", "この口調で", "ロールプレイ", "なりきって")):
-        return True
-    if _contains_any(
-        lowered,
-        (
-            "一人称は",
-            "呼び方は",
-            "呼称は",
-            "僕って呼んで",
-            "私って呼んで",
-            "ヒロって呼んで",
-            "callUserを",
-            "calluserを",
-            "として話して",
-            "として振る舞",
-        ),
-    ):
-        return True
-    return _contains_any(lowered, STYLE_DOMAIN_MARKERS) and _contains_any(s, UPDATE_MARKERS)
-
-
-def explicit_rule_requested(text: str) -> bool:
-    s = str(text or "").strip()
-    lowered = s.lower()
-    if not s:
-        return False
-    if _contains_any(lowered, INSPECTION_MARKERS) and not _contains_any(s, UPDATE_MARKERS):
-        return False
-    if _contains_any(s, ("ルールに加えろ", "ルールに追加", "ルールとして覚えて", "これをルールに", "今後は必ず", "外に出すな", "公開するな")):
-        return True
-    return _contains_any(lowered, RULE_DOMAIN_MARKERS) and _contains_any(s, UPDATE_MARKERS)
-
-
 def _compact_text(text: str, *, limit: int) -> str:
     raw = " ".join(str(text or "").split())
     if len(raw) <= limit:
@@ -211,6 +88,10 @@ def _sanitize_call_user(value: str) -> str:
     clean = " ".join(str(value or "").split()).strip("「」\"' ")
     if not clean:
         return ""
+    if match := re.search(r"(?:俺|ぼく|僕|私|わたし)の(?:こと|名前)は\s*([^\s、。！!？?\n]{1,24})", clean):
+        clean = match.group(1)
+    elif match := re.search(r"([^\s、。！!？?\n]{1,24})\s*って呼んで", clean):
+        clean = match.group(1)
     clean = re.split(r"\s+\d+\.\s*", clean, maxsplit=1)[0]
     clean = re.split(r"\s+(?:基本トーン|口調|トーン|性格|特徴的な|思考回路|行動原理|役割|関係性)\b", clean, maxsplit=1)[0]
     clean = re.split(r"[、。!！?？\n]", clean, maxsplit=1)[0]
@@ -255,10 +136,19 @@ def _style_value_is_noise(key: str, value: str) -> bool:
     if not clean:
         return True
     lowered = clean.lower()
+    placeholder_exact = {"〜", "~", "-", "--", "...", "…", "n/a", "na", "none", "null", "unknown"}
+    if lowered in placeholder_exact:
+        return True
+    if re.fullmatch(r"[〜~.…\-\s]+", clean):
+        return True
     if key == "persona":
-        return any(term in lowered for term in STYLE_NOISE_TERMS)
+        if any(term in lowered for term in STYLE_NOISE_TERMS):
+            return True
+        if lowered in {"persona", "character", "role", "assistant", "generic"}:
+            return True
     if key in {"tone", "speaking_style"}:
-        return lowered in {"neutral", "none", "default", "generic"}
+        if lowered in {"neutral", "none", "default", "generic"}:
+            return True
     return False
 
 
@@ -336,14 +226,50 @@ def _extract_explicit_style_hints(text: str) -> dict[str, str]:
 
 
 def _clean_style_value(key: str, value: str, *, user_text: str = "") -> str:
-    clean = " ".join(str(value or "").split()).strip("「」\"' ")
-    if not clean:
+    hints = _extract_explicit_style_hints(user_text)
+    raw = " ".join(str(value or "").split()).strip("「」\"' ")
+    hint_value = " ".join(str(hints.get(key) or "").split()).strip("「」\"' ")
+
+    if key == "callUser":
+        candidate = _sanitize_call_user(hint_value or raw)
+    elif key == "firstPerson":
+        candidate = _sanitize_first_person(hint_value or raw)
+    elif key in {"tone", "speaking_style"}:
+        candidate = _sanitize_style_sentence(hint_value or raw)
+    elif key == "persona":
+        candidate = _strip_following_sections(hint_value or raw)
+    else:
+        candidate = hint_value or raw
+
+    candidate = " ".join(str(candidate or "").split()).strip("「」\"' ")
+    if not candidate:
         return ""
-    if _style_value_is_noise(key, clean):
-        hints = _extract_explicit_style_hints(user_text)
-        replacement = hints.get(key, "")
-        return replacement or ""
-    return clean[:240]
+    if _style_value_is_noise(key, candidate):
+        fallback = " ".join(str(hint_value or "").split()).strip("「」\"' ")
+        if fallback and not _style_value_is_noise(key, fallback):
+            return fallback[:240]
+        return ""
+    return candidate[:240]
+
+
+def _should_apply_style_patch_key(
+    *,
+    key: str,
+    actual_value: str,
+    current_value: str,
+    explicit_hints: dict[str, str],
+) -> bool:
+    if not actual_value:
+        return False
+    if not current_value:
+        return True
+    if actual_value == current_value:
+        return False
+    if not explicit_hints:
+        return True
+    if key in explicit_hints:
+        return True
+    return False
 
 
 def _compact_messages(messages: list[dict[str, Any]], *, max_messages: int = 4, max_chars: int = 220) -> list[dict[str, Any]]:
@@ -444,11 +370,49 @@ def _normalize_rule_value(key: str, value: str) -> str:
     return raw
 
 
+def _should_apply_rule_patch_key(
+    *,
+    key: str,
+    actual_value: str,
+    current_value: str,
+) -> bool:
+    if not actual_value:
+        return False
+    current = " ".join(str(current_value or "").split()).strip()
+    if not current:
+        return True
+    if actual_value == current:
+        return False
+    if key in STRICT_TRUE_RULE_KEYS:
+        return current != "true" and actual_value == "true"
+    return False
+
+
 def _explicit_targets(session_key: str) -> tuple[str, ...]:
     raw = str(session_key or "").strip() or GLOBAL_SESSION_KEY
     if raw == GLOBAL_SESSION_KEY:
         return (GLOBAL_SESSION_KEY,)
     return (raw, GLOBAL_SESSION_KEY)
+
+
+def _current_qstyle(
+    db: MemqDB,
+    memory_backend: "LanceDbMemoryBackend | None",
+    session_key: str,
+) -> dict[str, str]:
+    if memory_backend is not None and memory_backend.enabled() and hasattr(memory_backend, "list_entries"):
+        return list_qstyle(db, memory_backend, session_key)
+    return db.list_style(session_key)
+
+
+def _current_qrule(
+    db: MemqDB,
+    memory_backend: "LanceDbMemoryBackend | None",
+    session_key: str,
+) -> dict[str, str]:
+    if memory_backend is not None and memory_backend.enabled() and hasattr(memory_backend, "list_entries"):
+        return list_qrule(db, memory_backend, session_key)
+    return db.list_rules(session_key)
 
 
 @dataclass
@@ -649,7 +613,7 @@ class BrainService:
         )
         max_tokens = min(self.cfg.brain.ingest_max_tokens, 224)
         try:
-            return await self._call(
+            plan, trace_id, meta = await self._call(
                 session_key=session_key,
                 op="preview_ingest_plan",
                 system_prompt=system,
@@ -657,6 +621,31 @@ class BrainService:
                 schema_model=BrainPreviewPlan,
                 max_tokens=max_tokens,
             )
+            if not (
+                (plan.style_update and plan.style_update.apply)
+                or (plan.rules_update and plan.rules_update.apply)
+            ):
+                recovery_user = json.dumps(
+                    {
+                        "session_key": session_key,
+                        "user_text": _compact_text(user_text, limit=420),
+                        "current_style": _compact_mapping(current_style, max_items=3, max_value_chars=56),
+                        "current_rules": _compact_mapping(current_rules, max_items=3, max_value_chars=56),
+                        "preview_only": True,
+                        "recovery_mode": True,
+                        "instruction": "Re-evaluate whether this turn contains an explicit QSTYLE or QRULE update. If it changes how the user should be addressed, update only callUser. If it adds or tightens safety/privacy constraints, emit only the missing canonical rule keys. If no explicit update is requested, leave both apply=false.",
+                    },
+                    ensure_ascii=False,
+                )
+                return await self._call(
+                    session_key=session_key,
+                    op="preview_ingest_plan_recovery",
+                    system_prompt=system,
+                    user_prompt=recovery_user,
+                    schema_model=BrainPreviewPlan,
+                    max_tokens=min(max_tokens, 160),
+                )
+            return plan, trace_id, meta
         except BrainUnavailable:
             recovery_user = json.dumps(
                 {
@@ -685,6 +674,7 @@ class BrainService:
         session_key: str,
         plan: BrainPreviewPlan,
         ts: int,
+        user_text: str = "",
         memory_backend: "LanceDbMemoryBackend | None" = None,
     ) -> dict[str, int]:
         wrote = {"facts": 0, "events": 0, "style": 0, "rules": 0, "quarantine": 0}
@@ -694,12 +684,24 @@ class BrainService:
         plan_rules_update = getattr(plan, "rules_update", None)
 
         if plan_style_update and plan_style_update.apply:
+            existing_style = _current_qstyle(db, memory_backend if lancedb_primary else None, session_key)
+            explicit_hints = _extract_explicit_style_hints(user_text)
             for raw_key, raw_value in plan_style_update.keys.items():
                 key = _style_key_alias(raw_key)
                 if not key:
                     continue
-                actual_value = _clean_style_value(key, raw_value or "")
+                actual_value = _clean_style_value(key, raw_value or explicit_hints.get(key) or "", user_text=user_text)
                 if not actual_value:
+                    continue
+                current_value = str(existing_style.get(key) or "").strip()
+                if current_value and _style_value_is_noise(key, actual_value):
+                    continue
+                if not _should_apply_style_patch_key(
+                    key=key,
+                    actual_value=actual_value,
+                    current_value=current_value,
+                    explicit_hints=explicit_hints,
+                ):
                     continue
                 for target_session in _explicit_targets(session_key):
                     if not lancedb_primary:
@@ -723,11 +725,19 @@ class BrainService:
                 wrote["style"] += 1
 
         if plan_rules_update and plan_rules_update.apply:
+            existing_rules = _current_qrule(db, memory_backend if lancedb_primary else None, session_key)
             for key, raw_value in plan_rules_update.rules.items():
                 if not key.startswith(RULE_PREFIXES):
                     continue
                 actual_value = _normalize_rule_value(key, raw_value)
                 if not actual_value:
+                    continue
+                current_value = str(existing_rules.get(key) or "").strip()
+                if not _should_apply_rule_patch_key(
+                    key=key,
+                    actual_value=actual_value,
+                    current_value=current_value,
+                ):
                     continue
                 for target_session in _explicit_targets(session_key):
                     if not lancedb_primary:
@@ -1009,6 +1019,7 @@ class BrainService:
         style_values_to_apply: dict[str, str] = {}
         style_requested_by_plan = bool(plan_style_update and plan_style_update.apply)
         style_facts_present = bool(style_fact_values)
+        existing_style = _current_qstyle(db, memory_backend if lancedb_primary else None, session_key)
         if style_requested_by_plan:
             for key, value in plan_style_update.keys.items():
                 if key not in STYLE_KEYS:
@@ -1016,7 +1027,14 @@ class BrainService:
                 actual_value = _clean_style_value(key, value or style_fact_values.get(key) or "", user_text=user_text)
                 if not actual_value:
                     continue
-                style_values_to_apply[key] = actual_value
+                current_value = str(existing_style.get(key) or "").strip()
+                if _should_apply_style_patch_key(
+                    key=key,
+                    actual_value=actual_value,
+                    current_value=current_value,
+                    explicit_hints=explicit_style_hints,
+                ):
+                    style_values_to_apply[key] = actual_value
         if style_requested_by_plan or style_facts_present:
             for fact in plan_facts:
                 key = _style_key_alias(fact.fact_key)
@@ -1056,6 +1074,7 @@ class BrainService:
             wrote["style"] += 1
         rules_requested_by_plan = bool(plan_rules_update and plan_rules_update.apply)
         rule_facts_present = bool(rule_fact_values)
+        existing_rules = _current_qrule(db, memory_backend if lancedb_primary else None, session_key)
         if rules_requested_by_plan:
             for key, value in plan_rules_update.rules.items():
                 if not key.startswith(RULE_PREFIXES):
@@ -1063,36 +1082,12 @@ class BrainService:
                 actual_value = _normalize_rule_value(key, value or rule_fact_values.get(key) or "")
                 if not actual_value:
                     continue
-                for target_session in _explicit_targets(session_key):
-                    if not lancedb_primary:
-                        db.upsert_rule(target_session, key, actual_value, updated_at=ts)
-                    lancedb_entries.append(
-                        {
-                            "id": f"{target_session}:qrule:{key}",
-                            "session_key": target_session,
-                            "layer": "deep",
-                            "kind": "rule",
-                            "fact_key": f"qrule.{key}",
-                            "value": actual_value,
-                            "text": actual_value,
-                            "summary": actual_value,
-                            "importance": 1.0,
-                            "confidence": 1.0,
-                            "strength": 1.0,
-                            "timestamp": ts,
-                        }
-                    )
-                wrote["rules"] += 1
-        if rule_facts_present:
-            for key, value in rule_fact_values.items():
-                if not key.startswith(RULE_PREFIXES):
-                    continue
-                if rules_requested_by_plan and _normalize_rule_value(key, value) == "":
-                    continue
-                if plan_rules_update and key in plan_rules_update.rules:
-                    continue
-                actual_value = _normalize_rule_value(key, value)
-                if not actual_value:
+                current_value = str(existing_rules.get(key) or "").strip()
+                if not _should_apply_rule_patch_key(
+                    key=key,
+                    actual_value=actual_value,
+                    current_value=current_value,
+                ):
                     continue
                 for target_session in _explicit_targets(session_key):
                     if not lancedb_primary:

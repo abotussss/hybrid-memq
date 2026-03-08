@@ -342,6 +342,7 @@ async def memory_preview_prompt(req: PreviewRequest) -> dict[str, Any]:
         session_key=req.sessionKey,
         plan=plan,
         ts=now_ts,
+        user_text=req.userText,
         memory_backend=memory_backend if _use_memory_backend() else None,
     )
     overrides_after = load_local_overrides(cfg.root)

@@ -123,7 +123,7 @@ def _humanize_deep_anchor(text: str) -> str:
         lowered = candidate.lower()
         if lowered in TECHNICAL_ANCHOR_VALUES:
             continue
-        if len(candidate) < 6 and lowered not in {"ヒロ", "僕"}:
+        if len(candidate) < 6 and not any(ch.isascii() is False for ch in candidate):
             continue
         human.append(candidate)
     human = _dedupe_consecutive_texts(human)

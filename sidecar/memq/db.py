@@ -100,17 +100,33 @@ def _dirty_style_value(key: str, value: str) -> bool:
     clean_key = str(key or "").strip()
     clean_value = _normalize_text(value or "")
     lowered = clean_value.lower()
+    placeholder_exact = {"〜", "~", "-", "--", "...", "…", "n/a", "na", "none", "null", "unknown"}
     if clean_key not in STYLE_ALLOWED_KEYS:
         return True
     if not clean_value:
         return True
+    if lowered in placeholder_exact:
+        return True
+    if re.fullmatch(r"[〜~.…\-\s]+", clean_value):
+        return True
     for marker in ("<memrules", "<memstyle", "<memctx", "<qrule", "<qstyle", "<qctx", "budget_tokens="):
         if marker in lowered:
+            return True
+    if clean_key == "callUser":
+        if len(clean_value) > 24:
+            return True
+        if any(token in clean_value for token in ("俺のことは", "僕のことは", "私のことは", "名前は", "って呼ん", "呼んで")):
+            return True
+        if " " in clean_value:
             return True
     if clean_key == "persona":
         for term in STYLE_TECHNICAL_TERMS:
             if term in lowered:
                 return True
+        if lowered in {"persona", "character", "role", "assistant", "generic"}:
+            return True
+    if clean_key in {"tone", "speaking_style"} and lowered in {"neutral", "default", "generic"}:
+        return True
     return False
 
 
