@@ -12,6 +12,12 @@ Responsibilities:
 - query memory-lancedb-pro for memory recall
 - expose proof/debug endpoints
 
+Upstream reference for the memory backend:
+
+- [win4r/memory-lancedb-pro](https://github.com/win4r/memory-lancedb-pro)
+
+This repo uses a bundled/adapted integration of that backend. Users normally do not install the upstream repository separately.
+
 Main endpoints:
 
 - `GET /health`
@@ -35,6 +41,13 @@ sidecar は MEMQ の runtime controller です。
 - plan を検証して deterministic に適用する
 - memory-lancedb-pro を検索して記憶を引く
 - proof/debug endpoint を提供する
+
+memory backend の上流リポジトリ:
+
+- [win4r/memory-lancedb-pro](https://github.com/win4r/memory-lancedb-pro)
+
+この repo では、その backend を bundled / adapted integration として含めています。
+通常利用では、上流リポジトリを別途 install しません。
 
 主な endpoint:
 

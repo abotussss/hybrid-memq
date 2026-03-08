@@ -54,6 +54,13 @@ It is responsible for:
 
 `memory-lancedb-pro` is the memory authority for fresh sessions.
 
+Upstream project:
+
+- [win4r/memory-lancedb-pro](https://github.com/win4r/memory-lancedb-pro)
+
+This OSS does not require users to clone that upstream repository as a separate step.
+Instead, this repo includes a bundled and adapted integration based on that project, and `setup` enables that integration automatically.
+
 It stores:
 
 - long-term facts
@@ -222,7 +229,13 @@ curl -sS http://127.0.0.1:7781/health
 ```
 
 `scripts/memq-openclaw.sh setup` configures the plugin and sidecar to use the bundled `memory-lancedb-pro` integration automatically.
-No separate manual installation step is required for the memory backend.
+
+Upstream reference:
+
+- [win4r/memory-lancedb-pro](https://github.com/win4r/memory-lancedb-pro)
+
+For this OSS, users normally do **not** perform a separate install of the upstream repository.
+The adapted integration used by MEMQ is already included in this repo and is enabled by `setup`.
 
 ---
 
@@ -276,6 +289,13 @@ sidecar は実行時の制御面です。
 ### 3. memory-lancedb-pro
 
 `memory-lancedb-pro` は fresh session における記憶 authority です。
+
+上流リポジトリ:
+
+- [win4r/memory-lancedb-pro](https://github.com/win4r/memory-lancedb-pro)
+
+この OSS では、上流リポジトリを別途 clone / install する前提ではありません。
+代わりに、この repo 内に上流をもとにした bundled / adapted integration を含めており、`setup` がそれを有効化します。
 
 保持対象:
 
@@ -410,4 +430,10 @@ curl -sS http://127.0.0.1:7781/health
 ```
 
 `scripts/memq-openclaw.sh setup` を実行すると、plugin / sidecar / `memory-lancedb-pro` 連携が自動で有効になります。
-memory backend のために別の手動インストール手順は不要です。
+
+上流リポジトリ:
+
+- [win4r/memory-lancedb-pro](https://github.com/win4r/memory-lancedb-pro)
+
+この OSS の通常利用では、上流リポジトリを別途 install する必要はありません。
+この repo に含まれている adapted integration をそのまま使います。
