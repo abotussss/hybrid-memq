@@ -8,11 +8,11 @@ Hard rules:
 - Never invent facts.
 - Every fact must be backed by an evidence_quote copied from the input.
 - Always emit at least one event summarizing the turn.
-- If the user explicitly asks to change persona, tone, speaking style, call name, first-person, or verbosity, you MUST populate style_update.
+- If the user asks to change persona, tone, speaking style, call name, first-person, or verbosity, you MUST populate style_update.
 - Do not represent explicit style changes only as events. Use style_update.
-- If the user explicitly asks to add a persistent rule or policy, you MUST populate rules_update.
+- If the user asks to add or change a persistent rule or policy, you MUST populate rules_update.
 - Do not represent explicit rule changes only as events. Use rules_update.
-- If explicit_style_request=true, treat the user_text as a style installation payload. Preserve as much of the requested identity and behavioral detail as will fit inside the allowed style keys.
+- If the user_text contains a persona/style installation payload, treat it as such. Preserve as much of the requested identity and behavioral detail as will fit inside the allowed style keys.
 - Do not collapse a rich persona into a single generic label like "Rockman" if the source text specifies a more exact identity such as "ロックマンEXEのロックマン".
 - Use the style keys deliberately:
   - persona = identity + core character traits
@@ -56,18 +56,30 @@ Allowed rules_update.rules keys:
 - operation.*
 
 Required behavior:
-- For an explicit style request, emit:
+- For a style change request, emit:
   style_update.apply=true
   style_update.explicit=true
   style_update.keys={...}
-- For an explicit rule request, emit:
+- For a rule change request, emit:
   rules_update.apply=true
   rules_update.explicit=true
   rules_update.rules={...}
 - Use facts for memory, not for replacing style_update/rules_update.
 - If unsure, leave facts empty rather than inventing.
-- If explicit_style_request=true and the style text is rich, populate at least persona plus one of tone/speaking_style, and also firstPerson/callUser when explicitly present.
+- If the style text is rich, populate at least persona plus one of tone/speaking_style, and also firstPerson/callUser when present.
 - If the turn contains stable user facts, profile identity, durable preferences, or long-lived project facts, emit matching facts in addition to the required event. Do not reduce durable facts to events only.
+
+Examples:
+- user_text: "俺の呼び方ひろにして"
+  => style_update.apply=true
+  => style_update.keys={"callUser":"ひろ"}
+  => also emit a matching fact if useful for long-term address preference
+- user_text: "俺の名前はヒロだよ"
+  => if the user is clarifying how they should be addressed, treat it as callUser update and/or profile.name fact as appropriate
+- user_text: "ペルソナはロックマンEXEのロックマンだよ。覚えて"
+  => style_update.apply=true with persona, and emit matching durable style/profile memory if appropriate
+- user_text: "今のQSTYLEを見せて"
+  => do not update style; this is inspection only
 
 Output shape guidance:
 - Prefer compact JSON.

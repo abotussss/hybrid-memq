@@ -11,7 +11,7 @@ from pydantic import AliasChoices, BaseModel, Field
 import uvicorn
 
 from sidecar.memq.brain.schemas import BrainIngestPlan
-from sidecar.memq.brain.service import BrainService, explicit_rule_requested, explicit_style_requested
+from sidecar.memq.brain.service import BrainService
 from sidecar.memq.config import Config, load_config
 from sidecar.memq.db import MemqDB
 from sidecar.memq.lancedb_bridge import LanceDbMemoryBackend
@@ -145,10 +145,6 @@ def _fallback_ingest_plan(req: IngestRequest) -> BrainIngestPlan:
             }
         ]
     }
-    if explicit_style_requested(req.userText):
-        payload["style_update"] = {"apply": False, "explicit": True, "keys": {}}
-    if explicit_rule_requested(req.userText):
-        payload["rules_update"] = {"apply": False, "explicit": True, "rules": {}}
     return BrainIngestPlan.model_validate(payload)
 
 

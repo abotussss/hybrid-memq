@@ -593,21 +593,14 @@ class BrainService:
             "ingest_system.txt",
             "Return JSON only. Extract memory facts, timeline events, optional explicit style updates, optional explicit rules, and quarantine items. Do not invent facts. Use evidence quotes.",
         )
-        is_explicit_style = explicit_style_requested(user_text)
-        is_explicit_rule = explicit_rule_requested(user_text)
-        style_or_rule_install = is_explicit_style or is_explicit_rule
-        explicit_style_hints = _extract_explicit_style_hints(user_text) if is_explicit_style else {}
         user = json.dumps(
             {
                 "session_key": session_key,
-                "user_text": _compact_text(user_text, limit=1400 if style_or_rule_install else 260),
-                "assistant_text": "" if style_or_rule_install else _compact_text(assistant_text, limit=200),
-                "current_style": {} if style_or_rule_install else _compact_mapping(current_style, max_items=6, max_value_chars=80),
-                "current_rules": {} if style_or_rule_install else _compact_mapping(current_rules, max_items=6, max_value_chars=80),
-                "recent_summary": "" if style_or_rule_install else _compact_text(recent_summary, limit=200),
-                "style_install_hints": explicit_style_hints if style_or_rule_install else {},
-                "explicit_style_request": is_explicit_style,
-                "explicit_rule_request": is_explicit_rule,
+                "user_text": _compact_text(user_text, limit=960),
+                "assistant_text": _compact_text(assistant_text, limit=180),
+                "current_style": _compact_mapping(current_style, max_items=4, max_value_chars=72),
+                "current_rules": _compact_mapping(current_rules, max_items=4, max_value_chars=72),
+                "recent_summary": _compact_text(recent_summary, limit=180),
             },
             ensure_ascii=False,
         )
@@ -632,24 +625,17 @@ class BrainService:
             "preview_system.txt",
             "Return JSON only. Extract only explicit style_update and rules_update for the current turn.",
         )
-        is_explicit_style = explicit_style_requested(user_text)
-        is_explicit_rule = explicit_rule_requested(user_text)
-        style_or_rule_install = is_explicit_style or is_explicit_rule
-        explicit_style_hints = _extract_explicit_style_hints(user_text) if is_explicit_style else {}
         user = json.dumps(
             {
                 "session_key": session_key,
-                "style_text_excerpt": _compact_text(user_text, limit=1400 if style_or_rule_install else 520),
-                "current_style": _compact_mapping(current_style, max_items=2, max_value_chars=48),
-                "current_rules": _compact_mapping(current_rules, max_items=2, max_value_chars=48),
-                "style_install_hints": explicit_style_hints,
-                "explicit_style_request": is_explicit_style,
-                "explicit_rule_request": is_explicit_rule,
+                "user_text": _compact_text(user_text, limit=960),
+                "current_style": _compact_mapping(current_style, max_items=4, max_value_chars=72),
+                "current_rules": _compact_mapping(current_rules, max_items=4, max_value_chars=72),
                 "preview_only": True,
             },
             ensure_ascii=False,
         )
-        max_tokens = min(self.cfg.brain.ingest_max_tokens, 224 if style_or_rule_install else 160)
+        max_tokens = min(self.cfg.brain.ingest_max_tokens, 224)
         try:
             return await self._call(
                 session_key=session_key,
@@ -660,17 +646,12 @@ class BrainService:
                 max_tokens=max_tokens,
             )
         except BrainUnavailable:
-            if not style_or_rule_install:
-                raise
             recovery_user = json.dumps(
                 {
                     "session_key": session_key,
-                    "style_text_excerpt": _compact_text(user_text, limit=320),
-                    "current_style": _compact_mapping(current_style, max_items=2, max_value_chars=40),
-                    "current_rules": _compact_mapping(current_rules, max_items=2, max_value_chars=40),
-                    "style_install_hints": explicit_style_hints,
-                    "explicit_style_request": is_explicit_style,
-                    "explicit_rule_request": is_explicit_rule,
+                    "user_text": _compact_text(user_text, limit=420),
+                    "current_style": _compact_mapping(current_style, max_items=3, max_value_chars=56),
+                    "current_rules": _compact_mapping(current_rules, max_items=3, max_value_chars=56),
                     "preview_only": True,
                     "recovery_mode": True,
                 },
@@ -764,8 +745,7 @@ class BrainService:
         lancedb_primary = memory_backend is not None and memory_backend.enabled()
         style_fact_values: dict[str, str] = {}
         rule_fact_values: dict[str, str] = {}
-        explicit_style = explicit_style_requested(user_text)
-        explicit_style_hints = _extract_explicit_style_hints(user_text) if explicit_style else {}
+        explicit_style_hints = _extract_explicit_style_hints(user_text)
         lancedb_entries: list[dict[str, Any]] = []
         event_payloads: list[dict[str, Any]] = []
         plan_facts = list(getattr(plan, "facts", []) or [])
@@ -939,7 +919,9 @@ class BrainService:
                     )
                     wrote["events"] += 1
         style_values_to_apply: dict[str, str] = {}
-        if plan_style_update and plan_style_update.apply and plan_style_update.explicit:
+        style_requested_by_plan = bool(plan_style_update and plan_style_update.apply)
+        style_facts_present = bool(style_fact_values)
+        if style_requested_by_plan:
             for key, value in plan_style_update.keys.items():
                 if key not in STYLE_KEYS:
                     continue
@@ -947,7 +929,7 @@ class BrainService:
                 if not actual_value:
                     continue
                 style_values_to_apply[key] = actual_value
-        if explicit_style:
+        if style_requested_by_plan or style_facts_present:
             for fact in plan_facts:
                 key = _style_key_alias(fact.fact_key)
                 if not key:
@@ -958,12 +940,10 @@ class BrainService:
                 current = style_values_to_apply.get(key, "")
                 if not current or _style_value_is_noise(key, current):
                     style_values_to_apply[key] = actual_value
-            for key, value in explicit_style_hints.items():
-                if key in {"callUser", "firstPerson", "persona", "tone", "speaking_style"}:
-                    style_values_to_apply[key] = value
-                    continue
-                current = style_values_to_apply.get(key, "")
-                if not current or _style_value_is_noise(key, current) or len(value) > len(current):
+            if style_values_to_apply:
+                for key, value in explicit_style_hints.items():
+                    if key not in STYLE_KEYS or not value:
+                        continue
                     style_values_to_apply[key] = value
         for key, actual_value in style_values_to_apply.items():
             for target_session in _explicit_targets(session_key):
@@ -986,7 +966,9 @@ class BrainService:
                     }
                 )
             wrote["style"] += 1
-        if plan_rules_update and plan_rules_update.apply and plan_rules_update.explicit:
+        rules_requested_by_plan = bool(plan_rules_update and plan_rules_update.apply)
+        rule_facts_present = bool(rule_fact_values)
+        if rules_requested_by_plan:
             for key, value in plan_rules_update.rules.items():
                 if not key.startswith(RULE_PREFIXES):
                     continue
@@ -1013,32 +995,37 @@ class BrainService:
                         }
                     )
                 wrote["rules"] += 1
-        if explicit_rule_requested(user_text):
-            for fact in plan_facts:
-                if fact.fact_key.startswith(RULE_PREFIXES):
-                    actual_value = _normalize_rule_value(fact.fact_key, fact.value)
-                    if not actual_value:
-                        continue
-                    for target_session in _explicit_targets(session_key):
-                        if not lancedb_primary:
-                            db.upsert_rule(target_session, fact.fact_key, actual_value, updated_at=ts)
-                        lancedb_entries.append(
-                            {
-                                "id": f"{target_session}:qrule:{fact.fact_key}",
-                                "session_key": target_session,
-                                "layer": "deep",
-                                "kind": "rule",
-                                "fact_key": f"qrule.{fact.fact_key}",
-                                "value": actual_value,
-                                "text": actual_value,
-                                "summary": actual_value,
-                                "importance": 1.0,
-                                "confidence": 1.0,
-                                "strength": 1.0,
-                                "timestamp": ts,
-                            }
-                        )
-                    wrote["rules"] += 1
+        if rule_facts_present:
+            for key, value in rule_fact_values.items():
+                if not key.startswith(RULE_PREFIXES):
+                    continue
+                if rules_requested_by_plan and _normalize_rule_value(key, value) == "":
+                    continue
+                if plan_rules_update and key in plan_rules_update.rules:
+                    continue
+                actual_value = _normalize_rule_value(key, value)
+                if not actual_value:
+                    continue
+                for target_session in _explicit_targets(session_key):
+                    if not lancedb_primary:
+                        db.upsert_rule(target_session, key, actual_value, updated_at=ts)
+                    lancedb_entries.append(
+                        {
+                            "id": f"{target_session}:qrule:{key}",
+                            "session_key": target_session,
+                            "layer": "deep",
+                            "kind": "rule",
+                            "fact_key": f"qrule.{key}",
+                            "value": actual_value,
+                            "text": actual_value,
+                            "summary": actual_value,
+                            "importance": 1.0,
+                            "confidence": 1.0,
+                            "strength": 1.0,
+                            "timestamp": ts,
+                        }
+                    )
+                wrote["rules"] += 1
         if not style_rules_only:
             fallback_summary = " ".join(str(user_text or "").split())[:160]
             if lancedb_primary:

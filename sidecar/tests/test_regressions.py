@@ -171,6 +171,64 @@ class RegressionV3Test(unittest.TestCase):
         finally:
             asyncio.run(svc.close())
 
+    def test_apply_ingest_plan_uses_brain_style_plan_without_local_gating(self) -> None:
+        svc = BrainService(self.cfg)
+        try:
+            plan = BrainIngestPlan.model_validate(
+                {
+                    "style_update": {
+                        "apply": True,
+                        "explicit": True,
+                        "keys": {
+                            "callUser": "ひろ",
+                            "persona": "ロックマン（Rockman.EXE）",
+                        },
+                    }
+                }
+            )
+            svc.apply_ingest_plan(
+                self.db,
+                session_key="s1",
+                plan=plan,
+                ts=int(time.time()),
+                user_text="俺の呼び方ひろにして",
+                style_rules_only=True,
+            )
+            style = self.db.list_style("s1")
+            self.assertEqual("ひろ", style.get("callUser"))
+            self.assertEqual("ロックマン（Rockman.EXE）", style.get("persona"))
+        finally:
+            asyncio.run(svc.close())
+
+    def test_apply_ingest_plan_uses_brain_rule_plan_without_local_gating(self) -> None:
+        svc = BrainService(self.cfg)
+        try:
+            plan = BrainIngestPlan.model_validate(
+                {
+                    "rules_update": {
+                        "apply": True,
+                        "explicit": True,
+                        "rules": {
+                            "security.never_output_secrets": "true",
+                            "security.no_api_keys": "true",
+                        },
+                    }
+                }
+            )
+            svc.apply_ingest_plan(
+                self.db,
+                session_key="s1",
+                plan=plan,
+                ts=int(time.time()),
+                user_text="外に出してはいけない情報は秘匿して",
+                style_rules_only=True,
+            )
+            rules = self.db.list_rules("s1")
+            self.assertEqual("true", rules.get("security.never_output_secrets"))
+            self.assertEqual("true", rules.get("security.no_api_keys"))
+        finally:
+            asyncio.run(svc.close())
+
     def test_explicit_style_requested_ignores_inspection_queries(self) -> None:
         self.assertFalse(explicit_style_requested("君のMemstyleはどうなってる？"))
         self.assertFalse(explicit_style_requested("今のstyleを見せて"))
