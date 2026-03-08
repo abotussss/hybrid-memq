@@ -327,8 +327,6 @@ async def memory_ingest_turn(req: IngestRequest) -> dict[str, Any]:
 @app.post("/memory/preview_prompt")
 async def memory_preview_prompt(req: PreviewRequest) -> dict[str, Any]:
     now_ts = req.ts or int(datetime.now().timestamp())
-    if not explicit_style_requested(req.userText) and not explicit_rule_requested(req.userText):
-        return {"ok": True, "applied": False, "wrote": {"facts": 0, "events": 0, "style": 0, "rules": 0, "quarantine": 0}, "traceId": ""}
     overrides = load_local_overrides(cfg.root)
     style = {**list_qstyle(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides.qstyle}
     rules = {**list_qrule(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides.qrule}
@@ -359,7 +357,8 @@ async def memory_preview_prompt(req: PreviewRequest) -> dict[str, Any]:
     effective_qstyle = {**list_qstyle(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides_after.qstyle}
     effective_qrule = {**list_qrule(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides_after.qrule}
     write_current_snapshots(cfg.root, qstyle=effective_qstyle, qrule=effective_qrule)
-    return {"ok": True, "applied": True, "wrote": wrote, "traceId": trace_id}
+    applied = bool(wrote.get("style") or wrote.get("rules"))
+    return {"ok": True, "applied": applied, "wrote": wrote, "traceId": trace_id}
 
 
 @app.post("/conversation/summarize")
