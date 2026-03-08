@@ -16,6 +16,11 @@ Upstream reference for the memory backend:
 
 - [win4r/memory-lancedb-pro](https://github.com/win4r/memory-lancedb-pro)
 
+Credit:
+
+- This sidecar uses a bundled/adapted integration derived from `memory-lancedb-pro`.
+- Thanks to the upstream author and contributors for the original work.
+
 This repo uses a bundled/adapted integration of that backend. Users normally do not install the upstream repository separately.
 
 Main endpoints:
@@ -45,6 +50,11 @@ sidecar は MEMQ の runtime controller です。
 memory backend の上流リポジトリ:
 
 - [win4r/memory-lancedb-pro](https://github.com/win4r/memory-lancedb-pro)
+
+謝辞:
+
+- この sidecar は `memory-lancedb-pro` をもとにした bundled / adapted integration を利用しています。
+- 元の実装を公開している作者と貢献者に感謝します。
 
 この repo では、その backend を bundled / adapted integration として含めています。
 通常利用では、上流リポジトリを別途 install しません。

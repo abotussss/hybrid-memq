@@ -20,6 +20,11 @@ Upstream reference:
 
 - [win4r/memory-lancedb-pro](https://github.com/win4r/memory-lancedb-pro)
 
+Credit:
+
+- This setup enables a bundled/adapted integration derived from `memory-lancedb-pro`.
+- Thanks to the upstream author and contributors.
+
 This setup uses the bundled/adapted integration included in this repo.
 You do not normally install the upstream repository separately for this OSS.
 
@@ -42,6 +47,11 @@ curl -sS http://127.0.0.1:7781/health
 上流リポジトリ:
 
 - [win4r/memory-lancedb-pro](https://github.com/win4r/memory-lancedb-pro)
+
+謝辞:
+
+- この setup は `memory-lancedb-pro` をもとにした bundled / adapted integration を有効化します。
+- 上流の作者と貢献者に感謝します。
 
 この setup は、この repo に同梱されている bundled / adapted integration を有効化します。
 この OSS の通常利用では、上流リポジトリを別途 install する必要はありません。

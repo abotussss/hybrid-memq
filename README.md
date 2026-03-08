@@ -58,6 +58,11 @@ Upstream project:
 
 - [win4r/memory-lancedb-pro](https://github.com/win4r/memory-lancedb-pro)
 
+Credit:
+
+- This project uses a bundled/adapted integration derived from `memory-lancedb-pro`.
+- Thanks to the upstream author and contributors of `win4r/memory-lancedb-pro` for the original design and implementation work.
+
 This OSS does not require users to clone that upstream repository as a separate step.
 Instead, this repo includes a bundled and adapted integration based on that project, and `setup` enables that integration automatically.
 
@@ -293,6 +298,11 @@ sidecar は実行時の制御面です。
 上流リポジトリ:
 
 - [win4r/memory-lancedb-pro](https://github.com/win4r/memory-lancedb-pro)
+
+謝辞:
+
+- この OSS では `memory-lancedb-pro` をもとにした bundled / adapted integration を利用しています。
+- 元の設計と実装を公開している `win4r/memory-lancedb-pro` の作者と貢献者に感謝します。
 
 この OSS では、上流リポジトリを別途 clone / install する前提ではありません。
 代わりに、この repo 内に上流をもとにした bundled / adapted integration を含めており、`setup` がそれを有効化します。
