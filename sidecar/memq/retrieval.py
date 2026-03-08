@@ -9,7 +9,7 @@ from typing import Any
 from sidecar.memq.db import MemqDB, SearchResult
 from sidecar.memq.brain.schemas import BrainRecallPlan
 from sidecar.memq.lancedb_bridge import LanceDbMemoryBackend
-from sidecar.memq.memory_source import deep_anchor, profile_snapshot, recent_digest, surface_anchor
+from sidecar.memq.memory_source import deep_anchor, qctx_profile_snapshot, surface_anchor
 
 
 @dataclass
@@ -64,6 +64,7 @@ def _result_text(item: SearchResult) -> str:
         for part in (
             str(item.fact_key or ""),
             str(item.value or ""),
+            str(getattr(item, "text", "") or ""),
             str(item.summary or ""),
         )
         if part
@@ -284,6 +285,7 @@ def _dict_to_search_result(item: dict[str, Any]) -> SearchResult:
         session_key=str(item.get("session_key") or ""),
         layer=str(item.get("layer") or ""),
         kind=str(item.get("kind") or ""),
+        text=str(item.get("text") or ""),
         fact_key=str(item.get("fact_key") or ""),
         value=str(item.get("value") or ""),
         summary=str(item.get("summary") or ""),
@@ -440,8 +442,7 @@ def retrieve_with_plan(
     anchors = {
         "wm.surf": surface_anchor(db, memory_backend, session_key),
         "wm.deep": deep_anchor(db, memory_backend, session_key),
-        "p.snapshot": profile_snapshot(db, memory_backend, session_key, qstyle_for_snapshot),
-        "t.recent": recent_digest(db, memory_backend, session_key, days=2),
+        "p.snapshot": qctx_profile_snapshot(db, memory_backend, session_key),
     }
     if plan.intent.profile >= 0.45 and not deep:
         fallback_candidates = _search_memory(

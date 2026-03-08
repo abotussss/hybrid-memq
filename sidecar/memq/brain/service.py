@@ -939,6 +939,14 @@ class BrainService:
                 )
                 wrote["facts"] += 1
             for event in plan_events:
+                raw_event_text = ""
+                actor_name = str(event.actor or "").lower()
+                if actor_name == "user":
+                    raw_event_text = " ".join(str(user_text or "").split())[:400]
+                elif actor_name == "assistant":
+                    raw_event_text = " ".join(str(assistant_text or "").split())[:400]
+                if not raw_event_text:
+                    raw_event_text = event.summary
                 if not lancedb_primary:
                     db.insert_event(
                         session_key=session_key,
@@ -957,6 +965,7 @@ class BrainService:
                         "actor": event.actor,
                         "ts": event.ts or ts,
                         "salience": event.salience,
+                        "text": raw_event_text,
                     }
                 )
                 lancedb_entries.append(
@@ -967,7 +976,7 @@ class BrainService:
                         "kind": "event",
                         "fact_key": f"event.{event.kind}.{event.actor}",
                         "value": event.summary,
-                        "text": event.summary,
+                        "text": raw_event_text,
                         "summary": event.summary,
                         "importance": event.salience,
                         "confidence": 1.0,
@@ -979,6 +988,7 @@ class BrainService:
             if wrote["events"] == 0:
                 fallback_summary = " ".join(str(user_text or "").split())[:160]
                 if fallback_summary:
+                    raw_event_text = " ".join(str(user_text or "").split())[:400]
                     if not lancedb_primary:
                         db.insert_event(
                             session_key=session_key,
@@ -997,6 +1007,7 @@ class BrainService:
                             "actor": "user",
                             "ts": ts,
                             "salience": 0.35,
+                            "text": raw_event_text,
                         }
                     )
                     lancedb_entries.append(
@@ -1007,7 +1018,7 @@ class BrainService:
                             "kind": "event",
                             "fact_key": "event.chat.user",
                             "value": fallback_summary,
-                            "text": fallback_summary,
+                            "text": raw_event_text,
                             "summary": fallback_summary,
                             "importance": 0.35,
                             "confidence": 1.0,

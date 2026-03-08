@@ -9,6 +9,7 @@ from sidecar.memq.lancedb_bridge import LanceDbMemoryBackend
 
 STYLE_ALLOWED_KEYS = {"tone", "persona", "verbosity", "speaking_style", "callUser", "firstPerson", "prefix"}
 RULE_PREFIXES = ("security.", "language.", "procedure.", "compliance.", "output.", "operation.")
+QCTX_PROFILE_ALLOWED_PREFIXES = ("profile.", "project.", "pref.", "relationship.", "timeline.")
 
 
 def _sort_rows(rows: list[dict[str, Any]], session_key: str) -> list[dict[str, Any]]:
@@ -75,6 +76,41 @@ def profile_snapshot(db: MemqDB, memory_backend: LanceDbMemoryBackend | None, se
         parts.append(f"{fact_key}:{value}")
         seen.add(fact_key)
         if len(parts) >= 8:
+            break
+    return " | ".join(parts)
+
+
+def qctx_profile_snapshot(db: MemqDB, memory_backend: LanceDbMemoryBackend | None, session_key: str) -> str:
+    if memory_backend is None or not memory_backend.enabled():
+        snapshot = db.compute_public_profile_snapshot(session_key, {})
+        parts = [segment.strip() for segment in str(snapshot or "").split("|")]
+        kept = [segment for segment in parts if segment.startswith(QCTX_PROFILE_ALLOWED_PREFIXES)]
+        return " | ".join(kept[:6])
+    rows = memory_backend.list_entries(
+        session_key=session_key,
+        kinds=["fact"],
+        include_global=True,
+        limit=96,
+        fact_key_prefixes=["profile.", "project.", "pref.", "relationship.", "timeline."],
+    )
+    parts: list[str] = []
+    seen: set[str] = set()
+    for row in _sort_rows(rows, session_key):
+        fact_key = str(row.get("fact_key") or "")
+        if not fact_key.startswith(QCTX_PROFILE_ALLOWED_PREFIXES):
+            continue
+        if fact_key.startswith(("qstyle.", "qrule.")):
+            continue
+        value = str(row.get("value") or row.get("text") or row.get("summary") or "").strip()
+        if not value:
+            continue
+        line = f"{fact_key}:{value}"
+        marker = line.lower()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        parts.append(line)
+        if len(parts) >= 6:
             break
     return " | ".join(parts)
 
@@ -156,7 +192,13 @@ def deep_anchor(db: MemqDB, memory_backend: LanceDbMemoryBackend | None, session
         return db.deep_anchor(session_key)
     rows = memory_backend.list_entries(session_key=session_key, kinds=["fact"], include_global=True, layer="deep", limit=24)
     for row in _sort_rows(rows, session_key):
+        fact_key = str(row.get("fact_key") or "")
+        if fact_key.startswith(("qstyle.", "qrule.")) or fact_key.startswith(RULE_PREFIXES):
+            continue
         text = str(row.get("text") or row.get("summary") or row.get("value") or "").strip()
+        lowered = text.lower()
+        if lowered.startswith(("persona=", "calluser=", "firstperson=", "tone=", "speaking_style=")) or lowered.startswith(RULE_PREFIXES):
+            continue
         if text and len(text) >= 12:
             return text
     return ""

@@ -160,30 +160,19 @@ Contains only:
 
 Cross-channel contamination is treated as a bug.
 
-## Local user overrides
+## Visible runtime snapshots
 
-These files are **local-only** and **user-specific**:
+These files are written locally for inspection:
 
-- `QSTYLE.local.json`
-- `QRULE.local.json`
 - `QSTYLE.current.json`
 - `QRULE.current.json`
 - `QCTX.current.txt`
 
-`QSTYLE.local.json` and `QRULE.local.json` are optional user overrides.
+They are visible mirrors of the effective runtime state.
+They are **not** the source of truth.
+The source of truth is the `memory-lancedb-pro` memory backend plus QBRAIN orchestration.
 
-`QSTYLE.current.json`, `QRULE.current.json`, and `QCTX.current.txt` are visible runtime snapshots.
-They are mirrors of the effective state for inspection, not the source of truth used for orchestration.
-QBRAIN still reads and writes the effective state through LanceDB-backed memory plus local overrides.
-
-All of these files are gitignored.
-
-Tracked examples for OSS:
-
-- `QSTYLE.local.example.json`
-- `QRULE.local.example.json`
-
-Use the local files only when a specific machine or user needs an override.
+No extra local override JSON files are required.
 
 ## Runtime profiles
 
@@ -231,6 +220,9 @@ scripts/memq-openclaw.sh setup
 scripts/memq-openclaw.sh status
 curl -sS http://127.0.0.1:7781/health
 ```
+
+`scripts/memq-openclaw.sh setup` configures the plugin and sidecar to use the bundled `memory-lancedb-pro` integration automatically.
+No separate manual installation step is required for the memory backend.
 
 ---
 
@@ -360,28 +352,17 @@ QBRAIN が作るのは plan だけです。
 
 チャネル混入は不具合として扱います。
 
-## ローカル上書き
+## 可視ランタイムスナップショット
 
-この 2 つは **ユーザーごとのローカルファイル**です。
+ローカルで確認用に出力されるのは次の 3 つだけです。
 
-- `QSTYLE.local.json`
-- `QRULE.local.json`
 - `QSTYLE.current.json`
 - `QRULE.current.json`
 - `QCTX.current.txt`
 
-`QSTYLE.local.json` と `QRULE.local.json` は任意のローカル上書きです。
-
-`QSTYLE.current.json` / `QRULE.current.json` / `QCTX.current.txt` は、
-現在有効な状態を確認するための visible mirror です。
-実際の source of truth は QBRAIN が扱う記憶ストアであり、
-これらの current ファイルは inspection 用のスナップショットです。
-
-これらは gitignore 対象です。
-OSS 配布用には example を使います。
-
-- `QSTYLE.local.example.json`
-- `QRULE.local.example.json`
+これらは現在有効な状態を確認するための visible mirror です。
+source of truth は `memory-lancedb-pro` と QBRAIN です。
+追加の local override JSON は不要です。
 
 ## 実行プロファイル
 
@@ -427,3 +408,6 @@ scripts/memq-openclaw.sh setup
 scripts/memq-openclaw.sh status
 curl -sS http://127.0.0.1:7781/health
 ```
+
+`scripts/memq-openclaw.sh setup` を実行すると、plugin / sidecar / `memory-lancedb-pro` 連携が自動で有効になります。
+memory backend のために別の手動インストール手順は不要です。

@@ -14,6 +14,7 @@ Expected:
 - OpenClaw memory plugin = `openclaw-memory-memq`
 - sidecar health = `ok=true`
 - `qctxBackend = memory-lancedb-pro`
+- `memory-lancedb-pro` integration is enabled automatically by the setup script
 
 ## 日本語
 
@@ -29,3 +30,4 @@ curl -sS http://127.0.0.1:7781/health
 - OpenClaw の memory plugin は `openclaw-memory-memq`
 - sidecar health は `ok=true`
 - `qctxBackend = memory-lancedb-pro`
+- `memory-lancedb-pro` 連携は setup script により自動で有効化される

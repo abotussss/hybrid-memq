@@ -15,7 +15,7 @@ from sidecar.memq.brain.service import BrainService
 from sidecar.memq.config import Config, load_config
 from sidecar.memq.db import MemqDB
 from sidecar.memq.lancedb_bridge import LanceDbMemoryBackend
-from sidecar.memq.local_overrides import load_local_overrides, write_current_snapshots
+from sidecar.memq.local_overrides import qctx_current_path, qrule_current_path, qstyle_current_path, write_current_snapshots
 from sidecar.memq.memory_source import list_qrule, list_qstyle, profile_snapshot, recent_brain_context
 from sidecar.memq.prompt_blueprint import (
     BrainPlanningError,
@@ -190,7 +190,6 @@ async def shutdown() -> None:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
-    overrides = load_local_overrides(cfg.root)
     return {
         "ok": True,
         "config": {
@@ -202,11 +201,10 @@ async def health() -> dict[str, Any]:
                 "qrule": cfg.budgets.qrule_tokens,
                 "qstyle": cfg.budgets.qstyle_tokens,
             },
-            "overrides": {
-                "qstylePath": str(overrides.qstyle_path),
-                "qrulePath": str(overrides.qrule_path),
-                "qstyleKeys": sorted(overrides.qstyle.keys()),
-                "qruleKeys": sorted(overrides.qrule.keys()),
+            "currentFiles": {
+                "qstyle": str(qstyle_current_path(cfg.root)),
+                "qrule": str(qrule_current_path(cfg.root)),
+                "qctx": str(qctx_current_path(cfg.root)),
             },
         },
         "qbrain": {
@@ -291,9 +289,8 @@ async def bootstrap_import_md(payload: dict[str, Any]) -> dict[str, Any]:
 async def memory_ingest_turn(req: IngestRequest) -> dict[str, Any]:
     global last_activity_at
     last_activity_at = req.ts
-    overrides = load_local_overrides(cfg.root)
-    style = {**list_qstyle(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides.qstyle}
-    rules = {**list_qrule(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides.qrule}
+    style = list_qstyle(db, memory_backend if _use_memory_backend() else None, req.sessionKey)
+    rules = list_qrule(db, memory_backend if _use_memory_backend() else None, req.sessionKey)
     recent_summary = recent_brain_context(db, memory_backend if _use_memory_backend() else None, req.sessionKey)
     try:
         plan, trace_id, _ = await brain.build_ingest_plan(
@@ -323,9 +320,8 @@ async def memory_ingest_turn(req: IngestRequest) -> dict[str, Any]:
 @app.post("/memory/preview_prompt")
 async def memory_preview_prompt(req: PreviewRequest) -> dict[str, Any]:
     now_ts = req.ts or int(datetime.now().timestamp())
-    overrides = load_local_overrides(cfg.root)
-    style = {**list_qstyle(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides.qstyle}
-    rules = {**list_qrule(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides.qrule}
+    style = list_qstyle(db, memory_backend if _use_memory_backend() else None, req.sessionKey)
+    rules = list_qrule(db, memory_backend if _use_memory_backend() else None, req.sessionKey)
     try:
         plan, trace_id, _ = await brain.build_preview_ingest_plan(
             session_key=req.sessionKey,
@@ -345,9 +341,8 @@ async def memory_preview_prompt(req: PreviewRequest) -> dict[str, Any]:
         user_text=req.userText,
         memory_backend=memory_backend if _use_memory_backend() else None,
     )
-    overrides_after = load_local_overrides(cfg.root)
-    effective_qstyle = {**list_qstyle(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides_after.qstyle}
-    effective_qrule = {**list_qrule(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides_after.qrule}
+    effective_qstyle = list_qstyle(db, memory_backend if _use_memory_backend() else None, req.sessionKey)
+    effective_qrule = list_qrule(db, memory_backend if _use_memory_backend() else None, req.sessionKey)
     write_current_snapshots(cfg.root, qstyle=effective_qstyle, qrule=effective_qrule)
     applied = bool(wrote.get("style") or wrote.get("rules"))
     return {"ok": True, "applied": applied, "wrote": wrote, "traceId": trace_id}
@@ -358,14 +353,13 @@ async def conversation_summarize(req: SummarizeRequest) -> dict[str, Any]:
     joined = "\n".join(f"{m.role}:{m.text}" for m in req.prunedMessages[-8:])
     if not joined.strip():
         return {"ok": True, "summary": ""}
-    overrides = load_local_overrides(cfg.root)
     try:
         plan, trace_id, _ = await brain.build_ingest_plan(
             session_key=req.sessionKey,
             user_text=joined,
             assistant_text="",
-            current_style={**list_qstyle(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides.qstyle},
-            current_rules={**list_qrule(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides.qrule},
+            current_style=list_qstyle(db, memory_backend if _use_memory_backend() else None, req.sessionKey),
+            current_rules=list_qrule(db, memory_backend if _use_memory_backend() else None, req.sessionKey),
             recent_summary=recent_brain_context(db, memory_backend if _use_memory_backend() else None, req.sessionKey),
         )
     except Exception as exc:
@@ -412,9 +406,8 @@ async def _qctx_query_impl(req: QueryRequest) -> dict[str, Any]:
     response["qstyle"] = _rewrite_public_labels(response.get("qstyle", ""))
     response["qctx"] = _rewrite_public_labels(response.get("qctx", ""))
     try:
-        overrides_now = load_local_overrides(cfg.root)
-        effective_qstyle = {**list_qstyle(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides_now.qstyle}
-        effective_qrule = {**list_qrule(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides_now.qrule}
+        effective_qstyle = list_qstyle(db, memory_backend if _use_memory_backend() else None, req.sessionKey)
+        effective_qrule = list_qrule(db, memory_backend if _use_memory_backend() else None, req.sessionKey)
         write_current_snapshots(
             cfg.root,
             qstyle=effective_qstyle,
@@ -460,45 +453,40 @@ async def audit_output_endpoint(req: AuditRequest) -> dict[str, Any]:
 
 @app.get("/profile")
 async def profile(session_key: str = Query("global")) -> dict[str, Any]:
-    overrides = load_local_overrides(cfg.root)
     active_backend = memory_backend if _use_memory_backend() else None
-    qstyle = {**list_qstyle(db, active_backend, session_key), **overrides.qstyle}
-    qrule = {**list_qrule(db, active_backend, session_key), **overrides.qrule}
+    qstyle = list_qstyle(db, active_backend, session_key)
+    qrule = list_qrule(db, active_backend, session_key)
     effective_snapshot = profile_snapshot(db, active_backend, session_key, qstyle)
     return {
         "ok": True,
         "qstyle": qstyle,
         "qrule": qrule,
-        "qstyleOverride": overrides.qstyle,
-        "qruleOverride": overrides.qrule,
         "profile_snapshot": effective_snapshot,
     }
 
 
 @app.get("/qstyle/current")
 async def qstyle_current(session_key: str = Query("global")) -> dict[str, Any]:
-    overrides = load_local_overrides(cfg.root)
     active_backend = memory_backend if _use_memory_backend() else None
-    qstyle = {**list_qstyle(db, active_backend, session_key), **overrides.qstyle}
+    qstyle = list_qstyle(db, active_backend, session_key)
     try:
-        qrule = {**list_qrule(db, active_backend, session_key), **overrides.qrule}
+        qrule = list_qrule(db, active_backend, session_key)
         write_current_snapshots(cfg.root, qstyle=qstyle, qrule=qrule)
     except Exception:
         pass
-    return {"ok": True, "sessionKey": session_key, "qstyle": qstyle, "override": overrides.qstyle}
+    return {"ok": True, "sessionKey": session_key, "qstyle": qstyle}
 
 
 @app.get("/qrule/current")
 async def qrule_current(session_key: str = Query("global")) -> dict[str, Any]:
-    overrides = load_local_overrides(cfg.root)
     active_backend = memory_backend if _use_memory_backend() else None
-    qrule = {**list_qrule(db, active_backend, session_key), **overrides.qrule}
+    qrule = list_qrule(db, active_backend, session_key)
     try:
-        qstyle = {**list_qstyle(db, active_backend, session_key), **overrides.qstyle}
+        qstyle = list_qstyle(db, active_backend, session_key)
         write_current_snapshots(cfg.root, qstyle=qstyle, qrule=qrule)
     except Exception:
         pass
-    return {"ok": True, "sessionKey": session_key, "qrule": qrule, "override": overrides.qrule}
+    return {"ok": True, "sessionKey": session_key, "qrule": qrule}
 
 
 @app.get("/quarantine")

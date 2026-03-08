@@ -8,8 +8,8 @@ from sidecar.memq.brain.schemas import BrainRecallPlan
 from sidecar.memq.config import Config
 from sidecar.memq.db import MemqDB
 from sidecar.memq.lancedb_bridge import LanceDbMemoryBackend
-from sidecar.memq.local_overrides import load_local_overrides
-from sidecar.memq.memory_source import deep_anchor, list_qrule, list_qstyle, profile_snapshot, recent_digest, surface_anchor
+from sidecar.memq.local_overrides import write_current_snapshots
+from sidecar.memq.memory_source import deep_anchor, list_qrule, list_qstyle, profile_snapshot, qctx_profile_snapshot, surface_anchor
 from sidecar.memq.memctx_pack import build_memctx, build_memrules, build_memstyle
 from sidecar.memq.retrieval import retrieve_with_plan
 
@@ -103,9 +103,8 @@ async def build_prompt_blueprint(
     request: PromptBlueprintRequest,
     memory_backend: LanceDbMemoryBackend | None = None,
 ) -> PromptBlueprint:
-    overrides = load_local_overrides(cfg.root)
-    style = {**list_qstyle(db, memory_backend, request.session_key), **overrides.qstyle}
-    rules = {**list_qrule(db, memory_backend, request.session_key), **overrides.qrule}
+    style = list_qstyle(db, memory_backend, request.session_key)
+    rules = list_qrule(db, memory_backend, request.session_key)
     recent = list(request.recent_messages)[-6:]
     now_iso = request.now_iso or datetime.now().astimezone().isoformat()
     used_fallback = False
@@ -136,10 +135,9 @@ async def build_prompt_blueprint(
         top_k=request.top_k,
         memory_backend=memory_backend,
     )
-    bundle.anchors["p.snapshot"] = profile_snapshot(db, memory_backend, request.session_key, style)
+    bundle.anchors["p.snapshot"] = qctx_profile_snapshot(db, memory_backend, request.session_key)
     bundle.anchors["wm.surf"] = surface_anchor(db, memory_backend, request.session_key)
     bundle.anchors["wm.deep"] = deep_anchor(db, memory_backend, request.session_key)
-    bundle.anchors["t.recent"] = recent_digest(db, memory_backend, request.session_key, days=2)
     qrule = _rewrite_public_labels(build_memrules(rules, request.budgets.qrule_tokens))
     qstyle = _rewrite_public_labels(build_memstyle(style, request.budgets.qstyle_tokens))
     qctx = _rewrite_public_labels(build_memctx(plan, bundle, request.budgets.qctx_tokens))
@@ -164,8 +162,6 @@ async def build_prompt_blueprint(
                 "qctx_keys": qctx_keys,
                 "retrieval": bundle.debug,
                 "qctx_backend": "memory-lancedb-pro" if memory_backend is not None and memory_backend.enabled() else "sqlite",
-                "qstyle_override_keys": sorted(overrides.qstyle.keys()),
-                "qrule_override_keys": sorted(overrides.qrule.keys()),
                 "source": "fallback" if used_fallback else "brain",
                 "fallback_reason": fallback_reason,
             },

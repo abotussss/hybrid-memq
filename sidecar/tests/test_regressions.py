@@ -23,7 +23,6 @@ from sidecar.memq.brain.service import (
 from sidecar.memq.config import AuditConfig, BrainConfig, Budgets, Config, load_config
 from sidecar.memq.db import MemqDB, SearchResult
 from sidecar.memq.idle_consolidation import run_idle_consolidation
-from sidecar.memq.local_overrides import load_local_overrides
 from sidecar.memq.memory_source import list_qrule, list_qstyle, profile_snapshot, recent_brain_context, recent_digest
 from sidecar.memq.memctx_pack import build_memctx, build_memrules, build_memstyle
 from sidecar.minisidecar import _effective_profile_snapshot as api_effective_profile_snapshot
@@ -890,8 +889,8 @@ class RegressionV3Test(unittest.TestCase):
         })()
         out = build_memctx(plan, bundle, 120)
         lines = [line for line in out.splitlines() if line]
-        self.assertTrue(lines[0].startswith("t.recent=") or lines[0].startswith("t.range="))
-        self.assertIn("t.digest=", out)
+        self.assertTrue(lines[0].startswith("t.ev1=") or lines[0].startswith("t.range="))
+        self.assertIn("t.ev1=昨日はスタイル更新とタイムライン整理をした", out)
         self.assertIn("t.range=2026-03-05..2026-03-05", out)
 
     def test_build_memstyle_only_uses_style_fields(self) -> None:
@@ -948,10 +947,10 @@ class RegressionV3Test(unittest.TestCase):
             }
         )
         bundle = type("Bundle", (), {
-            "surface": [SearchResult(1, "s1", "surface", "fact", "", "", "surface summary", 0.7, 0.7, 0.7, int(time.time()), 1.0)],
+            "surface": [SearchResult(1, "s1", "surface", "fact", "", "", "surface summary", "surface summary", 0.7, 0.7, 0.7, int(time.time()), 1.0)],
             "deep": [
-                SearchResult(2, "s1", "deep", "fact", "profile.identity.card", "私はOpenClawのアシスタント", "profile identity", 0.9, 0.9, 0.9, int(time.time()), 1.2),
-                SearchResult(3, "s1", "deep", "fact", "project.current", "MEMQ再構築", "project state", 0.8, 0.8, 0.8, int(time.time()), 1.1),
+                SearchResult(2, "s1", "deep", "fact", "profile.identity.card", "私はOpenClawのアシスタント", "私はOpenClawのアシスタント", "profile identity", 0.9, 0.9, 0.9, int(time.time()), 1.2),
+                SearchResult(3, "s1", "deep", "fact", "project.current", "MEMQ再構築", "MEMQ再構築", "project state", 0.8, 0.8, 0.8, int(time.time()), 1.1),
             ],
             "timeline": [{"summary": "昨日は検証を進めた"}],
             "anchors": {
@@ -963,7 +962,7 @@ class RegressionV3Test(unittest.TestCase):
         })()
         out = build_memctx(plan, bundle, 120)
         self.assertIn("p.snapshot=", out)
-        self.assertIn("d1=profile.identity.card", out)
+        self.assertIn("d1=私はOpenClawのアシスタント", out)
 
     def test_build_memctx_strips_budget_noise_from_anchors(self) -> None:
         plan = BrainRecallPlan.model_validate({"intent": {"profile": 0.9}, "fts_queries": ["memstyle memrule"]})
@@ -1228,9 +1227,9 @@ class RegressionV3Test(unittest.TestCase):
             },
         )
         memctx = build_memctx(plan, bundle, 200)
-        self.assertEqual(1, memctx.count("t.digest="))
+        self.assertEqual(1, memctx.count("t.ev1="))
         self.assertEqual(0, memctx.count("t.recent="))
-        self.assertEqual(0, memctx.count("t.ev1="))
+        self.assertIn("昨日は gateway を再起動して style 更新経路を確認した", memctx)
 
     def test_build_memctx_fallback_digest_does_not_duplicate_recent(self) -> None:
         plan = BrainRecallPlan.model_validate(
@@ -1252,8 +1251,32 @@ class RegressionV3Test(unittest.TestCase):
             },
         )
         memctx = build_memctx(plan, bundle, 120)
-        self.assertEqual(0, memctx.count("t.recent="))
-        self.assertEqual(1, memctx.count("t.digest="))
+        self.assertEqual(
+            "t.range=2026-03-07..2026-03-07\nt.label=yesterday",
+            memctx,
+        )
+
+    def test_build_memctx_omits_timeline_anchor_when_query_is_not_timeline(self) -> None:
+        plan = BrainRecallPlan.model_validate(
+            {
+                "intent": {"timeline": 0.0, "profile": 0.0, "state": 0.0, "fact": 0.0, "overview": 0.0},
+                "fts_queries": ["QSTYLE を見せて"],
+                "budget_split": {"profile": 0, "timeline": 80, "surface": 0, "deep": 0, "ephemeral": 0},
+            }
+        )
+        bundle = RetrievalBundle(
+            surface=[],
+            deep=[],
+            timeline=[],
+            anchors={
+                "wm.surf": "",
+                "wm.deep": "",
+                "p.snapshot": "",
+                "t.recent": "2026-03-08:- [digest]",
+            },
+        )
+        memctx = build_memctx(plan, bundle, 120)
+        self.assertEqual("", memctx)
 
     def test_build_memctx_compresses_duplicate_recent_segments(self) -> None:
         plan = BrainRecallPlan.model_validate(
@@ -1275,8 +1298,7 @@ class RegressionV3Test(unittest.TestCase):
             },
         )
         memctx = build_memctx(plan, bundle, 160)
-        self.assertEqual(1, memctx.count("gateway を再起動した"))
-        self.assertIn("style 更新を確認した", memctx)
+        self.assertEqual("", memctx)
 
     def test_build_memctx_timeline_focus_avoids_profile_deep_noise(self) -> None:
         plan = BrainRecallPlan.model_validate(
@@ -1289,15 +1311,15 @@ class RegressionV3Test(unittest.TestCase):
         bundle = RetrievalBundle(
             surface=[],
             deep=[
-                SearchResult(1, "s1", "deep", "fact", "profile.spouse", "exists", "profile.spouse:exists", 0.9, 0.9, 0.9, int(time.time()), 4.0),
-                SearchResult(2, "s1", "deep", "fact", "timeline.yesterday", "gateway restart", "timeline.yesterday:gateway restart", 0.9, 0.9, 0.9, int(time.time()), 4.0),
+                SearchResult(1, "s1", "deep", "fact", "profile.spouse", "exists", "配偶者がいる", "profile.spouse:exists", 0.9, 0.9, 0.9, int(time.time()), 4.0),
+                SearchResult(2, "s1", "deep", "fact", "timeline.yesterday", "gateway restart", "昨日は gateway を再起動した", "timeline.yesterday:gateway restart", 0.9, 0.9, 0.9, int(time.time()), 4.0),
             ],
             timeline=[{"summary": "昨日は gateway を再起動した"}],
             anchors={"wm.surf": "", "wm.deep": "", "p.snapshot": "profile.name:利用者D", "t.recent": "2026-03-07:- [chat] 昨日は gateway を再起動した"},
         )
         memctx = build_memctx(plan, bundle, 220)
-        self.assertIn("timeline.yesterday", memctx)
-        self.assertNotIn("profile.spouse", memctx)
+        self.assertIn("昨日は gateway を再起動した", memctx)
+        self.assertNotIn("配偶者がいる", memctx)
 
     def test_build_memctx_fact_focus_skips_irrelevant_profile_anchor(self) -> None:
         plan = BrainRecallPlan.model_validate(
@@ -1310,8 +1332,8 @@ class RegressionV3Test(unittest.TestCase):
         bundle = RetrievalBundle(
             surface=[],
             deep=[
-                SearchResult(1, "s1", "deep", "fact", "project.current", "MEMQ v3", "project.current:MEMQ v3", 0.9, 0.8, 0.8, int(time.time()), 4.0),
-                SearchResult(2, "s1", "deep", "fact", "profile.spouse", "exists", "profile.spouse:exists", 0.9, 0.8, 0.8, int(time.time()), 3.5),
+                SearchResult(1, "s1", "deep", "fact", "project.current", "MEMQ v3", "現在の対象はMEMQ v3", "project.current:MEMQ v3", 0.9, 0.8, 0.8, int(time.time()), 4.0),
+                SearchResult(2, "s1", "deep", "fact", "profile.spouse", "exists", "配偶者がいる", "profile.spouse:exists", 0.9, 0.8, 0.8, int(time.time()), 3.5),
             ],
             timeline=[],
             anchors={
@@ -1322,10 +1344,9 @@ class RegressionV3Test(unittest.TestCase):
             },
         )
         memctx = build_memctx(plan, bundle, 220)
-        self.assertIn("wm.surf=", memctx)
-        self.assertIn("project.current", memctx)
+        self.assertIn("現在の対象はMEMQ v3", memctx)
         self.assertNotIn("p.snapshot=", memctx)
-        self.assertNotIn("profile.spouse", memctx)
+        self.assertNotIn("配偶者がいる", memctx)
 
     def test_build_memctx_excludes_qstyle_qrule_lines_even_if_bundle_contains_them(self) -> None:
         plan = BrainRecallPlan.model_validate(
@@ -1337,12 +1358,12 @@ class RegressionV3Test(unittest.TestCase):
         )
         bundle = RetrievalBundle(
             surface=[
-                SearchResult(1, "s1", "surface", "fact", "", "", "qstyle.persona:案内役A", 0.9, 0.8, 0.8, int(time.time()), 4.0),
-                SearchResult(2, "s1", "surface", "fact", "", "", "通常の要約", 0.8, 0.8, 0.8, int(time.time()), 4.0),
+                SearchResult(1, "s1", "surface", "fact", "", "", "qstyle.persona:案内役A", "qstyle.persona:案内役A", 0.9, 0.8, 0.8, int(time.time()), 4.0),
+                SearchResult(2, "s1", "surface", "fact", "", "", "通常の要約", "通常の要約", 0.8, 0.8, 0.8, int(time.time()), 4.0),
             ],
             deep=[
-                SearchResult(3, "s1", "deep", "fact", "qrule.security.never_output_secrets", "true", "qrule.security.never_output_secrets:true", 0.9, 0.8, 0.8, int(time.time()), 4.0),
-                SearchResult(4, "s1", "deep", "fact", "timeline.design_change", "昨日は設計変更をした", "timeline.design_change:昨日は設計変更をした", 0.9, 0.8, 0.8, int(time.time()), 4.0),
+                SearchResult(3, "s1", "deep", "fact", "qrule.security.never_output_secrets", "true", "qrule.security.never_output_secrets:true", "qrule.security.never_output_secrets:true", 0.9, 0.8, 0.8, int(time.time()), 4.0),
+                SearchResult(4, "s1", "deep", "fact", "timeline.design_change", "昨日は設計変更をした", "昨日は設計変更をした", "timeline.design_change:昨日は設計変更をした", 0.9, 0.8, 0.8, int(time.time()), 4.0),
             ],
             timeline=[{"summary": "昨日は設計変更をした"}],
             anchors={
@@ -1357,6 +1378,27 @@ class RegressionV3Test(unittest.TestCase):
         self.assertNotIn("qrule.", memctx.lower())
         self.assertIn("通常の要約", memctx)
         self.assertIn("昨日は設計変更をした", memctx)
+
+    def test_build_memctx_excludes_rule_payloads_from_wm_deep(self) -> None:
+        plan = BrainRecallPlan.model_validate(
+            {
+                "intent": {"timeline": 0.0, "profile": 0.0, "state": 1.0, "fact": 0.0, "overview": 0.0},
+                "budget_split": {"profile": 0, "timeline": 0, "surface": 120, "deep": 40, "ephemeral": 0},
+            }
+        )
+        bundle = RetrievalBundle(
+            surface=[],
+            deep=[],
+            timeline=[],
+            anchors={
+                "wm.surf": "",
+                "wm.deep": "security.no_api_tokens=true",
+                "p.snapshot": "",
+                "t.recent": "",
+            },
+        )
+        memctx = build_memctx(plan, bundle, 160)
+        self.assertNotIn("security.no_api_tokens=true", memctx)
 
     def test_build_memctx_humanizes_machine_wm_deep(self) -> None:
         plan = BrainRecallPlan.model_validate(
@@ -1378,8 +1420,7 @@ class RegressionV3Test(unittest.TestCase):
             },
         )
         memctx = build_memctx(plan, bundle, 180)
-        self.assertIn("wm.deep=昨日は長期記憶から必要な文脈だけをQCTXへ引き出す仕組みを実装した。", memctx)
-        self.assertNotIn("project.memory_lancedb_pro_implementation", memctx)
+        self.assertEqual("", memctx)
 
     def test_build_memctx_rewrites_public_labels(self) -> None:
         plan = BrainRecallPlan.model_validate(
@@ -1401,12 +1442,7 @@ class RegressionV3Test(unittest.TestCase):
             },
         )
         memctx = build_memctx(plan, bundle, 180)
-        self.assertIn("QCTX", memctx)
-        self.assertIn("QSTYLE", memctx)
-        self.assertIn("QRULE", memctx)
-        self.assertNotIn("MEMCTX", memctx)
-        self.assertNotIn("MEMSTYLE", memctx)
-        self.assertNotIn("MEMRULES", memctx)
+        self.assertEqual("", memctx)
 
     def test_build_memctx_drops_bare_technical_wm_deep(self) -> None:
         plan = BrainRecallPlan.model_validate(
@@ -1428,29 +1464,6 @@ class RegressionV3Test(unittest.TestCase):
         )
         memctx = build_memctx(plan, bundle, 120)
         self.assertNotIn("wm.deep=memory-lancedb-pro", memctx)
-
-    def test_local_qstyle_override_wins_over_db(self) -> None:
-        override_path = self.root / "QSTYLE.local.json"
-        override_path.write_text(
-            json.dumps({"persona": "案内役A", "callUser": "利用者D"}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        self.db.upsert_style("s1", "persona", "調査支援アシスタント")
-        self.db.upsert_style("s1", "callUser", "利用者")
-        overrides = load_local_overrides(self.root)
-        effective = {**self.db.list_style("s1"), **overrides.qstyle}
-        self.assertEqual("案内役A", effective["persona"])
-        self.assertEqual("利用者D", effective["callUser"])
-
-    def test_local_qrule_override_allows_explicit_local_adjustment(self) -> None:
-        override_path = self.root / "QRULE.local.json"
-        override_path.write_text(
-            json.dumps({"language.allowed": "ja,en", "security.no_api_tokens": "false"}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        overrides = load_local_overrides(self.root)
-        self.assertEqual("ja,en", overrides.qrule["language.allowed"])
-        self.assertEqual("false", overrides.qrule["security.no_api_tokens"])
 
     def test_profile_snapshot_endpoint_uses_effective_qstyle(self) -> None:
         snapshot = "callUser:利用者D | firstPerson:僕 | persona:案内役A | profile.name:利用者D"
@@ -1582,6 +1595,11 @@ class RegressionV3Test(unittest.TestCase):
         snapshot = profile_snapshot(self.db, backend, "s1", {"persona": "案内役A"})
         self.assertIn("persona:案内役A", snapshot)
         self.assertIn("profile.name:利用者D", snapshot)
+
+        from sidecar.memq.memory_source import qctx_profile_snapshot
+        qctx_snapshot = qctx_profile_snapshot(self.db, backend, "s1")
+        self.assertNotIn("persona:", qctx_snapshot)
+        self.assertIn("profile.name:利用者D", qctx_snapshot)
 
 
     def test_memory_source_recent_brain_context_uses_lancedb_without_sqlite_fallback(self) -> None:

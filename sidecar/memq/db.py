@@ -285,6 +285,7 @@ class SearchResult:
     kind: str
     fact_key: str
     value: str
+    text: str
     summary: str
     confidence: float
     importance: float
@@ -437,6 +438,7 @@ class MemqDB:
             kind=str(row["kind"]),
             fact_key=str(row["fact_key"] or ""),
             value=str(row["value"] or ""),
+            text=str(row["text"] or ""),
             summary=str(row["summary"] or ""),
             confidence=float(row["confidence"] or 0.0),
             importance=float(row["importance"] or 0.0),

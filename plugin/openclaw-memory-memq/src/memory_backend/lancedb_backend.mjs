@@ -56,6 +56,7 @@ async function query(payload) {
     kind: String(result.entry.kind || ""),
     fact_key: String(result.entry.fact_key || ""),
     value: String(result.entry.value || ""),
+    text: String(result.entry.text || ""),
     summary: String(result.entry.summary || ""),
     confidence: Number(result.entry.confidence || 0),
     importance: Number(result.entry.importance || 0),

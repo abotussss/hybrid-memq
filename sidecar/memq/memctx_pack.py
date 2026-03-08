@@ -154,8 +154,10 @@ def _valid_memctx_key(key: str) -> bool:
 
 
 def _forbidden_qctx_payload(text: str) -> bool:
-    lowered = str(text or "").lower()
-    return any(prefix in lowered for prefix in FORBIDDEN_QCTX_FACT_PREFIXES)
+    lowered = str(text or "").lower().strip()
+    if any(prefix in lowered for prefix in FORBIDDEN_QCTX_FACT_PREFIXES):
+        return True
+    return lowered.startswith(RULE_PREFIXES)
 
 
 def _filter_memctx_lines(lines: list[str]) -> list[str]:
@@ -219,6 +221,11 @@ def _dedupe_lines(lines: list[str]) -> list[str]:
         seen.add(clean)
         out.append(clean)
     return out
+
+
+def _line_value(line: str) -> str:
+    _, _, value = str(line or "").partition("=")
+    return value.strip().lower()
 
 
 def _dedupe_consecutive_texts(values: list[str]) -> list[str]:
@@ -286,8 +293,26 @@ def _profile_lines(plan: BrainRecallPlan, bundle: RetrievalBundle) -> list[str]:
         return lines
     snapshot = _sanitize_mem_value(bundle.anchors.get("p.snapshot", ""), "p.snapshot")
     if snapshot:
-        lines.append(f"p.snapshot={_compact(snapshot, 160)}")
+        lines.append(f"p.snapshot={snapshot}")
     return lines
+
+
+def _memory_payload_text(item) -> str:
+    for candidate in (
+        getattr(item, "text", ""),
+        getattr(item, "value", ""),
+        getattr(item, "summary", ""),
+    ):
+        cleaned = _sanitize_mem_value(candidate)
+        if not cleaned:
+            continue
+        lowered = cleaned.lower()
+        if lowered in TECHNICAL_ANCHOR_VALUES:
+            continue
+        if _looks_machine_key(cleaned) and " " not in cleaned and "。" not in cleaned and "、" not in cleaned:
+            continue
+        return cleaned
+    return ""
 
 
 def _deep_lines(plan: BrainRecallPlan, bundle: RetrievalBundle) -> list[str]:
@@ -327,96 +352,72 @@ def _deep_lines(plan: BrainRecallPlan, bundle: RetrievalBundle) -> list[str]:
         ]
     deep_items = sorted(
         deep_items,
-        key=lambda item: (item.score + _line_overlap(plan, f"{item.fact_key} {item.value} {item.summary}"), item.updated_at),
+        key=lambda item: (item.score + _line_overlap(plan, f"{item.fact_key} {getattr(item, 'text', '')} {item.value} {item.summary}"), item.updated_at),
         reverse=True,
     )
     for idx, item in enumerate(deep_items[:4], start=1):
-        key = _sanitize_mem_value(item.fact_key or f"d{idx}")
-        payload = _sanitize_mem_value(item.value or item.summary)
+        payload = _memory_payload_text(item)
         if not payload:
             continue
-        if _forbidden_qctx_payload(key) or _forbidden_qctx_payload(payload):
+        if _forbidden_qctx_payload(payload):
             continue
-        lowered_key = key.lower()
         lowered_payload = payload.lower()
-        if "budget" in lowered_key or "budget_tokens=" in lowered_payload:
+        if "budget_tokens=" in lowered_payload:
             continue
-        if "memstyle_budget" in lowered_key or "memrule_budget" in lowered_key or "memctx_budget" in lowered_key:
+        if any(lowered_payload.startswith(prefix) for prefix in RULE_PREFIXES):
             continue
-        lines.append(f"d{idx}={_compact(key + ':' + payload, 160)}")
+        lines.append(f"d{idx}={payload}")
     return lines
-
-
-def _timeline_fallback_detail(plan: BrainRecallPlan, bundle: RetrievalBundle) -> str:
-    if bundle.timeline:
-        summaries = _dedupe_consecutive_texts([
-            _compact(str(item.get("summary", "")), 80)
-            for item in bundle.timeline[:2]
-            if item.get("summary")
-        ])
-        digest = " | ".join(summaries)
-        if digest:
-            return f"t.digest={digest}"
-    recent = bundle.anchors.get("t.recent", "")
-    if recent:
-        return f"t.digest={_compact(_compress_pipe_segments(recent), 96)}"
-    for item in bundle.deep:
-        if (item.fact_key or "").startswith("timeline.") and (item.value or item.summary):
-            return f"t.digest={_compact(item.value or item.summary, 96)}"
-    return ""
 
 
 
 def _timeline_lines(plan: BrainRecallPlan, bundle: RetrievalBundle) -> list[str]:
     lines: list[str] = []
-    recent = bundle.anchors.get("t.recent", "")
-    recent = _compress_pipe_segments(_sanitize_mem_value(recent, "t.recent"))
-    recent_line = f"t.recent={_compact(recent, 180)}" if recent else ""
+    wants_timeline = plan.time_range is not None or float(plan.intent.timeline) >= 0.25 or bool(bundle.timeline)
+    if not wants_timeline:
+        return lines
     if plan.time_range is not None:
         lines.append(f"t.range={plan.time_range.start_day}..{plan.time_range.end_day}")
         lines.append(f"t.label={plan.time_range.label}")
-        recent_line = ""
-    digest_line = ""
     if bundle.timeline:
-        event_summaries = _dedupe_consecutive_texts([
-            _compact(str(item.get("summary", "")), 80)
+        timeline_items = _dedupe_consecutive_texts([
+            str(item.get("text") or item.get("summary") or "").strip()
             for item in bundle.timeline[:4]
-            if item.get("summary")
+            if str(item.get("text") or item.get("summary") or "").strip()
         ])
-        digest = " | ".join(event_summaries)
-        if digest:
-            digest_line = f"t.digest={digest}"
-        if len(event_summaries) > 1:
-            for idx, summary in enumerate(event_summaries, start=1):
-                lines.append(f"t.ev{idx}={_compact(summary, 100)}")
-    elif recent:
-        digest_line = f"t.digest={_compact(recent, 96)}"
-    if digest_line and recent_line:
-        digest_value = digest_line.split("=", 1)[1]
-        recent_value = recent_line.split("=", 1)[1]
-        if digest_value == recent_value:
-            recent_line = ""
-    if recent_line:
-        lines.append(recent_line)
-    if digest_line:
-        lines.append(digest_line)
+        for idx, summary in enumerate(timeline_items, start=1):
+            cleaned = _sanitize_mem_value(summary)
+            if cleaned and not _forbidden_qctx_payload(cleaned):
+                lines.append(f"t.ev{idx}={cleaned}")
+    if not any(line.startswith("t.ev") for line in lines):
+        fallback_items = []
+        surface_items = list(bundle.surface[:6])
+        preferred_surface = [item for item in surface_items if str(getattr(item, "kind", "")).lower() != "digest"]
+        if not preferred_surface:
+            preferred_surface = surface_items
+        for item in preferred_surface[:3]:
+            payload = _memory_payload_text(item)
+            if payload:
+                fallback_items.append(payload)
+        if not fallback_items:
+            for item in bundle.deep[:2]:
+                payload = _memory_payload_text(item)
+                if payload and not _forbidden_qctx_payload(payload):
+                    fallback_items.append(payload)
+        for idx, payload in enumerate(_dedupe_consecutive_texts(fallback_items)[:3], start=1):
+            cleaned = _sanitize_mem_value(payload)
+            if cleaned and not _forbidden_qctx_payload(cleaned):
+                lines.append(f"t.ev{idx}={cleaned}")
     return lines
 
 
 
 def _surface_lines(plan: BrainRecallPlan, bundle: RetrievalBundle) -> list[str]:
     lines: list[str] = []
-    surf = _sanitize_mem_value(bundle.anchors.get("wm.surf", ""), "wm.surf")
-    if surf:
-        lines.append(f"wm.surf={_compact(surf, 140)}")
-    deep = _humanize_deep_anchor(_sanitize_mem_value(bundle.anchors.get("wm.deep", ""), "wm.deep"))
-    lowered_deep = deep.lower()
-    if deep and not (plan.intent.timeline >= max(plan.intent.profile, plan.intent.fact) and ("timeline." in lowered_deep or "task_" in lowered_deep)):
-        lines.append(f"wm.deep={_compact(deep, 140)}")
     seen_summaries: set[str] = set()
     slot = 1
     for item in bundle.surface:
-        summary = _compact(item.summary, 110)
+        summary = _memory_payload_text(item)
         if not summary:
             continue
         if _forbidden_qctx_payload(summary):
@@ -434,23 +435,17 @@ def _surface_lines(plan: BrainRecallPlan, bundle: RetrievalBundle) -> list[str]:
 
 def _required_anchor_lines(plan: BrainRecallPlan, bundle: RetrievalBundle) -> tuple[list[str], list[str]]:
     anchors_by_key: dict[str, str] = {}
-    surf = _sanitize_mem_value(bundle.anchors.get("wm.surf", ""), "wm.surf")
-    if surf:
-        anchors_by_key["wm.surf"] = f"wm.surf={_compact(surf, 140)}"
     snapshot = _sanitize_mem_value(bundle.anchors.get("p.snapshot", ""), "p.snapshot")
     if snapshot and float(plan.intent.profile) >= 0.25:
-        anchors_by_key["p.snapshot"] = f"p.snapshot={_compact(snapshot, 160)}"
-    recent = _compress_pipe_segments(_sanitize_mem_value(bundle.anchors.get("t.recent", ""), "t.recent"))
-    if recent and float(plan.intent.timeline) >= 0.25:
-        anchors_by_key["t.recent"] = f"t.recent={_compact(recent, 180)}"
+        anchors_by_key["p.snapshot"] = f"p.snapshot={snapshot}"
     if plan.intent.timeline >= max(plan.intent.profile, plan.intent.state + plan.intent.overview, plan.intent.fact):
-        order = ["t.recent", "wm.surf", "p.snapshot"]
+        order = ["p.snapshot"]
     elif plan.intent.profile >= max(plan.intent.timeline, plan.intent.state + plan.intent.overview, plan.intent.fact):
-        order = ["p.snapshot", "wm.surf", "t.recent"]
+        order = ["p.snapshot"]
     elif plan.intent.fact >= max(plan.intent.timeline, plan.intent.profile, plan.intent.state + plan.intent.overview):
-        order = ["wm.surf", "p.snapshot", "t.recent"]
+        order = ["p.snapshot"]
     else:
-        order = ["wm.surf", "p.snapshot", "t.recent"]
+        order = ["p.snapshot"]
     primary = [anchors_by_key[order[0]]] if order and order[0] in anchors_by_key else []
     secondary = [anchors_by_key[key] for key in order[1:] if key in anchors_by_key]
     return primary, secondary
@@ -471,10 +466,8 @@ def build_memctx(plan: BrainRecallPlan, bundle: RetrievalBundle, budget_tokens: 
         "deep": [line for line in _deep_lines(plan, bundle) if line not in seen],
         "ephemeral": [],
     }
-    timeline_digest = next((line for line in sections["timeline"] if line.startswith("t.digest=")), "")
-    has_timeline_detail = bool(timeline_digest or any(line.startswith("t.ev") for line in sections["timeline"]))
+    has_timeline_detail = bool(any(line.startswith("t.ev") for line in sections["timeline"]))
     if has_timeline_detail:
-        digest_value = timeline_digest.split("=", 1)[1] if timeline_digest else ""
         primary_anchors = [
             line
             for line in primary_anchors
@@ -500,12 +493,22 @@ def build_memctx(plan: BrainRecallPlan, bundle: RetrievalBundle, budget_tokens: 
                 used += _line_cost(line)
                 seen.add(line)
         sections["timeline"] = [line for line in sections["timeline"] if line not in protected_timeline]
-        priority_timeline = next((line for line in sections["timeline"] if line.startswith("t.digest=") or line.startswith("t.ev")), "")
+        priority_timeline = next((line for line in sections["timeline"] if line.startswith("t.ev")), "")
         if priority_timeline and _fits(priority_timeline, available - used):
             selected.append(priority_timeline)
             used += _line_cost(priority_timeline)
             seen.add(priority_timeline)
             sections["timeline"] = [line for line in sections["timeline"] if line != priority_timeline]
+    timeline_values = {_line_value(line) for line in selected if line.startswith("t.ev")}
+    if timeline_values:
+        sections["surface"] = [
+            line for line in sections["surface"]
+            if _line_value(line) not in timeline_values
+        ]
+        sections["deep"] = [
+            line for line in sections["deep"]
+            if _line_value(line) not in timeline_values
+        ]
     for line in primary_anchors:
         if line in seen:
             continue
@@ -543,7 +546,7 @@ def build_memctx(plan: BrainRecallPlan, bundle: RetrievalBundle, budget_tokens: 
     for line in secondary_anchors:
         if line in seen:
             continue
-        if line.startswith("t.recent=") and any(item.startswith("t.digest=") or item.startswith("t.ev") for item in selected):
+        if line.startswith("t.recent=") and any(item.startswith("t.ev") for item in selected):
             continue
         if _fits(line, remaining_budget):
             selected.append(line)
@@ -552,22 +555,6 @@ def build_memctx(plan: BrainRecallPlan, bundle: RetrievalBundle, budget_tokens: 
 
     selected = _filter_memctx_lines(selected)
     selected = _dedupe_lines(selected)
-    if dominant == "timeline" and plan.time_range is not None and not any(line.startswith("t.digest=") or line.startswith("t.ev") for line in selected):
-        fallback_detail = _timeline_fallback_detail(plan, bundle)
-        if fallback_detail:
-            fallback_value = fallback_detail.split("=", 1)[1] if "=" in fallback_detail else fallback_detail
-            if not any(line.startswith("t.recent=") and line.split("=", 1)[1] == fallback_value for line in selected):
-                selected.append(fallback_detail)
-            current_budget = budget_tokens
-            protected_prefixes = ("t.recent=", "t.range=", "t.label=", "t.digest=", "t.ev")
-            while sum(_line_cost(line) for line in selected) > current_budget:
-                removable_index = next(
-                    (index for index in range(len(selected) - 1, -1, -1) if not selected[index].startswith(protected_prefixes)),
-                    None,
-                )
-                if removable_index is None:
-                    break
-                selected.pop(removable_index)
     if not selected:
         return ""
     final_lines = fit_lines(_dedupe_lines(selected), budget_tokens)
