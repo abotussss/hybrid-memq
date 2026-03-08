@@ -11,7 +11,7 @@ from pathlib import Path
 
 from sidecar.memq.audit import audit_output
 from sidecar.memq.brain.ollama_client import OllamaClient
-from sidecar.memq.brain.schemas import BrainIngestPlan, BrainMergePlan, BrainRecallPlan
+from sidecar.memq.brain.schemas import BrainIngestPlan, BrainMergePlan, BrainPreviewPlan, BrainRecallPlan
 from sidecar.memq.brain.service import (
     BrainService,
     _compact_mapping,
@@ -195,6 +195,31 @@ class RegressionV3Test(unittest.TestCase):
                 style_rules_only=True,
             )
             style = self.db.list_style("s1")
+            self.assertEqual("ひろ", style.get("callUser"))
+            self.assertEqual("ロックマン（Rockman.EXE）", style.get("persona"))
+        finally:
+            asyncio.run(svc.close())
+
+    def test_apply_preview_plan_uses_qbrain_call_user_directly(self) -> None:
+        svc = BrainService(self.cfg)
+        try:
+            plan = BrainPreviewPlan.model_validate(
+                {
+                    "style_update": {
+                        "apply": True,
+                        "explicit": True,
+                        "keys": {"callUser": "ひろ", "persona": "ロックマン（Rockman.EXE）"},
+                    }
+                }
+            )
+            wrote = svc.apply_preview_plan(
+                self.db,
+                session_key="s1",
+                plan=plan,
+                ts=int(time.time()),
+            )
+            style = self.db.list_style("s1")
+            self.assertEqual(2, wrote["style"])
             self.assertEqual("ひろ", style.get("callUser"))
             self.assertEqual("ロックマン（Rockman.EXE）", style.get("persona"))
         finally:

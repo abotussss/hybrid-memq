@@ -7,13 +7,20 @@ Rules:
 - Output exactly one JSON object.
 - Do not emit prose, markdown, or explanations.
 - Prefer compact values.
-- Decide from the user_text alone whether the turn should update QSTYLE and/or QRULE.
+- Decide from the user_text and current_style/current_rules whether the turn should update QSTYLE and/or QRULE.
 - If the turn is only asking to inspect current values, return apply=false for both.
 - If the turn asks to change persona, tone, speaking style, first person, or how the user should be addressed, set style_update.apply=true and explicit=true.
 - If the turn asks to add, remove, or change a persistent rule/policy, set rules_update.apply=true and explicit=true.
 - Preserve requested persona identity faithfully.
 - Do not turn technical terms like memory-lancedb-pro, QCTX, OpenClaw, backend, adapter, bridge into persona values.
 - For callUser, prefer the explicit operator name if given.
+- If current_style already has a callUser and the user corrects their own name or preferred form of address, you MUST update callUser to the corrected name.
+- Treat these as address-preference updates when they refer to the user themselves:
+  - "俺の名前はひろだよ"
+  - "俺はひろだよ"
+  - "ひろって呼んで"
+  - "名前間違えるな。ひろだ"
+- When the user clarifies their own name after a previous callUser exists, update callUser immediately instead of keeping the previous nickname.
 - For tone and speaking_style, keep the user's requested style concise but recognizable.
 - For security-related rule requests, use canonical prohibiting rules and never invert polarity.
 
@@ -22,7 +29,11 @@ Examples:
   => style_update.apply=true
   => style_update.keys={"callUser":"ひろ"}
 - user_text: "俺の名前はヒロだよ"
-  => if the intent is to update how the assistant addresses the user, style_update.apply=true and callUser="ヒロ"
+  => style_update.apply=true
+  => style_update.keys={"callUser":"ヒロ"}
+- current_style.callUser="熱斗くん", user_text: "俺の名前はひろだよ"
+  => style_update.apply=true
+  => style_update.keys={"callUser":"ひろ"}
 - user_text: "ペルソナはロックマンEXEのロックマンにして"
   => style_update.apply=true
   => style_update.keys includes persona

@@ -666,6 +666,82 @@ class BrainService:
                 max_tokens=min(max_tokens, 160),
             )
 
+    def apply_preview_plan(
+        self,
+        db: MemqDB,
+        *,
+        session_key: str,
+        plan: BrainPreviewPlan,
+        ts: int,
+        memory_backend: "LanceDbMemoryBackend | None" = None,
+    ) -> dict[str, int]:
+        wrote = {"facts": 0, "events": 0, "style": 0, "rules": 0, "quarantine": 0}
+        lancedb_primary = memory_backend is not None and memory_backend.enabled()
+        lancedb_entries: list[dict[str, Any]] = []
+        plan_style_update = getattr(plan, "style_update", None)
+        plan_rules_update = getattr(plan, "rules_update", None)
+
+        if plan_style_update and plan_style_update.apply:
+            for raw_key, raw_value in plan_style_update.keys.items():
+                key = _style_key_alias(raw_key)
+                if not key:
+                    continue
+                actual_value = _clean_style_value(key, raw_value or "")
+                if not actual_value:
+                    continue
+                for target_session in _explicit_targets(session_key):
+                    if not lancedb_primary:
+                        db.upsert_style(target_session, key, actual_value, updated_at=ts)
+                    lancedb_entries.append(
+                        {
+                            "id": f"{target_session}:qstyle:{key}",
+                            "session_key": target_session,
+                            "layer": "deep",
+                            "kind": "style",
+                            "fact_key": f"qstyle.{key}",
+                            "value": actual_value,
+                            "text": actual_value,
+                            "summary": actual_value,
+                            "importance": 1.0,
+                            "confidence": 1.0,
+                            "strength": 1.0,
+                            "timestamp": ts,
+                        }
+                    )
+                wrote["style"] += 1
+
+        if plan_rules_update and plan_rules_update.apply:
+            for key, raw_value in plan_rules_update.rules.items():
+                if not key.startswith(RULE_PREFIXES):
+                    continue
+                actual_value = _normalize_rule_value(key, raw_value)
+                if not actual_value:
+                    continue
+                for target_session in _explicit_targets(session_key):
+                    if not lancedb_primary:
+                        db.upsert_rule(target_session, key, actual_value, updated_at=ts)
+                    lancedb_entries.append(
+                        {
+                            "id": f"{target_session}:qrule:{key}",
+                            "session_key": target_session,
+                            "layer": "deep",
+                            "kind": "rule",
+                            "fact_key": f"qrule.{key}",
+                            "value": actual_value,
+                            "text": actual_value,
+                            "summary": actual_value,
+                            "importance": 1.0,
+                            "confidence": 1.0,
+                            "strength": 1.0,
+                            "timestamp": ts,
+                        }
+                    )
+                wrote["rules"] += 1
+
+        if memory_backend is not None and memory_backend.enabled() and lancedb_entries:
+            memory_backend.ingest_memories(lancedb_entries)
+        return wrote
+
     async def build_recall_plan(
         self,
         *,
