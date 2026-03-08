@@ -18,7 +18,7 @@ def post(path,payload):
 if __name__ == '__main__':
     prompt = '長文の最近の作業履歴を踏まえて要点だけ教えて'
     recent = [{'role':'user','text':'a'*2000},{'role':'assistant','text':'b'*2000},{'role':'user','text':'c'*2000}]
-    res = post('/memctx/query', {'sessionKey':'budget-proof-v3','prompt':prompt,'recentMessages':recent,'budgets':{'memctxTokens':500,'rulesTokens':500,'styleTokens':500},'topK':5})
+    res = post('/qctx/query', {'sessionKey':'budget-proof-v3','prompt':prompt,'recentMessages':recent,'budgets':{'qctxTokens':500,'qruleTokens':500,'qstyleTokens':500},'topK':5})
     out = {'qrule': est_tokens(res['qrule']), 'qstyle': est_tokens(res['qstyle']), 'qctx': est_tokens(res['qctx'])}
     assert 0 < out['qrule'] <= 500
     assert 0 < out['qstyle'] <= 500

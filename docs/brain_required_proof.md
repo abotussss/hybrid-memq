@@ -21,7 +21,7 @@ python3 bench/src/brain_required_proof.py
 4. Trace lines include `model=gpt-oss:20b`.
 5. Trace lines include `/api/ps` proof (`ps_snapshot.seen=true`).
 6. `GET /api/ps` includes `gpt-oss:20b`.
-7. Fail-closed check: a temporary required sidecar with broken Ollama URL returns HTTP 503 for `/memctx/query`.
+7. Fail-closed check: a temporary required sidecar with broken Ollama URL returns HTTP 503 for `/qctx/query`.
 
 ## Useful env overrides
 - `MEMQ_PROOF_TARGET_INGEST` (default: `10`)

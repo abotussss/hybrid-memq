@@ -26,9 +26,9 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, runtim
       MEMQ_BRAIN_MODEL: String(getCfg(api, "memq.brain.model", defaults["memq.brain.model"])),
       MEMQ_BRAIN_KEEP_ALIVE: String(getCfg(api, "memq.brain.keepAlive", defaults["memq.brain.keepAlive"])),
       MEMQ_BRAIN_TIMEOUT_MS: String(getCfg(api, "memq.brain.timeoutMs", defaults["memq.brain.timeoutMs"])),
-      MEMQ_STYLE_TOKENS: String(getCfg(api, "memq.budgets.styleTokens", defaults["memq.budgets.styleTokens"])),
-      MEMQ_RULES_TOKENS: String(getCfg(api, "memq.budgets.rulesTokens", defaults["memq.budgets.rulesTokens"])),
-      MEMQ_MEMCTX_TOKENS: String(getCfg(api, "memq.budgets.memctxTokens", defaults["memq.budgets.memctxTokens"])),
+      MEMQ_QSTYLE_TOKENS: String(getCfg(api, "memq.budgets.qstyleTokens", defaults["memq.budgets.qstyleTokens"])),
+      MEMQ_QRULE_TOKENS: String(getCfg(api, "memq.budgets.qruleTokens", defaults["memq.budgets.qruleTokens"])),
+      MEMQ_QCTX_TOKENS: String(getCfg(api, "memq.budgets.qctxTokens", defaults["memq.budgets.qctxTokens"])),
       MEMQ_RECENT_TOKENS: String(getCfg(api, "memq.recent.maxTokens", defaults["memq.recent.maxTokens"])),
       MEMQ_RECENT_MIN_KEEP_MESSAGES: String(getCfg(api, "memq.recent.minKeepMessages", defaults["memq.recent.minKeepMessages"])),
       MEMQ_TOTAL_MAX_INPUT_TOKENS: String(getCfg(api, "memq.total.maxInputTokens", defaults["memq.total.maxInputTokens"])),
@@ -39,9 +39,9 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, runtim
     const trim = trimRecentToBudget(messages, {
       totalMaxInputTokens: Number(env.MEMQ_TOTAL_MAX_INPUT_TOKENS),
       totalReserveTokens: Number(env.MEMQ_TOTAL_RESERVE_TOKENS),
-      memctxTokens: Number(env.MEMQ_MEMCTX_TOKENS),
-      rulesTokens: Number(env.MEMQ_RULES_TOKENS),
-      styleTokens: Number(env.MEMQ_STYLE_TOKENS),
+      qctxTokens: Number(env.MEMQ_QCTX_TOKENS),
+      qruleTokens: Number(env.MEMQ_QRULE_TOKENS),
+      qstyleTokens: Number(env.MEMQ_QSTYLE_TOKENS),
       recentMaxTokens: Number(env.MEMQ_RECENT_TOKENS),
       recentMinKeepMessages: Number(env.MEMQ_RECENT_MIN_KEEP_MESSAGES),
     }, prompt);
@@ -75,15 +75,15 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, runtim
     }
     let response;
     try {
-      response = await sidecar.memctxQuery(
+      response = await sidecar.qctxQuery(
         {
           sessionKey,
           prompt,
           recentMessages: trim.kept.map((message) => ({ role: message.role, text: message.text, ts: message.ts })),
           budgets: {
-            memctxTokens: Number(env.MEMQ_MEMCTX_TOKENS),
-            rulesTokens: Number(env.MEMQ_RULES_TOKENS),
-            styleTokens: Number(env.MEMQ_STYLE_TOKENS),
+            qctxTokens: Number(env.MEMQ_QCTX_TOKENS),
+            qruleTokens: Number(env.MEMQ_QRULE_TOKENS),
+            qstyleTokens: Number(env.MEMQ_QSTYLE_TOKENS),
           },
           topK: Number(getCfg(api, "memq.retrieval.topK", defaults["memq.retrieval.topK"])),
         },
@@ -113,9 +113,9 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, runtim
       {
         totalMaxInputTokens: Number(env.MEMQ_TOTAL_MAX_INPUT_TOKENS),
         totalReserveTokens: Number(env.MEMQ_TOTAL_RESERVE_TOKENS),
-        memctxTokens: Number(env.MEMQ_MEMCTX_TOKENS),
-        rulesTokens: Number(env.MEMQ_RULES_TOKENS),
-        styleTokens: Number(env.MEMQ_STYLE_TOKENS),
+        qctxTokens: Number(env.MEMQ_QCTX_TOKENS),
+        qruleTokens: Number(env.MEMQ_QRULE_TOKENS),
+        qstyleTokens: Number(env.MEMQ_QSTYLE_TOKENS),
         recentMaxTokens: Number(env.MEMQ_RECENT_TOKENS),
         recentMinKeepMessages: Number(env.MEMQ_RECENT_MIN_KEEP_MESSAGES),
       }

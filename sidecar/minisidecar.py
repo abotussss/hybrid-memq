@@ -7,7 +7,7 @@ import asyncio
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 import uvicorn
 
 from sidecar.memq.brain.schemas import BrainIngestPlan
@@ -32,9 +32,9 @@ class Message(BaseModel):
 
 
 class QueryBudgets(BaseModel):
-    memctxTokens: int
-    rulesTokens: int
-    styleTokens: int
+    qctxTokens: int = Field(validation_alias=AliasChoices("qctxTokens", "memctxTokens"))
+    qruleTokens: int = Field(validation_alias=AliasChoices("qruleTokens", "rulesTokens"))
+    qstyleTokens: int = Field(validation_alias=AliasChoices("qstyleTokens", "styleTokens"))
 
 
 class QueryRequest(BaseModel):
@@ -88,7 +88,7 @@ idle_failure = ""
 
 
 def _use_memory_backend() -> bool:
-    return cfg.memctx_backend == "memory-lancedb-pro"
+    return cfg.qctx_backend == "memory-lancedb-pro"
 
 
 def _effective_profile_snapshot(snapshot: str, style: dict[str, str]) -> str:
@@ -198,16 +198,13 @@ async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "config": {
-            "brainMode": cfg.brain.mode,
-            "brainModel": cfg.brain.model,
-            "brainProvider": cfg.brain.provider,
-            "memoryBackend": cfg.memctx_backend,
-            "qctxBackend": cfg.memctx_backend,
+            "memoryBackend": cfg.qctx_backend,
+            "qctxBackend": cfg.qctx_backend,
             "timezone": cfg.timezone,
             "budgets": {
-                "qctx": cfg.budgets.memctx_tokens,
-                "qrule": cfg.budgets.rules_tokens,
-                "qstyle": cfg.budgets.style_tokens,
+                "qctx": cfg.budgets.qctx_tokens,
+                "qrule": cfg.budgets.qrule_tokens,
+                "qstyle": cfg.budgets.qstyle_tokens,
             },
             "overrides": {
                 "qstylePath": str(overrides.qstyle_path),
@@ -215,6 +212,11 @@ async def health() -> dict[str, Any]:
                 "qstyleKeys": sorted(overrides.qstyle.keys()),
                 "qruleKeys": sorted(overrides.qrule.keys()),
             },
+        },
+        "qbrain": {
+            "mode": cfg.brain.mode,
+            "model": cfg.brain.model,
+            "provider": cfg.brain.provider,
         },
         "brain": brain.stats(),
         "db": str(cfg.db_path),
@@ -386,8 +388,7 @@ async def conversation_summarize(req: SummarizeRequest) -> dict[str, Any]:
     return {"ok": True, "traceId": trace_id, "wrote": wrote}
 
 
-@app.post("/memctx/query")
-async def memctx_query(req: QueryRequest) -> dict[str, Any]:
+async def _qctx_query_impl(req: QueryRequest) -> dict[str, Any]:
     global last_activity_at
     last_activity_at = int(datetime.now().timestamp())
     try:
@@ -401,9 +402,9 @@ async def memctx_query(req: QueryRequest) -> dict[str, Any]:
                 prompt=req.prompt,
                 recent_messages=[m.model_dump() for m in req.recentMessages],
                 budgets=PromptBlueprintBudgets(
-                    memctx_tokens=req.budgets.memctxTokens,
-                    rules_tokens=req.budgets.rulesTokens,
-                    style_tokens=req.budgets.styleTokens,
+                    qctx_tokens=req.budgets.qctxTokens,
+                    qrule_tokens=req.budgets.qruleTokens,
+                    qstyle_tokens=req.budgets.qstyleTokens,
                 ),
                 top_k=req.topK,
                 now_iso=datetime.now().astimezone().isoformat(),
@@ -416,6 +417,16 @@ async def memctx_query(req: QueryRequest) -> dict[str, Any]:
     response["qstyle"] = _rewrite_public_labels(response.get("qstyle", ""))
     response["qctx"] = _rewrite_public_labels(response.get("qctx", ""))
     return response
+
+
+@app.post("/qctx/query")
+async def qctx_query(req: QueryRequest) -> dict[str, Any]:
+    return await _qctx_query_impl(req)
+
+
+@app.post("/memctx/query")
+async def qctx_query_compat(req: QueryRequest) -> dict[str, Any]:
+    return await _qctx_query_impl(req)
 
 
 @app.post("/idle/run_once")
@@ -455,6 +466,22 @@ async def profile(session_key: str = Query("global")) -> dict[str, Any]:
         "qruleOverride": overrides.qrule,
         "profile_snapshot": effective_snapshot,
     }
+
+
+@app.get("/qstyle/current")
+async def qstyle_current(session_key: str = Query("global")) -> dict[str, Any]:
+    overrides = load_local_overrides(cfg.root)
+    active_backend = memory_backend if _use_memory_backend() else None
+    qstyle = {**list_qstyle(db, active_backend, session_key), **overrides.qstyle}
+    return {"ok": True, "sessionKey": session_key, "qstyle": qstyle, "override": overrides.qstyle}
+
+
+@app.get("/qrule/current")
+async def qrule_current(session_key: str = Query("global")) -> dict[str, Any]:
+    overrides = load_local_overrides(cfg.root)
+    active_backend = memory_backend if _use_memory_backend() else None
+    qrule = {**list_qrule(db, active_backend, session_key), **overrides.qrule}
+    return {"ok": True, "sessionKey": session_key, "qrule": qrule, "override": overrides.qrule}
 
 
 @app.get("/quarantine")

@@ -34,11 +34,11 @@ if __name__ == '__main__':
         'ts': ts,
     })
     profile = get(f'/profile?session_key={SESSION}')
-    query = post('/memctx/query', {
+    query = post('/qctx/query', {
         'sessionKey': SESSION,
         'prompt': 'あなたは誰？ 昨日何した？',
         'recentMessages': [{'role': 'user', 'text': 'あなたは誰？ 昨日何した？'}],
-        'budgets': {'memctxTokens': 500, 'rulesTokens': 500, 'styleTokens': 500},
+        'budgets': {'qctxTokens': 500, 'qruleTokens': 500, 'qstyleTokens': 500},
         'topK': 5,
     })
     idle = post('/idle/run_once', {'nowTs': ts + 1, 'maxWorkMs': 1200})

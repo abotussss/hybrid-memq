@@ -16,9 +16,9 @@ from sidecar.memq.retrieval import retrieve_with_plan
 
 @dataclass(frozen=True)
 class PromptBlueprintBudgets:
-    memctx_tokens: int
-    rules_tokens: int
-    style_tokens: int
+    qctx_tokens: int
+    qrule_tokens: int
+    qstyle_tokens: int
 
 
 @dataclass(frozen=True)
@@ -140,17 +140,17 @@ async def build_prompt_blueprint(
     bundle.anchors["wm.surf"] = surface_anchor(db, memory_backend, request.session_key)
     bundle.anchors["wm.deep"] = deep_anchor(db, memory_backend, request.session_key)
     bundle.anchors["t.recent"] = recent_digest(db, memory_backend, request.session_key, days=2)
-    memrules = _rewrite_public_labels(build_memrules(rules, request.budgets.rules_tokens))
-    memstyle = _rewrite_public_labels(build_memstyle(style, request.budgets.style_tokens))
-    memctx = _rewrite_public_labels(build_memctx(plan, bundle, request.budgets.memctx_tokens))
+    qrule = _rewrite_public_labels(build_memrules(rules, request.budgets.qrule_tokens))
+    qstyle = _rewrite_public_labels(build_memstyle(style, request.budgets.qstyle_tokens))
+    qctx = _rewrite_public_labels(build_memctx(plan, bundle, request.budgets.qctx_tokens))
     used_ids = [item.id for item in bundle.surface] + [item.id for item in bundle.deep]
-    qctx_keys = [line.split("=", 1)[0] for line in memctx.splitlines() if "=" in line]
+    qctx_keys = [line.split("=", 1)[0] for line in qctx.splitlines() if "=" in line]
     brain_stats = _brain_stats(brain)
 
     return PromptBlueprint(
-        qrule=memrules,
-        qstyle=memstyle,
-        qctx=memctx,
+        qrule=qrule,
+        qstyle=qstyle,
+        qctx=qctx,
         meta={
             "surfaceHit": bool(bundle.surface),
             "deepCalled": plan.retrieval.allow_deep,

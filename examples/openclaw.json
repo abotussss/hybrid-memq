@@ -13,9 +13,9 @@
         "enabled": true,
         "config": {
           "memq.sidecarUrl": "http://127.0.0.1:7781",
-          "memq.budgets.memctxTokens": 120,
-          "memq.budgets.rulesTokens": 80,
-          "memq.budgets.styleTokens": 120,
+          "memq.budgets.qctxTokens": 120,
+          "memq.budgets.qruleTokens": 80,
+          "memq.budgets.qstyleTokens": 120,
           "memq.total.maxInputTokens": 5200,
           "memq.total.reserveTokens": 1100,
           "memq.recent.maxTokens": 5000,

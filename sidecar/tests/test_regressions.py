@@ -99,7 +99,7 @@ class RegressionV3Test(unittest.TestCase):
                     os.environ.pop(key, None)
                 else:
                     os.environ[key] = value
-        self.assertEqual("memory-lancedb-pro", cfg.memctx_backend)
+        self.assertEqual("memory-lancedb-pro", cfg.qctx_backend)
 
     def test_apply_ingest_plan_updates_style_from_explicit_request(self) -> None:
         svc = BrainService(self.cfg)
@@ -562,7 +562,7 @@ class RegressionV3Test(unittest.TestCase):
                     session_key="s1",
                     prompt="君は誰？",
                     recent_messages=[{"role": "user", "text": "君は誰？", "ts": now}],
-                    budgets=PromptBlueprintBudgets(memctx_tokens=120, rules_tokens=80, style_tokens=80),
+                    budgets=PromptBlueprintBudgets(qctx_tokens=120, qrule_tokens=80, qstyle_tokens=80),
                     top_k=1,
                     now_iso="2026-03-08T12:00:00+09:00",
                 ),
@@ -583,7 +583,7 @@ class RegressionV3Test(unittest.TestCase):
         self.assertEqual("sqlite", response["meta"]["debug"]["qctx_backend"])
 
     def test_idle_consolidation_is_disabled_for_memory_lancedb_backend(self) -> None:
-        cfg = replace(self.cfg, memctx_backend="memory-lancedb-pro")
+        cfg = replace(self.cfg, qctx_backend="memory-lancedb-pro")
         stats, trace_id = asyncio.run(
             run_idle_consolidation(
                 cfg=cfg,
@@ -1377,13 +1377,13 @@ def _cfg(root: Path) -> Config:
     return Config(
         root=root,
         db_path=root / "memq_v3.sqlite3",
-        memctx_backend="sqlite",
+        qctx_backend="sqlite",
         lancedb_path=root / "lancedb",
         lancedb_helper=root / "missing_lancedb_helper.mjs",
         host="127.0.0.1",
         port=7781,
         timezone="Asia/Tokyo",
-        budgets=Budgets(memctx_tokens=120, rules_tokens=80, style_tokens=120),
+        budgets=Budgets(qctx_tokens=120, qrule_tokens=80, qstyle_tokens=120),
         total_max_input_tokens=4200,
         total_reserve_tokens=1800,
         recent_max_tokens=2600,

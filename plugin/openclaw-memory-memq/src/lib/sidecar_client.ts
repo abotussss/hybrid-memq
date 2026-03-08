@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import type { MemqQueryRequest, MemqQueryResponse } from "../types.js";
+import type { QctxQueryRequest, QctxQueryResponse } from "../types.js";
 
 export class SidecarClient {
   constructor(private readonly baseUrl: string) {}
@@ -65,8 +65,8 @@ export class SidecarClient {
     await this.req("/idle_tick", "POST", { nowSec }, 3000);
   }
 
-  async memctxQuery(req: MemqQueryRequest, timeoutMs = 70000): Promise<MemqQueryResponse> {
-    return await this.req<MemqQueryResponse>("/memctx/query", "POST", req, timeoutMs);
+  async qctxQuery(req: QctxQueryRequest, timeoutMs = 70000): Promise<QctxQueryResponse> {
+    return await this.req<QctxQueryResponse>("/qctx/query", "POST", req, timeoutMs);
   }
 
   async ingestTurn(payload: Record<string, unknown>, timeoutMs = 70000): Promise<any> {

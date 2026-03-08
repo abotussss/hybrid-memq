@@ -24,11 +24,11 @@ if __name__ == '__main__':
     cases = ['君は誰？', '家族構成は？', '昨日何した？', '最近の要点は？']
     results = {}
     for prompt in cases:
-        res = post('/memctx/query', {
+        res = post('/qctx/query', {
             'sessionKey': SESSION,
             'prompt': prompt,
             'recentMessages': [{'role': 'user', 'text': prompt}],
-            'budgets': {'memctxTokens':500,'rulesTokens':500,'styleTokens':500},
+            'budgets': {'qctxTokens':500,'qruleTokens':500,'qstyleTokens':500},
             'topK': 5,
         })
         results[prompt] = {'qctx': res['qctx'], 'debug': res['meta']['debug']}

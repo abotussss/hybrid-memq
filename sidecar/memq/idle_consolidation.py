@@ -14,7 +14,7 @@ async def run_idle_consolidation(
     brain: BrainService,
     session_key: str,
 ) -> tuple[dict[str, Any], str | None]:
-    if cfg.memctx_backend == "memory-lancedb-pro":
+    if cfg.qctx_backend == "memory-lancedb-pro":
         return {"did": ["disabled"]}, None
     stats: dict[str, Any] = {"did": []}
     purge = db.purge_expired()

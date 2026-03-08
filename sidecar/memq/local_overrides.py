@@ -85,15 +85,10 @@ def _rule_override_is_dirty(key: str, value: str) -> bool:
 
 
 def load_local_overrides(root: Path) -> LocalOverrides:
-    memq_dir = (root / ".memq").resolve()
-    memq_dir.mkdir(parents=True, exist_ok=True)
     qstyle_root = root / "QSTYLE.local.json"
     qrule_root = root / "QRULE.local.json"
-    qstyle_legacy = memq_dir / "qstyle.override.json"
-    qrule_legacy = memq_dir / "qrule.override.json"
-
-    qstyle_path = qstyle_root if qstyle_root.exists() else qstyle_legacy
-    qrule_path = qrule_root if qrule_root.exists() else qrule_legacy
+    qstyle_path = qstyle_root
+    qrule_path = qrule_root
 
     raw_qstyle = _parse_mapping(qstyle_path)
     raw_qrule = _parse_mapping(qrule_path)

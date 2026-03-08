@@ -29,7 +29,7 @@ def _env_str(name: str, default: str) -> str:
     return raw.strip() or default
 
 
-def _normalize_memctx_backend(value: str) -> str:
+def _normalize_qctx_backend(value: str) -> str:
     clean = str(value or "").strip().lower()
     if clean in {"", "lancedb", "memory-lancedb-pro-adapted"}:
         return "memory-lancedb-pro"
@@ -38,9 +38,9 @@ def _normalize_memctx_backend(value: str) -> str:
 
 @dataclass(frozen=True)
 class Budgets:
-    memctx_tokens: int
-    rules_tokens: int
-    style_tokens: int
+    qctx_tokens: int
+    qrule_tokens: int
+    qstyle_tokens: int
 
 
 @dataclass(frozen=True)
@@ -73,7 +73,7 @@ class AuditConfig:
 class Config:
     root: Path
     db_path: Path
-    memctx_backend: str
+    qctx_backend: str
     lancedb_path: Path
     lancedb_helper: Path
     host: str
@@ -121,16 +121,16 @@ def load_config() -> Config:
     return Config(
         root=root,
         db_path=db_path,
-        memctx_backend=_normalize_memctx_backend(_env_str("MEMQ_MEMCTX_BACKEND", "memory-lancedb-pro")),
+        qctx_backend=_normalize_qctx_backend(_env_str("MEMQ_QCTX_BACKEND", _env_str("MEMQ_MEMCTX_BACKEND", "memory-lancedb-pro"))),
         lancedb_path=lancedb_path,
         lancedb_helper=helper_path,
         host=_env_str("MEMQ_HOST", "127.0.0.1"),
         port=_env_int("MEMQ_PORT", 7781),
         timezone=_env_str("MEMQ_TIMEZONE", "Asia/Tokyo"),
         budgets=Budgets(
-            memctx_tokens=_env_int("MEMQ_MEMCTX_TOKENS", 500),
-            rules_tokens=_env_int("MEMQ_RULES_TOKENS", 500),
-            style_tokens=_env_int("MEMQ_STYLE_TOKENS", 500),
+            qctx_tokens=_env_int("MEMQ_QCTX_TOKENS", _env_int("MEMQ_MEMCTX_TOKENS", 500)),
+            qrule_tokens=_env_int("MEMQ_QRULE_TOKENS", _env_int("MEMQ_RULES_TOKENS", 500)),
+            qstyle_tokens=_env_int("MEMQ_QSTYLE_TOKENS", _env_int("MEMQ_STYLE_TOKENS", 500)),
         ),
         total_max_input_tokens=_env_int("MEMQ_TOTAL_MAX_INPUT_TOKENS", 5200),
         total_reserve_tokens=_env_int("MEMQ_TOTAL_RESERVE_TOKENS", 1800),

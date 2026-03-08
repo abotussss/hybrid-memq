@@ -1,33 +1,49 @@
-# Hybrid MEMQ v3 Sidecar
+# Sidecar
 
-The sidecar is the single source of truth for Hybrid MEMQ v3.
+## English
+
+The sidecar is the runtime controller for MEMQ.
 
 Responsibilities:
-- persist memory state in SQLite
-- call QBRAIN for ingest / recall / merge planning
-- apply those plans deterministically
-- expose proof endpoints for required runtime
-- provide bounded `QRULE`, `QSTYLE`, `QCTX` to the plugin
 
-## Run
+- keep the effective state for `QRULE`, `QSTYLE`, and `QCTX`
+- ask QBRAIN for ingest and recall plans
+- validate and apply those plans deterministically
+- query memory-lancedb-pro for memory recall
+- expose proof/debug endpoints
 
-```bash
-cd /Users/hiroyukimiyake/Documents/New\ project
-python3 -m venv sidecar/.venv
-sidecar/.venv/bin/pip install -r sidecar/requirements.txt
-MEMQ_BRAIN_MODE=brain-required \
-MEMQ_BRAIN_MODEL=gpt-oss:20b \
-sidecar/.venv/bin/python sidecar/minisidecar.py
-```
-
-## Important Endpoints
+Main endpoints:
 
 - `GET /health`
+- `POST /qctx/query`
+- `POST /memory/preview_prompt`
 - `POST /memory/ingest_turn`
-- `POST /memctx/query`
-- `POST /idle/run_once`
-- `POST /audit/output`
+- `GET /qstyle/current`
+- `GET /qrule/current`
 - `GET /profile`
-- `GET /quarantine`
+- `GET /brain/stats`
+- `GET /brain/trace/recent`
+
+## 日本語
+
+sidecar は MEMQ の runtime controller です。
+
+役割:
+
+- `QRULE / QSTYLE / QCTX` の実効状態を管理する
+- QBRAIN に ingest / recall plan を作らせる
+- plan を検証して deterministic に適用する
+- memory-lancedb-pro を検索して記憶を引く
+- proof/debug endpoint を提供する
+
+主な endpoint:
+
+- `GET /health`
+- `POST /qctx/query`
+- `POST /memory/preview_prompt`
+- `POST /memory/ingest_turn`
+- `GET /qstyle/current`
+- `GET /qrule/current`
+- `GET /profile`
 - `GET /brain/stats`
 - `GET /brain/trace/recent`

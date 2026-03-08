@@ -4,21 +4,21 @@ export interface MemqMessage {
   ts?: number;
 }
 
-export interface MemqBudgets {
-  memctxTokens: number;
-  rulesTokens: number;
-  styleTokens: number;
+export interface QBudgets {
+  qctxTokens: number;
+  qruleTokens: number;
+  qstyleTokens: number;
 }
 
-export interface MemqQueryRequest {
+export interface QctxQueryRequest {
   sessionKey: string;
   prompt: string;
   recentMessages: MemqMessage[];
-  budgets: MemqBudgets;
+  budgets: QBudgets;
   topK: number;
 }
 
-export interface MemqQueryResponse {
+export interface QctxQueryResponse {
   ok: boolean;
   qrule: string;
   qstyle: string;

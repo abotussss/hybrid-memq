@@ -18,11 +18,11 @@ if __name__ == '__main__':
         'assistantText': '了解。',
         'ts': int(time.time()) - 86400,
     })
-    res = post('/memctx/query', {
+    res = post('/qctx/query', {
         'sessionKey': SESSION,
         'prompt': '昨日何した？',
         'recentMessages': [{'role':'user','text':'昨日何した？'}],
-        'budgets': {'memctxTokens':500,'rulesTokens':500,'styleTokens':500},
+        'budgets': {'qctxTokens':500,'qruleTokens':500,'qstyleTokens':500},
         'topK': 5,
     })
     memctx = res['qctx']

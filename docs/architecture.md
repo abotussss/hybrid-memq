@@ -1,120 +1,55 @@
-# Hybrid MEMQ Architecture
+# Architecture
 
-Hybrid MEMQ is built around one invariant:
+## English
 
-- the plugin owns prompt-time token budgeting
-- the sidecar owns memory truth and memory selection
-- QBRAIN proposes plans, but deterministic code decides what is persisted and what is injected
+MEMQ is split into four layers:
 
-## Runtime Shape
+- **OpenClaw plugin**: token budgeting and prompt injection
+- **sidecar**: runtime controller and deterministic apply layer
+- **memory-lancedb-pro**: memory authority
+- **QBRAIN**: planning layer for ingest, recall, and updates
 
-The system has two processes:
+### Flow
 
-- `plugin/openclaw-memory-memq`
-  - thin OpenClaw adapter
-  - trims recent messages against a total input cap
-  - calls the sidecar for preview ingest, recall planning, audit, and idle work
-  - injects memory blocks in strict order: `QRULE -> QSTYLE -> QCTX`
-- `sidecar`
-  - SQLite-backed memory engine
-  - Brain orchestration for ingest / recall / merge
-  - deterministic apply layer
-  - prompt blueprint assembly
+1. OpenClaw receives a turn
+2. plugin trims recent context under a total cap
+3. plugin calls sidecar `POST /qctx/query`
+4. sidecar asks QBRAIN for a `RecallPlan`
+5. sidecar queries memory-lancedb-pro
+6. sidecar packs `QRULE`, `QSTYLE`, `QCTX`
+7. plugin injects them into OpenClaw
+8. after response, plugin sends the turn to `POST /memory/ingest_turn`
 
-## Prompt Blueprint
+### Design invariant
 
-Prompt-time recall is assembled as a versioned blueprint, not as ad-hoc strings scattered across the route:
+- memory is stored in memory-lancedb-pro
+- QBRAIN decides what matters
+- QCTX carries only the prompt-time bridge
+- OpenClaw still answers using recent context plus compact hints
 
-1. load current `rules` and `style_profile`
-2. ask QBRAIN for a `BrainRecallPlan`
-3. retrieve candidate memory with lexical search plus fact-index lookups
-4. rerank candidates with intent-aware scoring
-5. pack bounded `QRULE`, `QSTYLE`, and `QCTX`
-6. return debug metadata for proof and regression testing
+## 日本語
 
-The blueprint currently exposes:
+MEMQ は 4 層に分かれます。
 
-- `qrule`
-- `qstyle`
-- `qctx`
-- `meta.surfaceHit`
-- `meta.deepCalled`
-- `meta.usedMemoryIds`
-- `meta.debug.trace_id`
-- `meta.debug.intent`
-- `meta.debug.time_range`
-- `meta.debug.qctx_keys`
-- `meta.debug.retrieval`
+- **OpenClaw plugin**: token 予算管理と注入
+- **sidecar**: 実行制御と deterministic apply
+- **memory-lancedb-pro**: 記憶 authority
+- **QBRAIN**: 保存・想起・更新計画の作成
 
-## Retrieval Model
+### 流れ
 
-Embeddings are not required.
+1. OpenClaw がターンを受ける
+2. plugin が recent context を総上限内に切る
+3. plugin が sidecar の `POST /qctx/query` を呼ぶ
+4. sidecar が QBRAIN に `RecallPlan` を作らせる
+5. sidecar が memory-lancedb-pro を検索する
+6. sidecar が `QRULE / QSTYLE / QCTX` を pack する
+7. plugin がそれを OpenClaw に注入する
+8. 応答後、plugin が `POST /memory/ingest_turn` へ返す
 
-Retrieval is hybrid and deterministic:
+### 設計上の不変条件
 
-- SQLite FTS5 / BM25 for lexical recall
-- `fact_index` for exact fact-key recall
-- timeline window queries for event recall
-- intent-aware reranking for `profile`, `timeline`, `state`, and `fact`
-- request-level `topK` override applied consistently across deep, surface, and timeline search
-
-Reranking prefers:
-
-- `profile.*` facts when the query is profile-heavy
-- `timeline.*` and recent events when the query is timeline-heavy
-- `surface` items for state / overview prompts
-- session-local memory over global carry, except where global profile facts are the right fallback
-
-## Channel Contract
-
-Each turn has three bounded channels:
-
-- `QRULE`
-  - policy, safety, procedure, language constraints
-- `QSTYLE`
-  - persona, first person, how to address the user, tone
-- `QCTX`
-  - contextual memory only
-
-Cross-channel leakage is treated as a bug. `QCTX` must never carry policy or style budget noise.
-
-## Persistence Model
-
-SQLite remains the single source of truth.
-
-Core tables:
-
-- `memory_items`
-- `events`
-- `daily_digests`
-- `rules`
-- `style_profile`
-- `fact_index`
-- `quarantine`
-
-The deterministic apply layer is responsible for:
-
-- writing facts and events
-- updating explicit style/rule changes
-- quarantining suspicious content
-- refreshing digests, fact index, and profile snapshots
-- merging duplicate deep memories during idle consolidation
-
-## Failure Modes
-
-Two runtime profiles exist:
-
-- `brain-required`
-  - fail closed for ingest / recall / merge
-  - no degraded continuation before the final answer model runs
-- `brain-optional`
-  - recall and ingest may fall back to deterministic low-quality behavior
-  - intended for OSS debugging and constrained local environments
-
-## Why This Shape
-
-If rebuilt from scratch, this is the boundary worth preserving:
-
-- the plugin should stay thin and budget-oriented
-- the sidecar should expose a stable prompt blueprint contract
-- retrieval quality should improve by better ranking, not by stuffing more raw memory into prompt context
+- 記憶は memory-lancedb-pro に置く
+- 何が重要かは QBRAIN が決める
+- QCTX は prompt-time bridge だけを担う
+- OpenClaw は recent context と compact hint を使って最終回答する

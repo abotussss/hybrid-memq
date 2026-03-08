@@ -3,9 +3,9 @@ import { estimateTokens, type NormalizedMessage } from "./token_estimate.js";
 export interface BudgetConfig {
   totalMaxInputTokens: number;
   totalReserveTokens: number;
-  memctxTokens: number;
-  rulesTokens: number;
-  styleTokens: number;
+  qctxTokens: number;
+  qruleTokens: number;
+  qstyleTokens: number;
   recentMaxTokens: number;
   recentMinKeepMessages: number;
 }
@@ -74,7 +74,7 @@ function trimBlockToBudget(text: string, budget: number): string {
 
 export function trimRecentToBudget(messages: NormalizedMessage[], cfg: BudgetConfig, promptText: string): TrimResult {
   const promptTokens = estimateTokens(promptText);
-  const fixed = cfg.memctxTokens + cfg.rulesTokens + cfg.styleTokens + promptTokens + cfg.totalReserveTokens;
+  const fixed = cfg.qctxTokens + cfg.qruleTokens + cfg.qstyleTokens + promptTokens + cfg.totalReserveTokens;
   const recentBudget = Math.max(0, Math.min(cfg.recentMaxTokens, cfg.totalMaxInputTokens - fixed));
 
   const kept: NormalizedMessage[] = [];

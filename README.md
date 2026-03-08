@@ -1,241 +1,211 @@
-# Hybrid MEMQ v3
+# MEMQ
 
-Hybrid MEMQ v3 is a full rebuild of the OpenClaw memory plugin around one rule:
+English follows first. Japanese follows after that.
 
-- `QBRAIN` decides what to remember, what to recall, and what to merge.
-- deterministic code applies those plans.
-- OpenClaw remains the final answer model.
+## Overview
 
-## Core Model
+MEMQ is an OpenClaw memory plugin system with four clear roles:
 
-Each turn uses only three channels, in fixed order:
+- **memory-lancedb-pro** stores and retrieves memory
+- **QBRAIN** decides what to save, what to recall, and what to update
+- **QCTX** bridges selected memory into the final prompt
+- **OpenClaw** remains the final answer model
 
-1. `QRULE`
-2. `QSTYLE`
-3. `QCTX`
+MEMQ is not a raw memory dump. Its job is to reduce prompt tokens while preserving identity, rules, and relevant context.
 
-Rules:
-- `QRULE`: strict safety, language, procedure, hard constraints
-- `QSTYLE`: persona, tone, speaking style, user naming, first person
-- `QCTX`: contextual memory only
+## Naming
 
-Cross-channel contamination is rejected.
+Public names are unified as follows:
+
+- `QRULE`: hard rules and operating constraints
+- `QSTYLE`: persona, tone, address style, first person
+- `QCTX`: contextual hints selected from memory
+- `QBRAIN`: orchestration model that produces plans
+
 
 ## Architecture
 
-- `plugin/openclaw-memory-memq`
-  - thin OpenClaw plugin
-  - computes total input budget
-  - trims recent history dynamically
-  - calls sidecar
-  - injects `QRULE -> QSTYLE -> QCTX`
-- `sidecar`
-  - single source of truth
-  - SQLite persistence
-  - FTS/BM25 retrieval
-  - Brain plan generation via Ollama
-  - deterministic apply layer
-- `bench`
-  - proof scripts for required runtime, recall, timeline, budget, sleep consolidation, audit
+### 1. OpenClaw plugin
 
-## Runtime Profiles
+The plugin is intentionally thin.
 
-Two explicit profiles exist:
+It only does four things:
 
-- `brain-required`
-  - Brain must succeed for ingest / recall / idle merge
-  - no fallback
-  - no degraded continuation
-  - fail-closed before API LLM call
-- `brain-optional`
-  - Brain may be absent
-  - deterministic low-quality fallback is allowed
-  - for OSS distribution/debugging only
+1. trim recent history under a total token cap
+2. call the sidecar for `QCTX` recall
+3. inject `QRULE -> QSTYLE -> QCTX`
+4. send the final turn back for memory ingest
 
-## QBRAIN Responsibilities
+The plugin does **not** infer intent, timeline, or style updates on its own.
 
-QBRAIN produces plans only:
+### 2. Sidecar
+
+The sidecar is the runtime control plane.
+
+It is responsible for:
+
+- reading and writing memory state
+- calling QBRAIN
+- validating QBRAIN plans
+- applying those plans deterministically
+- returning bounded `qrule`, `qstyle`, `qctx`
+
+### 3. memory-lancedb-pro
+
+`memory-lancedb-pro` is the memory authority for fresh sessions.
+
+It stores:
+
+- long-term facts
+- rule entries
+- style entries
+- event entries
+- digest entries
+
+MEMQ then uses `QCTX` to retrieve only the subset of memory that is relevant to the current turn.
+
+### 4. QBRAIN
+
+QBRAIN does not write the database directly.
+
+QBRAIN only creates plans:
 
 - `IngestPlan`
 - `RecallPlan`
 - `MergePlan`
 - `AuditPatchPlan`
 
-It does not write the DB directly.
-It does not answer the user directly.
-It does not bypass validation.
+Deterministic code applies those plans. This keeps orchestration flexible while keeping persistence safe.
 
-## Deterministic Apply Layer
+## Memory Flow
 
-The sidecar applies Brain plans deterministically:
+### Ingest
 
-- ingest
-  - facts -> `memory_items`
-  - events -> `events`
-  - style updates -> `style_profile` (explicit only)
-  - rule updates -> `rules` (explicit only)
-  - suspicious content -> `quarantine`
-- recall
-  - FTS/BM25 + `fact_index` + timeline range
-  - rerank with confidence / recency / importance / strength / redundancy penalty
-  - pack bounded `QCTX`
-- idle merge
-  - merge duplicates
-  - prune obsolete items
-  - refresh `daily_digests`
-  - refresh `fact_index`
-  - refresh profile snapshot
+1. user turn arrives
+2. QBRAIN reads the turn and current state
+3. QBRAIN emits facts, events, and explicit style/rule updates
+4. sidecar validates them
+5. memory-lancedb-pro stores them
 
-## Storage Model
+### Recall
 
-Core SQLite tables:
+1. current prompt arrives
+2. QBRAIN emits a `RecallPlan`
+3. sidecar queries memory-lancedb-pro using that plan
+4. results are reranked and compacted
+5. `QCTX` is packed under a strict token budget
+6. plugin injects `QRULE -> QSTYLE -> QCTX`
 
-- `memory_items`
-- `events`
-- `daily_digests`
-- `rules`
-- `style_profile`
-- `fact_index`
-- `quarantine`
+### Why QCTX exists
 
-## Retrieval Model
+QCTX is not the memory store.
 
-No embeddings.
+QCTX is the **bridge** between long-term memory and the final OpenClaw prompt.
+It exists to reduce token usage while preserving the minimum useful context.
 
-Retrieval uses:
+## Storage and Retrieval
 
-- SQLite FTS5 / BM25
-- plain text + Japanese n-gram fields
-- `fact_index`
-- timeline range filters
+### Primary memory authority
 
-This keeps recall scalable without embedding dependencies.
+Current target design:
 
-## Local Overrides
+- memory authority: `memory-lancedb-pro`
+- bridge layer: `QCTX`
+- orchestration: `QBRAIN`
+- final answer: `OpenClaw`
 
-Users can override `QSTYLE` and `QRULE` locally without editing SQLite:
+### Retrieval method
+
+The current retrieval path uses:
+
+- LanceDB-backed memory access
+- lexical search and filtering
+- fact-key preference
+- timeline range filtering
+- duplicate suppression
+- compact packing into `QCTX`
+
+This is intentionally optimized for practical prompt reduction, not for dumping full memory back into the model.
+
+## Q Channels
+
+### QRULE
+
+Contains only:
+
+- safety
+- language
+- procedure
+- operation constraints
+- output constraints
+
+### QSTYLE
+
+Contains only:
+
+- persona
+- tone
+- speaking style
+- first person
+- how to address the user
+
+### QCTX
+
+Contains only:
+
+- working memory anchor
+- profile snapshot
+- timeline digest
+- selected deep or surface memory hints
+
+Cross-channel contamination is treated as a bug.
+
+## Local user overrides
+
+These files are **local-only** and **user-specific**:
 
 - `QSTYLE.local.json`
 - `QRULE.local.json`
 
-These files are merged on top of QBRAIN-managed values at injection time.
-They are intended to be user-specific local files and are gitignored.
-Keep the real local files empty unless a specific machine/user needs an override.
-For OSS distribution, use the example templates:
+They are gitignored.
+
+Tracked examples for OSS:
 
 - `QSTYLE.local.example.json`
 - `QRULE.local.example.json`
-Allowed `QSTYLE` keys:
 
-- `tone`
-- `persona`
-- `verbosity`
-- `speaking_style`
-- `callUser`
-- `firstPerson`
-- `prefix`
+Use the local files only when a specific machine or user needs an override.
 
-Allowed `QRULE` prefixes:
+## Runtime profiles
 
-- `security.`
-- `language.`
-- `procedure.`
-- `compliance.`
-- `output.`
-- `operation.`
+### `brain-required`
 
-## Budget Model
+- QBRAIN must succeed
+- no degraded continuation
+- no fallback before the final model call
 
-`QSTYLE` budget is fixed to `120`.
+### `brain-optional`
 
-Every turn uses a total cap:
+- intended for general OSS/debug environments
+- lower quality fallback may be allowed
 
-- `tokens.system`
-- `tokens.rules`
-- `tokens.style`
-- `tokens.ctx`
-- `tokens.recent`
-- `tokens.total`
+## Main endpoints
 
-Recent history is not fixed at 5000 forever.
-It gets the remaining budget after the fixed channels.
+### Public runtime endpoints
 
-## QCTX Rules
-
-`QCTX` may be null.
-
-When present, packing starts from:
-
-- `wm.surf`
-- `p.snapshot`
-- `t.recent`
-
-Then query-specific additions are packed according to the Brain recall plan:
-
-- timeline intent -> `t.range`, `t.digest`, `t.ev*`
-- profile intent -> profile facts
-- state/overview intent -> working summaries
-- ephemeral hints only if budget remains
-
-## Security
-
-Primary audit stays deterministic:
-
-- secret detection
-- token-like strings
-- private key markers
-- prompt override / exfil phrases
-
-Secondary audit may use Brain patch planning.
-Redaction is applied even when `block=false`.
-
-## Runtime Proof
-
-The sidecar exposes:
-
+- `GET /health`
+- `POST /qctx/query`
+- `POST /memory/preview_prompt`
+- `POST /memory/ingest_turn`
+- `GET /qstyle/current`
+- `GET /qrule/current`
+- `GET /profile`
 - `GET /brain/stats`
 - `GET /brain/trace/recent`
 
-Each turn records:
+## Verification
 
-- `trace_id`
-- `op`
-- `model`
-- `latency_ms`
-- `ps_seen`
-- `prompt_sha256`
-- `apply_summary`
-
-The plugin logs:
-
-- `[memq][qbrain-proof] trace_id=... op=... model=... ps_seen=...`
-
-## Quick Start
-
-```bash
-cd /Users/hiroyukimiyake/Documents/New\ project
-scripts/memq-openclaw.sh setup
-scripts/memq-openclaw.sh status
-scripts/memq-openclaw.sh brain-proof
-```
-
-## Main Commands
-
-- `scripts/memq-openclaw.sh install`
-- `scripts/memq-openclaw.sh setup`
-- `scripts/memq-openclaw.sh enable`
-- `scripts/memq-openclaw.sh disable`
-- `scripts/memq-openclaw.sh start-sidecar`
-- `scripts/memq-openclaw.sh stop-sidecar`
-- `scripts/memq-openclaw.sh restart-sidecar`
-- `scripts/memq-openclaw.sh brain-required-on`
-- `scripts/memq-openclaw.sh brain-optional-on`
-- `scripts/memq-openclaw.sh status`
-- `scripts/memq-openclaw.sh brain-proof`
-
-## Verification Targets
-
-Proof benches:
+Main verification scripts:
 
 - `bench/src/brain_required_proof.py`
 - `bench/src/generic_memory_recall.py`
@@ -244,12 +214,197 @@ Proof benches:
 - `bench/src/sleep_consolidation_proof.py`
 - `bench/src/audit_proof.py`
 
-Acceptance:
+## Quick start
 
-1. required mode records Brain trace + `ps_seen=true` for ingest / recall / merge
-2. Brain failure fails closed before API LLM call
-3. `昨日何した？` and `最近どうだった？` resolve from timeline memory
-4. `君は誰？` and `家族構成は？` resolve from stored profile memory
-5. total input tokens stay bounded
-6. QSTYLE budget never exceeds `120`
-7. no secret leakage
+```bash
+cd /Users/hiroyukimiyake/Documents/New\ project
+scripts/memq-openclaw.sh setup
+scripts/memq-openclaw.sh status
+curl -sS http://127.0.0.1:7781/health
+```
+
+---
+
+# MEMQ（日本語）
+
+## 概要
+
+MEMQ は OpenClaw 用のメモリプラグイン構成です。役割は明確に分かれています。
+
+- **memory-lancedb-pro** が記憶を保持・検索する
+- **QBRAIN** が何を保存し、何を引き出し、何を更新するかを決める
+- **QCTX** が必要な記憶だけを最終プロンプトへ橋渡しする
+- **OpenClaw** が最終回答を行う
+
+重要なのは、QCTX が記憶そのものではないことです。
+QCTX は、長期記憶から必要なヒントだけを小さく渡すための橋渡し層です。
+
+## 名称
+
+公開名は次で統一しています。
+
+- `QRULE`：ルール、制約、安全、言語、手順
+- `QSTYLE`：人格、口調、呼称、一人称
+- `QCTX`：会話用の文脈ヒント
+- `QBRAIN`：保存・検索・更新の計画を作る脳
+
+
+## 全体構造
+
+### 1. OpenClaw plugin
+
+plugin は薄く保っています。役割は 4 つだけです。
+
+1. recent history を総トークン上限内に切る
+2. sidecar に問い合わせて `QCTX` を組む
+3. `QRULE -> QSTYLE -> QCTX` の順で注入する
+4. 最終ターンを sidecar に返して記憶化する
+
+plugin 自体は、意図判定や style 更新判断をしません。
+
+### 2. sidecar
+
+sidecar は実行時の制御面です。
+
+- 記憶状態の読み書き
+- QBRAIN 呼び出し
+- plan の検証
+- deterministic apply
+- `qrule / qstyle / qctx` の返却
+
+### 3. memory-lancedb-pro
+
+`memory-lancedb-pro` は fresh session における記憶 authority です。
+
+保持対象:
+
+- 長期 fact
+- rule entry
+- style entry
+- event
+- digest
+
+QCTX はこの記憶から、そのターンに必要なものだけを引きます。
+
+### 4. QBRAIN
+
+QBRAIN は直接 DB を触りません。
+
+QBRAIN が作るのは plan だけです。
+
+- `IngestPlan`
+- `RecallPlan`
+- `MergePlan`
+- `AuditPatchPlan`
+
+実際の保存・検索・注入は deterministic code が行います。
+
+## メモリの流れ
+
+### 保存
+
+1. ユーザー発話が来る
+2. QBRAIN が現在状態を見て plan を作る
+3. fact / event / 明示 style update / 明示 rule update を返す
+4. sidecar が検証する
+5. memory-lancedb-pro に保存する
+
+### 想起
+
+1. 現在の prompt を受ける
+2. QBRAIN が `RecallPlan` を作る
+3. sidecar が memory-lancedb-pro を検索する
+4. 候補を絞る
+5. `QCTX` を予算内で pack する
+6. plugin が `QRULE -> QSTYLE -> QCTX` を注入する
+
+## Q チャネルの役割
+
+### QRULE
+
+含めるもの:
+
+- safety
+- language
+- procedure
+- operation constraint
+- output constraint
+
+### QSTYLE
+
+含めるもの:
+
+- persona
+- tone
+- speaking style
+- first person
+- user の呼び方
+
+### QCTX
+
+含めるもの:
+
+- working memory anchor
+- profile snapshot
+- timeline digest
+- 必要な deep / surface memory のヒント
+
+チャネル混入は不具合として扱います。
+
+## ローカル上書き
+
+この 2 つは **ユーザーごとのローカルファイル**です。
+
+- `QSTYLE.local.json`
+- `QRULE.local.json`
+
+これらは gitignore 対象です。
+OSS 配布用には example を使います。
+
+- `QSTYLE.local.example.json`
+- `QRULE.local.example.json`
+
+## 実行プロファイル
+
+### `brain-required`
+
+- QBRAIN 必須
+- degraded continuation なし
+- final model 呼び出し前に fallback しない
+
+### `brain-optional`
+
+- OSS 配布や debug 向け
+- 品質は落ちるが fallback を許可できる
+
+## 主な endpoint
+
+- `GET /health`
+- `POST /qctx/query`
+- `POST /memory/preview_prompt`
+- `POST /memory/ingest_turn`
+- `GET /qstyle/current`
+- `GET /qrule/current`
+- `GET /profile`
+- `GET /brain/stats`
+- `GET /brain/trace/recent`
+
+## 検証
+
+主な proof script:
+
+- `bench/src/brain_required_proof.py`
+- `bench/src/generic_memory_recall.py`
+- `bench/src/token_budget_proof.py`
+- `bench/src/timeline_recall_proof.py`
+- `bench/src/sleep_consolidation_proof.py`
+- `bench/src/audit_proof.py`
+
+## クイックスタート
+
+```bash
+cd /Users/hiroyukimiyake/Documents/New\ project
+scripts/memq-openclaw.sh setup
+scripts/memq-openclaw.sh status
+curl -sS http://127.0.0.1:7781/health
+```

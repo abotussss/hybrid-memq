@@ -9,7 +9,7 @@ import re
 STYLE_ORDER = ["firstPerson", "callUser", "persona", "tone", "speaking_style", "verbosity", "prefix"]
 STYLE_KEYS = set(STYLE_ORDER)
 RULE_PREFIXES = ("security.", "language.", "procedure.", "compliance.", "output.", "operation.")
-MEMCTX_PREFIXES = ("wm.", "p.snapshot", "t.", "s", "d", "e")
+QCTX_PREFIXES = ("wm.", "p.snapshot", "t.", "s", "d", "e")
 
 PUBLIC_LABEL_REWRITES = (
     ("MEMRULES", "QRULE"),
@@ -150,7 +150,7 @@ def _valid_style_key(key: str) -> bool:
 
 
 def _valid_memctx_key(key: str) -> bool:
-    return any(key == prefix or key.startswith(prefix) for prefix in MEMCTX_PREFIXES)
+    return any(key == prefix or key.startswith(prefix) for prefix in QCTX_PREFIXES)
 
 
 def _forbidden_qctx_payload(text: str) -> bool:

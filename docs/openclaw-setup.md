@@ -1,43 +1,31 @@
-# OpenClaw Setup (Mode A)
+# OpenClaw Setup
 
-## 1) Quick setup
+## English
 
 ```bash
-cd /path/to/hybrid-memq
+cd /Users/hiroyukimiyake/Documents/New\ project
 scripts/memq-openclaw.sh setup
-```
-
-This runs plugin build/install, sidecar startup, and memory slot switch to `openclaw-memory-memq`.
-
-## 2) Verify
-
-```bash
 scripts/memq-openclaw.sh status
 curl -sS http://127.0.0.1:7781/health
 ```
 
 Expected:
 
-- memory slot = `openclaw-memory-memq`
-- sidecar `ok=true`
+- OpenClaw memory plugin = `openclaw-memory-memq`
+- sidecar health = `ok=true`
+- `qctxBackend = memory-lancedb-pro`
 
-## 3) Optional: secondary LLM audit
-
-```bash
-export MEMQ_LLM_AUDIT_API_KEY='YOUR_API_KEY'
-scripts/memq-openclaw.sh audit-on https://api.openai.com/v1/chat/completions gpt-5.2 0.20 0.85
-```
-
-Disable:
+## 日本語
 
 ```bash
-scripts/memq-openclaw.sh audit-off
+cd /Users/hiroyukimiyake/Documents/New\ project
+scripts/memq-openclaw.sh setup
+scripts/memq-openclaw.sh status
+curl -sS http://127.0.0.1:7781/health
 ```
 
-## 4) Restore previous backend
+期待値:
 
-```bash
-scripts/memq-openclaw.sh disable
-```
-
-This restores the pre-MEMQ plugin slot/config saved during `enable`.
+- OpenClaw の memory plugin は `openclaw-memory-memq`
+- sidecar health は `ok=true`
+- `qctxBackend = memory-lancedb-pro`

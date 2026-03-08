@@ -62,9 +62,9 @@ export MEMQ_BRAIN_RECALL_MAX_TOKENS='192'
 export MEMQ_BRAIN_MERGE_MAX_TOKENS='96'
 export MEMQ_BRAIN_AUDIT_MAX_TOKENS='96'
 export MEMQ_BRAIN_CONCURRENT='1'
-export MEMQ_MEMCTX_TOKENS='500'
-export MEMQ_RULES_TOKENS='500'
-export MEMQ_STYLE_TOKENS='500'
+export MEMQ_QCTX_TOKENS='500'
+export MEMQ_QRULE_TOKENS='500'
+export MEMQ_QSTYLE_TOKENS='500'
 export MEMQ_TOTAL_MAX_INPUT_TOKENS='5200'
 export MEMQ_TOTAL_RESERVE_TOKENS='1600'
 export MEMQ_RECENT_TOKENS='1800'
@@ -99,7 +99,7 @@ set_plugin_profile() {
   fi
   local cfg
   cfg="$(cat <<JSON
-{"memq.sidecarUrl":"http://127.0.0.1:7781","memq.workspaceRoot":"$ROOT_DIR","memq.brain.mode":"$mode","memq.brain.provider":"ollama","memq.brain.baseUrl":"http://127.0.0.1:11434","memq.brain.model":"gpt-oss:20b","memq.brain.keepAlive":"30m","memq.brain.timeoutMs":60000,"memq.budgets.memctxTokens":500,"memq.budgets.rulesTokens":500,"memq.budgets.styleTokens":500,"memq.total.maxInputTokens":5200,"memq.total.reserveTokens":1600,"memq.recent.maxTokens":1800,"memq.recent.minKeepMessages":4,"memq.retrieval.topK":5,"memq.degraded.enabled":$degraded,"memq.style.enabled":true,"memq.idle.enabled":true,"memq.security.primaryRulesEnabled":true,"memq.security.llmAuditEnabled":false}
+{"memq.sidecarUrl":"http://127.0.0.1:7781","memq.workspaceRoot":"$ROOT_DIR","memq.brain.mode":"$mode","memq.brain.provider":"ollama","memq.brain.baseUrl":"http://127.0.0.1:11434","memq.brain.model":"gpt-oss:20b","memq.brain.keepAlive":"30m","memq.brain.timeoutMs":60000,"memq.budgets.qctxTokens":500,"memq.budgets.qruleTokens":500,"memq.budgets.qstyleTokens":500,"memq.total.maxInputTokens":5200,"memq.total.reserveTokens":1600,"memq.recent.maxTokens":1800,"memq.recent.minKeepMessages":4,"memq.retrieval.topK":5,"memq.degraded.enabled":$degraded,"memq.style.enabled":true,"memq.idle.enabled":true,"memq.security.primaryRulesEnabled":true,"memq.security.llmAuditEnabled":false}
 JSON
 )"
   openclaw config set "plugins.entries.$PLUGIN_ID.config" "$cfg" >/dev/null
