@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 import httpx
@@ -54,8 +55,65 @@ class OllamaClient:
                 return model
         return None
 
-    async def chat_schema(self, *, system: str, user: str, schema_model: type[BaseModel]) -> OllamaResult:
+    @staticmethod
+    def _extract_json_text(body: dict[str, Any]) -> str:
+        message = body.get("message") or {}
+        content = str(message.get("content") or "").strip()
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\s*", "", content)
+            content = re.sub(r"\s*```$", "", content)
+            content = content.strip()
+        if not content:
+            return ""
+        if "<think>" in content:
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+        if not content:
+            return ""
+        return content
+
+    @staticmethod
+    def _extract_balanced_object(text: str) -> str:
+        start = text.find("{")
+        if start < 0:
+            return text
+        depth = 0
+        in_string = False
+        escaped = False
+        for index in range(start, len(text)):
+            char = text[index]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+                continue
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : index + 1]
+        return text[start:]
+
+    @classmethod
+    def _repair_json_text(cls, text: str) -> str:
+        candidate = cls._extract_balanced_object(text.strip())
+        candidate = re.sub(r",(\s*[}\]])", r"\1", candidate)
+        return candidate.strip()
+
+    async def _chat_once(self, payload: dict[str, Any]) -> dict[str, Any]:
+        res = await self._client.post("/api/chat", json=payload)
+        res.raise_for_status()
+        return res.json()
+
+    async def chat_schema(self, *, system: str, user: str, schema_model: type[BaseModel], max_tokens: int | None = None) -> OllamaResult:
         schema = schema_model.model_json_schema()
+        token_cap = int(max_tokens or self.cfg.max_tokens)
         payload = {
             "model": self.cfg.model,
             "stream": False,
@@ -64,7 +122,7 @@ class OllamaClient:
             "think": self._think_mode(),
             "options": {
                 "temperature": 0,
-                "num_predict": self.cfg.max_tokens,
+                "num_predict": token_cap,
             },
             "messages": [
                 {"role": "system", "content": system},
@@ -73,16 +131,37 @@ class OllamaClient:
         }
         prompt_sha256 = hashlib.sha256(user.encode("utf-8", "ignore")).hexdigest()
         try:
-            res = await self._client.post("/api/chat", json=payload)
-            res.raise_for_status()
-            body = res.json()
-            content_raw = ((body.get("message") or {}).get("content") or "").strip()
+            body = await self._chat_once(payload)
+            content_raw = self._extract_json_text(body)
+            if not content_raw:
+                retry_payload = dict(payload)
+                retry_payload["think"] = False
+                retry_payload["options"] = dict(payload.get("options") or {})
+                retry_payload["options"]["num_predict"] = min(int(retry_payload["options"].get("num_predict") or self.cfg.max_tokens), 256)
+                retry_payload["messages"] = [
+                    {
+                        "role": "system",
+                        "content": (
+                            system.strip()
+                            + "\n\n"
+                            + "Return exactly one JSON object matching the schema. "
+                            + "No prose. No markdown. No thinking text."
+                        ),
+                    },
+                    {"role": "user", "content": user},
+                ]
+                body = await self._chat_once(retry_payload)
+                content_raw = self._extract_json_text(body)
             if not content_raw:
                 raise BrainUnavailable("brain_empty_content")
             try:
                 parsed = json.loads(content_raw)
             except json.JSONDecodeError as exc:
-                raise BrainUnavailable("brain_invalid_json") from exc
+                repaired = self._repair_json_text(content_raw)
+                try:
+                    parsed = json.loads(repaired)
+                except json.JSONDecodeError:
+                    raise BrainUnavailable("brain_invalid_json") from exc
             validated = schema_model.model_validate(parsed)
             ps = await self._ps_snapshot()
             if ps is None:

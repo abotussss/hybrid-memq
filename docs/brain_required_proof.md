@@ -1,4 +1,4 @@
-# MemBrain Required Proof
+# QBRAIN Required Proof
 
 This document describes how to verify fail-closed Brain orchestration for Hybrid MEMQ.
 

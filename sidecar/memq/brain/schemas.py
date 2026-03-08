@@ -1,20 +1,26 @@
 from __future__ import annotations
 
-from pydantic import AliasChoices, BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from typing import Literal
 
 
 class FactCandidate(BaseModel):
-    entity_id: str = "ent:user"
+    entity_id: str = Field(default="ent:user", validation_alias=AliasChoices("entity_id", "entity", "entityId"))
     fact_key: str
-    value: str
-    confidence: float = Field(ge=0.0, le=1.0)
+    value: str = Field(default="", validation_alias=AliasChoices("value", "fact_value", "factValue", "text"))
+    confidence: float = Field(default=0.6, ge=0.0, le=1.0, validation_alias=AliasChoices("confidence", "score", "probability"))
     layer: Literal["surface", "deep", "ephemeral"] = "deep"
     ttl_days: int | None = None
     keywords: list[str] = Field(default_factory=list)
-    evidence_quote: str = ""
+    evidence_quote: str = Field(default="", validation_alias=AliasChoices("evidence_quote", "evidence", "quote"))
     importance: float = Field(default=0.6, ge=0.0, le=1.0)
     strength: float = Field(default=0.6, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _fill_missing_value(self) -> "FactCandidate":
+        if not (self.value or "").strip():
+            self.value = (self.evidence_quote or "").strip()
+        return self
 
 
 class EventCandidate(BaseModel):
@@ -33,11 +39,47 @@ class StyleUpdate(BaseModel):
     explicit: bool = False
     keys: dict[str, str] = Field(default_factory=dict)
 
+    @field_validator("keys", mode="before")
+    @classmethod
+    def _coerce_keys(cls, value):
+        if isinstance(value, dict):
+            return {str(k): str(v) for k, v in value.items()}
+        if isinstance(value, list):
+            out: dict[str, str] = {}
+            for item in value:
+                if isinstance(item, dict):
+                    key = item.get("key") or item.get("name")
+                    val = item.get("value") or item.get("text") or ""
+                    if key:
+                        out[str(key)] = str(val)
+                elif isinstance(item, str):
+                    out[str(item)] = ""
+            return out
+        return value
+
 
 class RuleUpdate(BaseModel):
     apply: bool = False
     explicit: bool = False
     rules: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("rules", mode="before")
+    @classmethod
+    def _coerce_rules(cls, value):
+        if isinstance(value, dict):
+            return {str(k): str(v) for k, v in value.items()}
+        if isinstance(value, list):
+            out: dict[str, str] = {}
+            for item in value:
+                if isinstance(item, dict):
+                    key = item.get("key") or item.get("name")
+                    val = item.get("value") or item.get("text") or ""
+                    if key:
+                        out[str(key)] = str(val)
+                elif isinstance(item, str):
+                    out[str(item)] = ""
+            return out
+        return value
 
 
 class QuarantineItem(BaseModel):
@@ -77,9 +119,9 @@ class IntentWeights(BaseModel):
 
 
 class TimeRange(BaseModel):
-    start_day: str
-    end_day: str
-    label: str
+    start_day: str = Field(validation_alias=AliasChoices("start_day", "startDay", "start"))
+    end_day: str = Field(validation_alias=AliasChoices("end_day", "endDay", "end"))
+    label: str = "range"
 
 
 class BudgetSplit(BaseModel):

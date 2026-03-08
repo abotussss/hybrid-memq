@@ -56,18 +56,23 @@ export MEMQ_BRAIN_BASE_URL='http://127.0.0.1:11434'
 export MEMQ_BRAIN_MODEL='gpt-oss:20b'
 export MEMQ_BRAIN_KEEP_ALIVE='30m'
 export MEMQ_BRAIN_TIMEOUT_MS='60000'
-export MEMQ_BRAIN_MAX_TOKENS='640'
+export MEMQ_BRAIN_MAX_TOKENS='320'
+export MEMQ_BRAIN_INGEST_MAX_TOKENS='320'
+export MEMQ_BRAIN_RECALL_MAX_TOKENS='192'
+export MEMQ_BRAIN_MERGE_MAX_TOKENS='96'
+export MEMQ_BRAIN_AUDIT_MAX_TOKENS='96'
 export MEMQ_BRAIN_CONCURRENT='1'
-export MEMQ_MEMCTX_TOKENS='120'
-export MEMQ_RULES_TOKENS='80'
-export MEMQ_STYLE_TOKENS='120'
-export MEMQ_TOTAL_MAX_INPUT_TOKENS='4200'
-export MEMQ_TOTAL_RESERVE_TOKENS='1800'
-export MEMQ_RECENT_TOKENS='2600'
+export MEMQ_MEMCTX_TOKENS='500'
+export MEMQ_RULES_TOKENS='500'
+export MEMQ_STYLE_TOKENS='500'
+export MEMQ_TOTAL_MAX_INPUT_TOKENS='5200'
+export MEMQ_TOTAL_RESERVE_TOKENS='1600'
+export MEMQ_RECENT_TOKENS='1800'
 export MEMQ_RECENT_MIN_KEEP_MESSAGES='4'
 export MEMQ_TOP_K='5'
 export MEMQ_ARCHIVE_ENABLED='1'
 export MEMQ_IDLE_ENABLED='1'
+export MEMQ_IDLE_BACKGROUND_ENABLED='0'
 export MEMQ_IDLE_SECONDS='120'
 export MEMQ_AUDIT_PRIMARY_ENABLED='1'
 export MEMQ_AUDIT_SECONDARY_ENABLED='0'
@@ -94,7 +99,7 @@ set_plugin_profile() {
   fi
   local cfg
   cfg="$(cat <<JSON
-{"memq.sidecarUrl":"http://127.0.0.1:7781","memq.workspaceRoot":"$ROOT_DIR","memq.brain.mode":"$mode","memq.brain.provider":"ollama","memq.brain.baseUrl":"http://127.0.0.1:11434","memq.brain.model":"gpt-oss:20b","memq.brain.keepAlive":"30m","memq.brain.timeoutMs":60000,"memq.budgets.memctxTokens":120,"memq.budgets.rulesTokens":80,"memq.budgets.styleTokens":120,"memq.total.maxInputTokens":4200,"memq.total.reserveTokens":1800,"memq.recent.maxTokens":2600,"memq.recent.minKeepMessages":4,"memq.retrieval.topK":5,"memq.degraded.enabled":$degraded,"memq.style.enabled":true,"memq.idle.enabled":true,"memq.security.primaryRulesEnabled":true,"memq.security.llmAuditEnabled":false}
+{"memq.sidecarUrl":"http://127.0.0.1:7781","memq.workspaceRoot":"$ROOT_DIR","memq.brain.mode":"$mode","memq.brain.provider":"ollama","memq.brain.baseUrl":"http://127.0.0.1:11434","memq.brain.model":"gpt-oss:20b","memq.brain.keepAlive":"30m","memq.brain.timeoutMs":60000,"memq.budgets.memctxTokens":500,"memq.budgets.rulesTokens":500,"memq.budgets.styleTokens":500,"memq.total.maxInputTokens":5200,"memq.total.reserveTokens":1600,"memq.recent.maxTokens":1800,"memq.recent.minKeepMessages":4,"memq.retrieval.topK":5,"memq.degraded.enabled":$degraded,"memq.style.enabled":true,"memq.idle.enabled":true,"memq.security.primaryRulesEnabled":true,"memq.security.llmAuditEnabled":false}
 JSON
 )"
   openclaw config set "plugins.entries.$PLUGIN_ID.config" "$cfg" >/dev/null

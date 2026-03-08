@@ -4,10 +4,10 @@ The sidecar is the single source of truth for Hybrid MEMQ v3.
 
 Responsibilities:
 - persist memory state in SQLite
-- call MemBrain for ingest / recall / merge planning
+- call QBRAIN for ingest / recall / merge planning
 - apply those plans deterministically
 - expose proof endpoints for required runtime
-- provide bounded `MEMRULES`, `MEMSTYLE`, `MEMCTX` to the plugin
+- provide bounded `QRULE`, `QSTYLE`, `QCTX` to the plugin
 
 ## Run
 

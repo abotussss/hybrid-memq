@@ -73,6 +73,10 @@ export class SidecarClient {
     return await this.req<any>("/memory/ingest_turn", "POST", payload, timeoutMs);
   }
 
+  async previewPrompt(payload: Record<string, unknown>, timeoutMs = 70000): Promise<any> {
+    return await this.req<any>("/memory/preview_prompt", "POST", payload, timeoutMs);
+  }
+
   async idleRunOnce(payload: Record<string, unknown>, timeoutMs = 70000): Promise<any> {
     return await this.req<any>("/idle/run_once", "POST", payload, timeoutMs);
   }

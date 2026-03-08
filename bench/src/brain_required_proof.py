@@ -38,7 +38,7 @@ if __name__ == '__main__':
         'sessionKey': SESSION,
         'prompt': 'あなたは誰？ 昨日何した？',
         'recentMessages': [{'role': 'user', 'text': 'あなたは誰？ 昨日何した？'}],
-        'budgets': {'memctxTokens': 120, 'rulesTokens': 80, 'styleTokens': 120},
+        'budgets': {'memctxTokens': 500, 'rulesTokens': 500, 'styleTokens': 500},
         'topK': 5,
     })
     idle = post('/idle/run_once', {'nowTs': ts + 1, 'maxWorkMs': 1200})
@@ -46,8 +46,8 @@ if __name__ == '__main__':
     traces = get('/brain/trace/recent?n=10')
     ps = get('http://127.0.0.1:11434/api/ps')
 
-    style_profile = profile['style_profile']
-    memstyle = query['memstyle']
+    style_profile = profile['qstyle']
+    memstyle = query['qstyle']
     debug = query['meta']['debug']
     trace_ops = [item['op'] for item in traces.get('items', [])]
     ps_models = [item.get('model') or item.get('name') for item in ps.get('models', [])]
@@ -61,7 +61,7 @@ if __name__ == '__main__':
         'style_updated': bool(style_profile),
         'style_profile': style_profile,
         'memstyle': memstyle,
-        'memctx': query['memctx'],
+        'qctx': query['qctx'],
         'recall_ps_seen': debug['ps_seen'],
         'trace_ops': trace_ops,
         'brain_stats': stats,

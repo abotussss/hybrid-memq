@@ -20,9 +20,9 @@ export interface MemqQueryRequest {
 
 export interface MemqQueryResponse {
   ok: boolean;
-  memrules: string;
-  memstyle: string;
-  memctx: string;
+  qrule: string;
+  qstyle: string;
+  qctx: string;
   meta: {
     surfaceHit: boolean;
     deepCalled: boolean;

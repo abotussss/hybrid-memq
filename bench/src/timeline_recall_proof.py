@@ -22,10 +22,10 @@ if __name__ == '__main__':
         'sessionKey': SESSION,
         'prompt': '昨日何した？',
         'recentMessages': [{'role':'user','text':'昨日何した？'}],
-        'budgets': {'memctxTokens':120,'rulesTokens':80,'styleTokens':120},
+        'budgets': {'memctxTokens':500,'rulesTokens':500,'styleTokens':500},
         'topK': 5,
     })
-    memctx = res['memctx']
+    memctx = res['qctx']
     debug = res['meta']['debug']
     assert 't.range=' in memctx
     assert 't.label=' in memctx

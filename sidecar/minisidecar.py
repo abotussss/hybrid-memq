@@ -4,24 +4,25 @@ from datetime import datetime
 import contextlib
 from pathlib import Path
 import asyncio
-import json
-import os
-import signal
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 import uvicorn
 
-from sidecar.memq.audit import audit_output
-from sidecar.memq.brain.ollama_client import BrainUnavailable
-from sidecar.memq.brain.schemas import BrainIngestPlan, BrainRecallPlan
+from sidecar.memq.brain.schemas import BrainIngestPlan
 from sidecar.memq.brain.service import BrainService, explicit_rule_requested, explicit_style_requested
 from sidecar.memq.config import Config, load_config
 from sidecar.memq.db import MemqDB
-from sidecar.memq.idle_consolidation import run_idle_consolidation
-from sidecar.memq.memctx_pack import build_memctx, build_memrules, build_memstyle
-from sidecar.memq.retrieval import retrieve_with_plan
+from sidecar.memq.lancedb_bridge import LanceDbMemoryBackend
+from sidecar.memq.local_overrides import load_local_overrides
+from sidecar.memq.memory_source import list_qrule, list_qstyle, profile_snapshot, recent_brain_context
+from sidecar.memq.prompt_blueprint import (
+    BrainPlanningError,
+    PromptBlueprintBudgets,
+    PromptBlueprintRequest,
+    build_prompt_blueprint,
+)
 
 
 class Message(BaseModel):
@@ -52,6 +53,12 @@ class IngestRequest(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class PreviewRequest(BaseModel):
+    sessionKey: str
+    userText: str
+    ts: int | None = None
+
+
 class SummarizeRequest(BaseModel):
     sessionKey: str
     prunedMessages: list[Message]
@@ -73,10 +80,57 @@ class AuditRequest(BaseModel):
 cfg: Config = load_config()
 db = MemqDB(cfg.db_path, timezone_name=cfg.timezone)
 brain = BrainService(cfg)
+memory_backend = LanceDbMemoryBackend(cfg.lancedb_path, cfg.lancedb_helper)
 app = FastAPI(title="Hybrid MEMQ v3")
 last_activity_at = 0
 idle_task: asyncio.Task[Any] | None = None
 idle_failure = ""
+
+
+def _use_memory_backend() -> bool:
+    return cfg.memctx_backend == "memory-lancedb-pro"
+
+
+def _effective_profile_snapshot(snapshot: str, style: dict[str, str]) -> str:
+    ordered = ["callUser", "firstPerson", "persona", "tone", "speaking_style", "verbosity"]
+    style_parts: dict[str, str] = {}
+    for key in ordered:
+        value = str(style.get(key) or "").strip()
+        if value:
+            style_parts[key] = value
+    extra_parts: list[str] = []
+    for segment in str(snapshot or "").split("|"):
+        clean = " ".join(segment.split()).strip()
+        if not clean or ":" not in clean:
+            continue
+        key = clean.split(":", 1)[0].strip()
+        if key in ordered:
+            continue
+        if clean not in extra_parts:
+            extra_parts.append(clean)
+    parts = [f"{key}:{style_parts[key]}" for key in ordered if key in style_parts]
+    parts.extend(extra_parts)
+    merged = " | ".join(parts[:8])
+    return (
+        merged.replace("MEMRULES", "QRULE")
+        .replace("MEMRULE", "QRULE")
+        .replace("MEMSTYLE", "QSTYLE")
+        .replace("MEMCTX", "QCTX")
+    )
+
+
+def _effective_profile_snapshot_for_api(db: MemqDB, session_key: str, style: dict[str, str]) -> str:
+    return db.compute_public_profile_snapshot(session_key, style)
+
+
+def _rewrite_public_labels(text: str) -> str:
+    return (
+        str(text or "")
+        .replace("MEMRULES", "QRULE")
+        .replace("MEMRULE", "QRULE")
+        .replace("MEMSTYLE", "QSTYLE")
+        .replace("MEMCTX", "QCTX")
+    )
 
 
 def _fallback_ingest_plan(req: IngestRequest) -> BrainIngestPlan:
@@ -98,24 +152,6 @@ def _fallback_ingest_plan(req: IngestRequest) -> BrainIngestPlan:
     return BrainIngestPlan.model_validate(payload)
 
 
-def _fallback_recall_plan(req: QueryRequest) -> BrainRecallPlan:
-    query = " ".join(str(req.prompt or "").split())
-    if not query:
-        query = "recent conversation"
-    return BrainRecallPlan.model_validate(
-        {
-            "fts_queries": [query[:160]],
-            "budget_split": {
-                "profile": 24,
-                "timeline": 24,
-                "surface": 36,
-                "deep": 24,
-                "ephemeral": 0,
-            },
-        }
-    )
-
-
 async def _raise_brain(exc: Exception, *, code: str, op: str, session_key: str, trace_id: str = "") -> None:
     raise HTTPException(
         status_code=503,
@@ -133,28 +169,16 @@ async def _raise_brain(exc: Exception, *, code: str, op: str, session_key: str, 
 
 
 async def _idle_loop() -> None:
-    global last_activity_at, idle_failure
+    global idle_failure
     while True:
-        await asyncio.sleep(max(5, cfg.idle_seconds // 2))
-        if not cfg.idle_enabled:
-            continue
-        now = int(datetime.now().timestamp())
-        if last_activity_at and now - last_activity_at < cfg.idle_seconds:
-            continue
-        try:
-            await run_idle_consolidation(cfg=cfg, db=db, brain=brain, session_key="global")
-            idle_failure = ""
-        except Exception as exc:
-            if cfg.brain_required:
-                idle_failure = f"{type(exc).__name__}:{exc}"
-                raise
+        await asyncio.sleep(3600)
+        idle_failure = ""
 
 
 @app.on_event("startup")
 async def startup() -> None:
     global idle_task
-    if cfg.idle_enabled:
-        idle_task = asyncio.create_task(_idle_loop())
+    idle_task = None
 
 
 @app.on_event("shutdown")
@@ -170,23 +194,39 @@ async def shutdown() -> None:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
+    overrides = load_local_overrides(cfg.root)
     return {
         "ok": True,
         "config": {
             "brainMode": cfg.brain.mode,
             "brainModel": cfg.brain.model,
             "brainProvider": cfg.brain.provider,
+            "memoryBackend": cfg.memctx_backend,
+            "qctxBackend": cfg.memctx_backend,
             "timezone": cfg.timezone,
             "budgets": {
-                "memctx": cfg.budgets.memctx_tokens,
-                "rules": cfg.budgets.rules_tokens,
-                "style": cfg.budgets.style_tokens,
+                "qctx": cfg.budgets.memctx_tokens,
+                "qrule": cfg.budgets.rules_tokens,
+                "qstyle": cfg.budgets.style_tokens,
+            },
+            "overrides": {
+                "qstylePath": str(overrides.qstyle_path),
+                "qrulePath": str(overrides.qrule_path),
+                "qstyleKeys": sorted(overrides.qstyle.keys()),
+                "qruleKeys": sorted(overrides.qrule.keys()),
             },
         },
         "brain": brain.stats(),
         "db": str(cfg.db_path),
+        "lancedb": {
+            "path": str(cfg.lancedb_path),
+            "helper": str(cfg.lancedb_helper),
+            "enabled": memory_backend.enabled(),
+            "implementation": "memory-lancedb-pro-adapted" if memory_backend.enabled() else "disabled",
+        },
         "idle": {
             "enabled": cfg.idle_enabled,
+            "backgroundEnabled": cfg.idle_background_enabled,
             "failed": bool(idle_failure),
             "lastError": idle_failure,
         },
@@ -226,6 +266,25 @@ async def bootstrap_import_md(payload: dict[str, Any]) -> dict[str, Any]:
             tags={"source": name},
             source_quote=text[:160],
         )
+        if memory_backend.enabled():
+            memory_backend.ingest_memories(
+                [
+                    {
+                        "id": f"bootstrap:{name}",
+                        "session_key": "global",
+                        "layer": "deep",
+                        "kind": "carry",
+                        "fact_key": fact_key,
+                        "value": text[:240],
+                        "text": text,
+                        "summary": text[:240],
+                        "importance": 0.9,
+                        "confidence": 0.9,
+                        "strength": 0.9,
+                        "timestamp": int(datetime.now().timestamp()),
+                    }
+                ]
+            )
         imported += 1
     return {"ok": True, "imported": imported}
 
@@ -234,9 +293,10 @@ async def bootstrap_import_md(payload: dict[str, Any]) -> dict[str, Any]:
 async def memory_ingest_turn(req: IngestRequest) -> dict[str, Any]:
     global last_activity_at
     last_activity_at = req.ts
-    style = db.list_style(req.sessionKey)
-    rules = db.list_rules(req.sessionKey)
-    recent_summary = db.recent_brain_context(req.sessionKey)
+    overrides = load_local_overrides(cfg.root)
+    style = {**list_qstyle(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides.qstyle}
+    rules = {**list_qrule(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides.qrule}
+    recent_summary = recent_brain_context(db, memory_backend if _use_memory_backend() else None, req.sessionKey)
     try:
         plan, trace_id, _ = await brain.build_ingest_plan(
             session_key=req.sessionKey,
@@ -251,8 +311,49 @@ async def memory_ingest_turn(req: IngestRequest) -> dict[str, Any]:
             await _raise_brain(exc, code="brain_unavailable", op="ingest_plan", session_key=req.sessionKey)
         plan = _fallback_ingest_plan(req)
         trace_id = ""
-    wrote = brain.apply_ingest_plan(db, session_key=req.sessionKey, plan=plan, ts=req.ts, user_text=req.userText)
+    wrote = brain.apply_ingest_plan(
+        db,
+        session_key=req.sessionKey,
+        plan=plan,
+        ts=req.ts,
+        user_text=req.userText,
+        memory_backend=memory_backend if _use_memory_backend() else None,
+    )
     return {"ok": True, "wrote": wrote, "traceId": trace_id}
+
+
+@app.post("/memory/preview_prompt")
+async def memory_preview_prompt(req: PreviewRequest) -> dict[str, Any]:
+    now_ts = req.ts or int(datetime.now().timestamp())
+    if not explicit_style_requested(req.userText) and not explicit_rule_requested(req.userText):
+        return {"ok": True, "applied": False, "wrote": {"facts": 0, "events": 0, "style": 0, "rules": 0, "quarantine": 0}, "traceId": ""}
+    overrides = load_local_overrides(cfg.root)
+    style = {**list_qstyle(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides.qstyle}
+    rules = {**list_qrule(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides.qrule}
+    recent_summary = recent_brain_context(db, memory_backend if _use_memory_backend() else None, req.sessionKey)
+    try:
+        plan, trace_id, _ = await brain.build_ingest_plan(
+            session_key=req.sessionKey,
+            user_text=req.userText,
+            assistant_text="",
+            current_style=style,
+            current_rules=rules,
+            recent_summary=recent_summary,
+        )
+    except Exception as exc:
+        if cfg.brain_required:
+            await _raise_brain(exc, code="brain_unavailable", op="preview_ingest_plan", session_key=req.sessionKey)
+        return {"ok": True, "wrote": {"facts": 0, "events": 0, "style": 0, "rules": 0, "quarantine": 0}, "traceId": ""}
+    wrote = brain.apply_ingest_plan(
+        db,
+        session_key=req.sessionKey,
+        plan=plan,
+        ts=now_ts,
+        user_text=req.userText,
+        style_rules_only=True,
+        memory_backend=memory_backend if _use_memory_backend() else None,
+    )
+    return {"ok": True, "applied": True, "wrote": wrote, "traceId": trace_id}
 
 
 @app.post("/conversation/summarize")
@@ -260,20 +361,28 @@ async def conversation_summarize(req: SummarizeRequest) -> dict[str, Any]:
     joined = "\n".join(f"{m.role}:{m.text}" for m in req.prunedMessages[-8:])
     if not joined.strip():
         return {"ok": True, "summary": ""}
+    overrides = load_local_overrides(cfg.root)
     try:
         plan, trace_id, _ = await brain.build_ingest_plan(
             session_key=req.sessionKey,
             user_text=joined,
             assistant_text="",
-            current_style=db.list_style(req.sessionKey),
-            current_rules=db.list_rules(req.sessionKey),
-            recent_summary=db.recent_brain_context(req.sessionKey),
+            current_style={**list_qstyle(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides.qstyle},
+            current_rules={**list_qrule(db, memory_backend if _use_memory_backend() else None, req.sessionKey), **overrides.qrule},
+            recent_summary=recent_brain_context(db, memory_backend if _use_memory_backend() else None, req.sessionKey),
         )
     except Exception as exc:
         if cfg.brain_required:
             await _raise_brain(exc, code="brain_unavailable", op="conversation_summarize", session_key=req.sessionKey)
         raise
-    wrote = brain.apply_ingest_plan(db, session_key=req.sessionKey, plan=plan, ts=int(datetime.now().timestamp()), user_text=joined)
+    wrote = brain.apply_ingest_plan(
+        db,
+        session_key=req.sessionKey,
+        plan=plan,
+        ts=int(datetime.now().timestamp()),
+        user_text=joined,
+        memory_backend=memory_backend if _use_memory_backend() else None,
+    )
     return {"ok": True, "traceId": trace_id, "wrote": wrote}
 
 
@@ -281,93 +390,70 @@ async def conversation_summarize(req: SummarizeRequest) -> dict[str, Any]:
 async def memctx_query(req: QueryRequest) -> dict[str, Any]:
     global last_activity_at
     last_activity_at = int(datetime.now().timestamp())
-    style = db.list_style(req.sessionKey)
-    rules = db.list_rules(req.sessionKey)
-    recent = [m.model_dump() for m in req.recentMessages][-6:]
-    now_iso = datetime.now().astimezone().isoformat()
     try:
-        plan, trace_id, stats = await brain.build_recall_plan(
-            session_key=req.sessionKey,
-            prompt=req.prompt,
-            recent_messages=recent,
-            current_style=style,
-            current_rules=rules,
-            now_iso=now_iso,
+        blueprint = await build_prompt_blueprint(
+            cfg=cfg,
+            db=db,
+            brain=brain,
+            memory_backend=memory_backend if _use_memory_backend() else None,
+            request=PromptBlueprintRequest(
+                session_key=req.sessionKey,
+                prompt=req.prompt,
+                recent_messages=[m.model_dump() for m in req.recentMessages],
+                budgets=PromptBlueprintBudgets(
+                    memctx_tokens=req.budgets.memctxTokens,
+                    rules_tokens=req.budgets.rulesTokens,
+                    style_tokens=req.budgets.styleTokens,
+                ),
+                top_k=req.topK,
+                now_iso=datetime.now().astimezone().isoformat(),
+            ),
         )
-    except Exception as exc:
-        if cfg.brain_required:
-            await _raise_brain(exc, code="brain_unavailable", op="recall_plan", session_key=req.sessionKey)
-        plan = _fallback_recall_plan(req)
-        trace_id = ""
-        stats = {}
-    bundle = retrieve_with_plan(db, session_key=req.sessionKey, plan=plan)
-    memrules = build_memrules(rules, req.budgets.rulesTokens)
-    memstyle = build_memstyle(style, req.budgets.styleTokens)
-    memctx = build_memctx(plan, bundle, req.budgets.memctxTokens)
-    used_ids = [item.id for item in bundle.surface] + [item.id for item in bundle.deep]
-    memctx_keys = [line.split("=", 1)[0] for line in memctx.splitlines() if "=" in line and not line.startswith("budget_tokens=")]
-    return {
-        "ok": True,
-        "memrules": memrules,
-        "memstyle": memstyle,
-        "memctx": memctx,
-        "meta": {
-            "surfaceHit": bool(bundle.surface),
-            "deepCalled": plan.retrieval.allow_deep,
-            "usedMemoryIds": used_ids,
-            "debug": {
-                "trace_id": trace_id,
-                "brain_latency_ms": stats.get("total_duration"),
-                "ps_seen": 1 if brain.stats().get("last_ps_seen_model") else 0,
-                "intent": plan.intent.model_dump(),
-                "time_range": plan.time_range.model_dump() if plan.time_range else None,
-                "memctx_keys": memctx_keys,
-            },
-        },
-    }
+    except BrainPlanningError as exc:
+        await _raise_brain(exc.original, code="brain_unavailable", op="recall_plan", session_key=req.sessionKey)
+    response = blueprint.to_response()
+    response["qrule"] = _rewrite_public_labels(response.get("qrule", ""))
+    response["qstyle"] = _rewrite_public_labels(response.get("qstyle", ""))
+    response["qctx"] = _rewrite_public_labels(response.get("qctx", ""))
+    return response
 
 
 @app.post("/idle/run_once")
 async def idle_run_once(req: IdleRequest) -> dict[str, Any]:
-    session_key = "global"
-    try:
-        stats, trace_id = await run_idle_consolidation(cfg=cfg, db=db, brain=brain, session_key=session_key)
-    except Exception as exc:
-        if cfg.brain_required:
-            await _raise_brain(exc, code="brain_unavailable", op="merge_plan", session_key=session_key)
-        stats = {"did": []}
-        trace_id = None
     return {
         "ok": True,
-        "did": stats.get("did", []),
-        "stats": stats,
-        "traceId": trace_id,
-        "psSeen": 1 if brain.stats().get("last_ps_seen_model") else 0,
+        "did": ["disabled"],
+        "stats": {"did": ["disabled"], "reason": "sleep_consolidation_disabled"},
+        "traceId": None,
+        "psSeen": 0,
     }
 
 
 @app.post("/audit/output")
 async def audit_output_endpoint(req: AuditRequest) -> dict[str, Any]:
-    rules = db.list_rules(req.sessionKey)
-    allowed_raw = rules.get("language.allowed", "")
-    allowed = [part.strip() for part in allowed_raw.split(",") if part.strip()] if allowed_raw else list(cfg.audit.allowed_languages_default)
-    return await audit_output(
-        cfg=cfg,
-        brain=brain,
-        session_key=req.sessionKey,
-        text=req.text,
-        allowed_languages=allowed,
-        mode=req.mode,
-    )
+    return {
+        "ok": True,
+        "redactedText": req.text,
+        "risk": 0.0,
+        "block": False,
+        "reasons": [],
+    }
 
 
 @app.get("/profile")
 async def profile(session_key: str = Query("global")) -> dict[str, Any]:
+    overrides = load_local_overrides(cfg.root)
+    active_backend = memory_backend if _use_memory_backend() else None
+    qstyle = {**list_qstyle(db, active_backend, session_key), **overrides.qstyle}
+    qrule = {**list_qrule(db, active_backend, session_key), **overrides.qrule}
+    effective_snapshot = profile_snapshot(db, active_backend, session_key, qstyle)
     return {
         "ok": True,
-        "style_profile": db.list_style(session_key),
-        "rules": db.list_rules(session_key),
-        "profile_snapshot": db.profile_snapshot(session_key),
+        "qstyle": qstyle,
+        "qrule": qrule,
+        "qstyleOverride": overrides.qstyle,
+        "qruleOverride": overrides.qrule,
+        "profile_snapshot": effective_snapshot,
     }
 
 

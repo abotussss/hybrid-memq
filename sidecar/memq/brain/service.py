@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import asyncio
+from datetime import datetime, timezone
 import hashlib
 import json
+import re
 import uuid
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from sidecar.memq.config import Config
 from sidecar.memq.db import MemqDB
@@ -18,38 +20,283 @@ from sidecar.memq.brain.schemas import (
 )
 from sidecar.memq.brain.ollama_client import BrainUnavailable, OllamaClient, load_prompt
 
+if TYPE_CHECKING:
+    from sidecar.memq.lancedb_bridge import LanceDbMemoryBackend
+
 
 FACT_KEY_PREFIXES = ("profile.", "pref.", "policy.", "project.", "relationship.", "timeline.")
 STYLE_KEYS = {"tone", "persona", "verbosity", "speaking_style", "callUser", "firstPerson", "prefix"}
 RULE_PREFIXES = ("security.", "language.", "procedure.", "compliance.", "output.", "operation.")
+GLOBAL_SESSION_KEY = "global"
+STRICT_TRUE_RULE_KEYS = {
+    "security.never_output_secrets",
+    "security.no_api_keys",
+    "security.no_tokens",
+    "security.no_secrets",
+    "output.redact_secret_like",
+}
+
+
+def _contains_any(text: str, needles: tuple[str, ...] | list[str]) -> bool:
+    return any(needle in text for needle in needles)
+
+
+UPDATE_MARKERS = (
+    "記憶しろ",
+    "覚えろ",
+    "覚えて",
+    "インストール",
+    "設定して",
+    "固定して",
+    "更新して",
+    "変えて",
+    "追加して",
+    "加えろ",
+    "加えて",
+    "適用して",
+    "採用して",
+    "にして",
+    "にしろ",
+)
+
+INSPECTION_MARKERS = (
+    "見せて",
+    "教えて",
+    "どうなってる",
+    "どうなっている",
+    "何が入ってる",
+    "何が入っている",
+    "中身",
+    "一覧",
+    "現在",
+    "今の",
+    "確認",
+    "表示",
+    "status",
+    "show",
+    "what",
+)
+
+STYLE_DOMAIN_MARKERS = (
+    "口調",
+    "話し方",
+    "キャラ",
+    "人格",
+    "一人称",
+    "呼び方",
+    "呼称",
+    "呼んで",
+    "として話して",
+    "として振る舞",
+    "で話して",
+    "persona",
+    "tone",
+    "speaking style",
+    "speaking_style",
+    "memstyle",
+    "style",
+)
+
+RULE_DOMAIN_MARKERS = (
+    "ルール",
+    "禁止",
+    "守って",
+    "守れ",
+    "今後は必ず",
+    "出すな",
+    "外に出すな",
+    "漏らすな",
+    "隠して",
+    "公開するな",
+    "非公開",
+    "memrule",
+    "rule",
+)
+
+STYLE_NOISE_TERMS = (
+    "memory-lancedb-pro",
+    "lancedb",
+    "qctx",
+    "qstyle",
+    "qrule",
+    "memctx",
+    "memstyle",
+    "memrule",
+    "memq",
+    "openclaw",
+    "sqlite",
+    "ollama",
+    "backend",
+    "adapter",
+    "bridge",
+    "helper",
+)
 
 
 def explicit_style_requested(text: str) -> bool:
-    s = str(text or "")
-    markers = [
-        "口調",
-        "話し方",
-        "キャラ",
-        "人格",
-        "一人称",
-        "呼び方",
-        "呼称",
-        "呼んで",
-        "として話して",
-        "として振る舞",
-        "style",
-        "persona",
-        "tone",
-        "speaking style",
-        "で話して",
-    ]
-    return any(marker in s for marker in markers)
+    s = str(text or "").strip()
+    lowered = s.lower()
+    if not s:
+        return False
+    if _contains_any(lowered, INSPECTION_MARKERS) and not _contains_any(s, UPDATE_MARKERS):
+        return False
+    if _contains_any(s, ("人格にインストール", "このキャラで", "この口調で", "ロールプレイ", "なりきって")):
+        return True
+    if _contains_any(s, ("一人称は", "呼び方は", "呼称は", "僕って呼んで", "私って呼んで", "ヒロって呼んで", "として話して", "として振る舞")):
+        return True
+    return _contains_any(s, STYLE_DOMAIN_MARKERS) and _contains_any(s, UPDATE_MARKERS)
 
 
 def explicit_rule_requested(text: str) -> bool:
-    s = str(text or "")
-    markers = ["ルール", "今後は必ず", "禁止", "守って", "覚えて", "rule"]
-    return any(marker in s for marker in markers)
+    s = str(text or "").strip()
+    lowered = s.lower()
+    if not s:
+        return False
+    if _contains_any(lowered, INSPECTION_MARKERS) and not _contains_any(s, UPDATE_MARKERS):
+        return False
+    if _contains_any(s, ("ルールに加えろ", "ルールに追加", "ルールとして覚えて", "これをルールに", "今後は必ず", "外に出すな", "公開するな")):
+        return True
+    return _contains_any(s, RULE_DOMAIN_MARKERS) and _contains_any(s, UPDATE_MARKERS)
+
+
+def _compact_text(text: str, *, limit: int) -> str:
+    raw = " ".join(str(text or "").split())
+    if len(raw) <= limit:
+        return raw
+    return raw[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _extract_quoted_name(text: str) -> str:
+    for pattern in (r"「([^」]{2,80})」", r'"([^"]{2,80})"'):
+        match = re.search(pattern, text)
+        if match:
+            return " ".join(match.group(1).split())
+    return ""
+
+
+def _style_value_is_noise(key: str, value: str) -> bool:
+    clean = " ".join(str(value or "").split()).strip()
+    if not clean:
+        return True
+    lowered = clean.lower()
+    if key == "persona":
+        return any(term in lowered for term in STYLE_NOISE_TERMS)
+    if key in {"tone", "speaking_style"}:
+        return lowered in {"neutral", "none", "default", "generic"}
+    return False
+
+
+def _extract_explicit_style_hints(text: str) -> dict[str, str]:
+    raw = str(text or "")
+    hints: dict[str, str] = {}
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+
+    if match := re.search(r"(?:一人称|first ?person)\s*(?:は|:|：)\s*([^\s、。]+)", raw, re.IGNORECASE):
+        hints["firstPerson"] = match.group(1).strip("「」\"' ")
+    if match := re.search(r"(?:呼び方|呼称)(?:は|:|：)\s*[「\"]?([^」\"\n。]{1,24})", raw):
+        candidate = match.group(1).strip("「」\"' ")
+        if candidate:
+            hints["callUser"] = candidate
+    elif match := re.search(r"([^\s、。]{1,24})って呼んで", raw):
+        hints["callUser"] = match.group(1).strip("「」\"' ")
+
+    if match := re.search(r"ペルソナ(?:は|:|：)\s*([^\n。]{2,120})", raw):
+        hints["persona"] = match.group(1).strip("「」\"' ")
+    else:
+        for line in lines:
+            if "として振る舞" in line or "として話して" in line or "として会話" in line:
+                if "あなたは" in line:
+                    persona = line.split("あなたは", 1)[1]
+                    persona = re.split(r"として振る舞|として話して|として会話", persona, maxsplit=1)[0]
+                    persona = persona.strip("。 ")
+                    if persona:
+                        quoted = _extract_quoted_name(persona)
+                        hints["persona"] = quoted or persona
+                        break
+        if "persona" not in hints:
+            quoted = _extract_quoted_name(raw)
+            if quoted:
+                hints["persona"] = quoted
+
+    for line in lines:
+        if line.startswith("基本トーン:") or line.startswith("基本トーン："):
+            hints["tone"] = line.split(":", 1)[1].strip() if ":" in line else line.split("：", 1)[1].strip()
+        elif line.startswith("特徴的な語尾・言い回し") and ("：" in line or ":" in line):
+            hints["speaking_style"] = line.split("：", 1)[1].strip() if "：" in line else line.split(":", 1)[1].strip()
+
+    for key, value in list(hints.items()):
+        clean = " ".join(str(value or "").split()).strip("「」\"' ")
+        if not clean or _style_value_is_noise(key, clean):
+            hints.pop(key, None)
+        else:
+            hints[key] = clean[:240]
+    return hints
+
+
+def _clean_style_value(key: str, value: str, *, user_text: str = "") -> str:
+    clean = " ".join(str(value or "").split()).strip("「」\"' ")
+    if not clean:
+        return ""
+    if _style_value_is_noise(key, clean):
+        hints = _extract_explicit_style_hints(user_text)
+        replacement = hints.get(key, "")
+        return replacement or ""
+    return clean[:240]
+
+
+def _compact_messages(messages: list[dict[str, Any]], *, max_messages: int = 4, max_chars: int = 220) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    for item in messages[-max_messages:]:
+        compact.append(
+            {
+                "role": str(item.get("role") or "user"),
+                "text": _compact_text(str(item.get("text") or ""), limit=max_chars),
+                "ts": item.get("ts"),
+            }
+        )
+    return compact
+
+
+def _lancedb_digest_entries(
+    *,
+    session_key: str,
+    ts: int,
+    events: list[dict[str, Any]],
+    fallback_summary: str,
+) -> list[dict[str, Any]]:
+    if not events and not fallback_summary:
+        return []
+    day_key = datetime.fromtimestamp(ts, timezone.utc).astimezone().strftime("%Y-%m-%d")
+    summaries = [str(item.get("summary") or "").strip() for item in events if str(item.get("summary") or "").strip()]
+    if not summaries and fallback_summary:
+        summaries = [fallback_summary]
+    digest_micro = " | ".join(summaries[:3])[:220]
+    digest_meso = " | ".join(summaries[:6])[:480]
+    if not digest_micro:
+        return []
+    return [
+        {
+            "id": f"{session_key}:digest:{day_key}:{ts}",
+            "session_key": session_key,
+            "layer": "surface",
+            "kind": "digest",
+            "fact_key": f"digest.{day_key}",
+            "value": digest_micro,
+            "text": digest_meso or digest_micro,
+            "summary": digest_micro,
+            "importance": 0.8,
+            "confidence": 1.0,
+            "strength": 0.8,
+            "timestamp": ts,
+        }
+    ]
+
+
+def _compact_mapping(values: dict[str, str], *, max_items: int = 8, max_value_chars: int = 120) -> dict[str, str]:
+    compact: dict[str, str] = {}
+    for key in sorted(values.keys())[:max_items]:
+        compact[str(key)] = _compact_text(str(values.get(key) or ""), limit=max_value_chars)
+    return compact
 
 
 def _style_key_alias(key: str) -> str | None:
@@ -71,6 +318,35 @@ def _style_key_alias(key: str) -> str | None:
     if raw in STYLE_KEYS:
         return raw
     return None
+
+
+def _normalize_rule_value(key: str, value: str) -> str:
+    raw = " ".join(str(value or "").split()).strip()
+    if not raw:
+        return ""
+    lowered = raw.lower()
+    if key == "language.allowed":
+        parts = [part.strip() for part in raw.replace("、", ",").replace(" ", ",").split(",") if part.strip()]
+        seen: list[str] = []
+        for part in parts:
+            token = part.lower()
+            if token not in seen:
+                seen.append(token)
+        return ",".join(seen)
+    if key in STRICT_TRUE_RULE_KEYS:
+        if lowered in {"true", "1", "yes", "on", "enable", "enabled"}:
+            return "true"
+        return ""
+    if lowered in {"false", "0", "no", "off", "disable", "disabled"} and (key.startswith("security.") or key.startswith("output.")):
+        return ""
+    return raw
+
+
+def _explicit_targets(session_key: str) -> tuple[str, ...]:
+    raw = str(session_key or "").strip() or GLOBAL_SESSION_KEY
+    if raw == GLOBAL_SESSION_KEY:
+        return (GLOBAL_SESSION_KEY,)
+    return (raw, GLOBAL_SESSION_KEY)
 
 
 @dataclass
@@ -155,14 +431,28 @@ class BrainService:
         if model_seen:
             self._stats["last_ps_seen_model"] = model_seen
 
-    async def _call(self, *, session_key: str, op: str, system_prompt: str, user_prompt: str, schema_model: type[Any]) -> tuple[Any, str, dict[str, Any]]:
+    async def _call(
+        self,
+        *,
+        session_key: str,
+        op: str,
+        system_prompt: str,
+        user_prompt: str,
+        schema_model: type[Any],
+        max_tokens: int | None = None,
+    ) -> tuple[Any, str, dict[str, Any]]:
         trace_id = str(uuid.uuid4())
         import time
 
         t0 = time.perf_counter()
         async with self._lock:
             try:
-                res = await self.client.chat_schema(system=system_prompt, user=user_prompt, schema_model=schema_model)
+                res = await self.client.chat_schema(
+                    system=system_prompt,
+                    user=user_prompt,
+                    schema_model=schema_model,
+                    max_tokens=max_tokens,
+                )
                 latency_ms = int((time.perf_counter() - t0) * 1000)
                 record = BrainCallRecord(
                     trace_id=trace_id,
@@ -212,18 +502,30 @@ class BrainService:
             "ingest_system.txt",
             "Return JSON only. Extract memory facts, timeline events, optional explicit style updates, optional explicit rules, and quarantine items. Do not invent facts. Use evidence quotes.",
         )
+        is_explicit_style = explicit_style_requested(user_text)
+        is_explicit_rule = explicit_rule_requested(user_text)
+        style_or_rule_install = is_explicit_style or is_explicit_rule
         user = json.dumps(
             {
                 "session_key": session_key,
-                "user_text": user_text,
-                "assistant_text": assistant_text,
-                "current_style": current_style,
-                "current_rules": current_rules,
-                "recent_summary": recent_summary,
+                "user_text": _compact_text(user_text, limit=2200 if style_or_rule_install else 260),
+                "assistant_text": _compact_text(assistant_text, limit=160 if style_or_rule_install else 200),
+                "current_style": _compact_mapping(current_style, max_items=4 if style_or_rule_install else 6, max_value_chars=120 if style_or_rule_install else 80),
+                "current_rules": _compact_mapping(current_rules, max_items=4 if style_or_rule_install else 6, max_value_chars=120 if style_or_rule_install else 80),
+                "recent_summary": _compact_text(recent_summary, limit=120 if style_or_rule_install else 200),
+                "explicit_style_request": is_explicit_style,
+                "explicit_rule_request": is_explicit_rule,
             },
             ensure_ascii=False,
         )
-        return await self._call(session_key=session_key, op="ingest_plan", system_prompt=system, user_prompt=user, schema_model=BrainIngestPlan)
+        return await self._call(
+            session_key=session_key,
+            op="ingest_plan",
+            system_prompt=system,
+            user_prompt=user,
+            schema_model=BrainIngestPlan,
+            max_tokens=self.cfg.brain.ingest_max_tokens,
+        )
 
     async def build_recall_plan(
         self,
@@ -242,23 +544,37 @@ class BrainService:
         user = json.dumps(
             {
                 "session_key": session_key,
-                "prompt": prompt,
-                "recent_messages": recent_messages[-6:],
-                "current_style": current_style,
-                "current_rules": current_rules,
+                "prompt": _compact_text(prompt, limit=180),
+                "recent_messages": _compact_messages(recent_messages, max_messages=1, max_chars=96),
+                "style_present": bool(current_style),
+                "rules_present": bool(current_rules),
                 "now": now_iso,
             },
             ensure_ascii=False,
         )
-        return await self._call(session_key=session_key, op="recall_plan", system_prompt=system, user_prompt=user, schema_model=BrainRecallPlan)
+        return await self._call(
+            session_key=session_key,
+            op="recall_plan",
+            system_prompt=system,
+            user_prompt=user,
+            schema_model=BrainRecallPlan,
+            max_tokens=self.cfg.brain.recall_max_tokens,
+        )
 
     async def build_merge_plan(self, *, session_key: str, candidate_groups: list[dict[str, Any]]) -> tuple[BrainMergePlan, str, dict[str, Any]]:
         system = self._prompt(
             "merge_system.txt",
             "Return JSON only. Decide which memory items should merge, keep, or prune. Prefer consolidating duplicates without losing facts.",
         )
-        user = json.dumps({"session_key": session_key, "candidate_groups": candidate_groups[:12]}, ensure_ascii=False)
-        return await self._call(session_key=session_key, op="merge_plan", system_prompt=system, user_prompt=user, schema_model=BrainMergePlan)
+        user = json.dumps({"session_key": session_key, "candidate_groups": candidate_groups[:8]}, ensure_ascii=False)
+        return await self._call(
+            session_key=session_key,
+            op="merge_plan",
+            system_prompt=system,
+            user_prompt=user,
+            schema_model=BrainMergePlan,
+            max_tokens=self.cfg.brain.merge_max_tokens,
+        )
 
     async def build_audit_patch(self, *, session_key: str, text: str, reasons: list[str]) -> tuple[BrainAuditPatchPlan, str, dict[str, Any]]:
         system = self._prompt(
@@ -266,96 +582,329 @@ class BrainService:
             "Return JSON only. Keep structure, patch only unsafe spans, and preserve meaning.",
         )
         user = json.dumps({"session_key": session_key, "text": text, "reasons": reasons}, ensure_ascii=False)
-        return await self._call(session_key=session_key, op="audit_patch", system_prompt=system, user_prompt=user, schema_model=BrainAuditPatchPlan)
+        return await self._call(
+            session_key=session_key,
+            op="audit_patch",
+            system_prompt=system,
+            user_prompt=user,
+            schema_model=BrainAuditPatchPlan,
+            max_tokens=self.cfg.brain.audit_max_tokens,
+        )
 
-    def apply_ingest_plan(self, db: MemqDB, *, session_key: str, plan: BrainIngestPlan, ts: int, user_text: str = "") -> dict[str, int]:
+    def apply_ingest_plan(
+        self,
+        db: MemqDB,
+        *,
+        session_key: str,
+        plan: BrainIngestPlan,
+        ts: int,
+        user_text: str = "",
+        style_rules_only: bool = False,
+        memory_backend: "LanceDbMemoryBackend | None" = None,
+    ) -> dict[str, int]:
         wrote = {"facts": 0, "events": 0, "style": 0, "rules": 0, "quarantine": 0}
-        for item in plan.quarantine:
-            db.insert_quarantine(session_key, item.raw_snippet, item.reason, item.risk)
-            wrote["quarantine"] += 1
+        lancedb_primary = memory_backend is not None and memory_backend.enabled()
+        style_fact_values: dict[str, str] = {}
+        rule_fact_values: dict[str, str] = {}
+        explicit_style = explicit_style_requested(user_text)
+        explicit_style_hints = _extract_explicit_style_hints(user_text) if explicit_style else {}
+        lancedb_entries: list[dict[str, Any]] = []
+        event_payloads: list[dict[str, Any]] = []
         for fact in plan.facts:
-            if not fact.fact_key.startswith(FACT_KEY_PREFIXES):
-                db.insert_quarantine(session_key, fact.evidence_quote or fact.value, "unknown_fact_key", 0.8)
+            style_key = _style_key_alias(fact.fact_key)
+            if style_key and fact.value:
+                style_fact_values[style_key] = fact.value
+            if fact.fact_key.startswith(RULE_PREFIXES) and fact.value:
+                rule_fact_values[fact.fact_key] = fact.value
+        if not style_rules_only:
+            for item in plan.quarantine:
+                db.insert_quarantine(session_key, item.raw_snippet, item.reason, item.risk)
                 wrote["quarantine"] += 1
-                continue
-            if fact.layer == "deep" and fact.confidence < 0.45:
-                layer = "surface"
-            else:
-                layer = fact.layer
-            db.insert_memory(
-                session_key=session_key,
-                layer=layer,
-                kind="fact",
-                fact_key=fact.fact_key,
-                value=fact.value,
-                text=fact.evidence_quote or fact.value,
-                summary=f"{fact.fact_key}:{fact.value}",
-                confidence=fact.confidence,
-                importance=fact.importance,
-                strength=fact.strength,
-                tags={"entity_id": fact.entity_id},
-                source_quote=fact.evidence_quote,
-                ttl_days=fact.ttl_days,
-                created_at=ts,
-            )
-            if layer == "deep" and session_key != "global" and fact.fact_key.startswith("profile."):
-                db.insert_memory(
-                    session_key="global",
-                    layer="deep",
-                    kind="fact",
-                    fact_key=fact.fact_key,
-                    value=fact.value,
-                    text=fact.evidence_quote or fact.value,
-                    summary=f"{fact.fact_key}:{fact.value}",
-                    confidence=fact.confidence,
-                    importance=fact.importance,
-                    strength=fact.strength,
-                    tags={"entity_id": fact.entity_id, "source": session_key},
-                    source_quote=fact.evidence_quote,
-                    ttl_days=fact.ttl_days,
-                    created_at=ts,
+            for fact in plan.facts:
+                if not fact.fact_key.startswith(FACT_KEY_PREFIXES):
+                    db.insert_quarantine(session_key, fact.evidence_quote or fact.value, "unknown_fact_key", 0.8)
+                    wrote["quarantine"] += 1
+                    continue
+                if fact.layer == "deep" and fact.confidence < 0.45:
+                    layer = "surface"
+                else:
+                    layer = fact.layer
+                if not lancedb_primary:
+                    db.insert_memory(
+                        session_key=session_key,
+                        layer=layer,
+                        kind="fact",
+                        fact_key=fact.fact_key,
+                        value=fact.value,
+                        text=fact.evidence_quote or fact.value,
+                        summary=f"{fact.fact_key}:{fact.value}",
+                        confidence=fact.confidence,
+                        importance=fact.importance,
+                        strength=fact.strength,
+                        tags={"entity_id": fact.entity_id},
+                        source_quote=fact.evidence_quote,
+                        ttl_days=fact.ttl_days,
+                        created_at=ts,
+                    )
+                lancedb_entries.append(
+                    {
+                        "id": f"{session_key}:{fact.fact_key}:{ts}:{wrote['facts']}",
+                        "session_key": session_key,
+                        "layer": layer,
+                        "kind": "fact",
+                        "fact_key": fact.fact_key,
+                        "value": fact.value,
+                        "text": fact.evidence_quote or fact.value,
+                        "summary": f"{fact.fact_key}:{fact.value}",
+                        "importance": fact.importance,
+                        "confidence": fact.confidence,
+                        "strength": fact.strength,
+                        "timestamp": ts,
+                    }
                 )
-            wrote["facts"] += 1
-        for event in plan.events:
-            db.insert_event(
-                session_key=session_key,
-                ts=event.ts or ts,
-                actor=event.actor,
-                kind=event.kind,
-                summary=event.summary,
-                salience=event.salience,
-                keywords=event.keywords,
-                ttl_days=event.ttl_days,
-            )
-            wrote["events"] += 1
-        applied_style_keys: set[str] = set()
+                if layer == "deep" and session_key != "global" and fact.fact_key.startswith("profile."):
+                    if not lancedb_primary:
+                        db.insert_memory(
+                            session_key="global",
+                            layer="deep",
+                            kind="fact",
+                            fact_key=fact.fact_key,
+                            value=fact.value,
+                            text=fact.evidence_quote or fact.value,
+                            summary=f"{fact.fact_key}:{fact.value}",
+                            confidence=fact.confidence,
+                            importance=fact.importance,
+                            strength=fact.strength,
+                            tags={"entity_id": fact.entity_id, "source": session_key},
+                            source_quote=fact.evidence_quote,
+                            ttl_days=fact.ttl_days,
+                            created_at=ts,
+                        )
+                    lancedb_entries.append(
+                        {
+                            "id": f"global:{fact.fact_key}:{ts}:{wrote['facts']}",
+                            "session_key": "global",
+                            "layer": layer,
+                            "kind": "fact",
+                            "fact_key": fact.fact_key,
+                            "value": fact.value,
+                            "text": fact.evidence_quote or fact.value,
+                            "summary": f"{fact.fact_key}:{fact.value}",
+                            "importance": fact.importance,
+                            "confidence": fact.confidence,
+                            "strength": fact.strength,
+                            "timestamp": ts,
+                        }
+                )
+                wrote["facts"] += 1
+            for event in plan.events:
+                if not lancedb_primary:
+                    db.insert_event(
+                        session_key=session_key,
+                        ts=event.ts or ts,
+                        actor=event.actor,
+                        kind=event.kind,
+                        summary=event.summary,
+                        salience=event.salience,
+                        keywords=event.keywords,
+                        ttl_days=event.ttl_days,
+                    )
+                event_payloads.append(
+                    {
+                        "summary": event.summary,
+                        "kind": event.kind,
+                        "actor": event.actor,
+                        "ts": event.ts or ts,
+                        "salience": event.salience,
+                    }
+                )
+                lancedb_entries.append(
+                    {
+                        "id": f"{session_key}:event:{event.kind}:{event.ts or ts}:{wrote['events']}",
+                        "session_key": session_key,
+                        "layer": "surface",
+                        "kind": "event",
+                        "fact_key": f"event.{event.kind}.{event.actor}",
+                        "value": event.summary,
+                        "text": event.summary,
+                        "summary": event.summary,
+                        "importance": event.salience,
+                        "confidence": 1.0,
+                        "strength": event.salience,
+                        "timestamp": event.ts or ts,
+                    }
+                )
+                wrote["events"] += 1
+            if wrote["events"] == 0:
+                fallback_summary = " ".join(str(user_text or "").split())[:160]
+                if fallback_summary:
+                    if not lancedb_primary:
+                        db.insert_event(
+                            session_key=session_key,
+                            ts=ts,
+                            actor="user",
+                            kind="chat",
+                            summary=fallback_summary,
+                            salience=0.35,
+                            keywords=[],
+                            ttl_days=14,
+                        )
+                    event_payloads.append(
+                        {
+                            "summary": fallback_summary,
+                            "kind": "chat",
+                            "actor": "user",
+                            "ts": ts,
+                            "salience": 0.35,
+                        }
+                    )
+                    lancedb_entries.append(
+                        {
+                            "id": f"{session_key}:event:chat:{ts}:fallback",
+                            "session_key": session_key,
+                            "layer": "surface",
+                            "kind": "event",
+                            "fact_key": "event.chat.user",
+                            "value": fallback_summary,
+                            "text": fallback_summary,
+                            "summary": fallback_summary,
+                            "importance": 0.35,
+                            "confidence": 1.0,
+                            "strength": 0.35,
+                            "timestamp": ts,
+                        }
+                    )
+                    wrote["events"] += 1
+        style_values_to_apply: dict[str, str] = {}
         if plan.style_update and plan.style_update.apply and plan.style_update.explicit:
             for key, value in plan.style_update.keys.items():
                 if key not in STYLE_KEYS:
                     continue
-                db.upsert_style(session_key, key, value, updated_at=ts)
-                wrote["style"] += 1
-                applied_style_keys.add(key)
-        if explicit_style_requested(user_text):
+                actual_value = _clean_style_value(key, value or style_fact_values.get(key) or "", user_text=user_text)
+                if not actual_value:
+                    continue
+                style_values_to_apply[key] = actual_value
+        if explicit_style:
             for fact in plan.facts:
                 key = _style_key_alias(fact.fact_key)
-                if not key or key in applied_style_keys:
+                if not key:
                     continue
-                db.upsert_style(session_key, key, fact.value, updated_at=ts)
-                wrote["style"] += 1
-                applied_style_keys.add(key)
+                actual_value = _clean_style_value(key, fact.value, user_text=user_text)
+                if not actual_value:
+                    continue
+                current = style_values_to_apply.get(key, "")
+                if not current or _style_value_is_noise(key, current):
+                    style_values_to_apply[key] = actual_value
+            for key, value in explicit_style_hints.items():
+                current = style_values_to_apply.get(key, "")
+                if not current or _style_value_is_noise(key, current) or len(value) > len(current):
+                    style_values_to_apply[key] = value
+        for key, actual_value in style_values_to_apply.items():
+            for target_session in _explicit_targets(session_key):
+                if not lancedb_primary:
+                    db.upsert_style(target_session, key, actual_value, updated_at=ts)
+                lancedb_entries.append(
+                    {
+                        "id": f"{target_session}:qstyle:{key}",
+                        "session_key": target_session,
+                        "layer": "deep",
+                        "kind": "style",
+                        "fact_key": f"qstyle.{key}",
+                        "value": actual_value,
+                        "text": actual_value,
+                        "summary": actual_value,
+                        "importance": 1.0,
+                        "confidence": 1.0,
+                        "strength": 1.0,
+                        "timestamp": ts,
+                    }
+                )
+            wrote["style"] += 1
         if plan.rules_update and plan.rules_update.apply and plan.rules_update.explicit:
             for key, value in plan.rules_update.rules.items():
                 if not key.startswith(RULE_PREFIXES):
                     continue
-                db.upsert_rule(session_key, key, value, updated_at=ts)
+                actual_value = _normalize_rule_value(key, value or rule_fact_values.get(key) or "")
+                if not actual_value:
+                    continue
+                for target_session in _explicit_targets(session_key):
+                    if not lancedb_primary:
+                        db.upsert_rule(target_session, key, actual_value, updated_at=ts)
+                    lancedb_entries.append(
+                        {
+                            "id": f"{target_session}:qrule:{key}",
+                            "session_key": target_session,
+                            "layer": "deep",
+                            "kind": "rule",
+                            "fact_key": f"qrule.{key}",
+                            "value": actual_value,
+                            "text": actual_value,
+                            "summary": actual_value,
+                            "importance": 1.0,
+                            "confidence": 1.0,
+                            "strength": 1.0,
+                            "timestamp": ts,
+                        }
+                    )
                 wrote["rules"] += 1
         if explicit_rule_requested(user_text):
             for fact in plan.facts:
                 if fact.fact_key.startswith(RULE_PREFIXES):
-                    db.upsert_rule(session_key, fact.fact_key, fact.value, updated_at=ts)
+                    actual_value = _normalize_rule_value(fact.fact_key, fact.value)
+                    if not actual_value:
+                        continue
+                    for target_session in _explicit_targets(session_key):
+                        if not lancedb_primary:
+                            db.upsert_rule(target_session, fact.fact_key, actual_value, updated_at=ts)
+                        lancedb_entries.append(
+                            {
+                                "id": f"{target_session}:qrule:{fact.fact_key}",
+                                "session_key": target_session,
+                                "layer": "deep",
+                                "kind": "rule",
+                                "fact_key": f"qrule.{fact.fact_key}",
+                                "value": actual_value,
+                                "text": actual_value,
+                                "summary": actual_value,
+                                "importance": 1.0,
+                                "confidence": 1.0,
+                                "strength": 1.0,
+                                "timestamp": ts,
+                            }
+                        )
                     wrote["rules"] += 1
-        db.refresh_recent_digests(session_key, days=3)
+        if not style_rules_only:
+            fallback_summary = " ".join(str(user_text or "").split())[:160]
+            if lancedb_primary:
+                lancedb_entries.extend(
+                    _lancedb_digest_entries(
+                        session_key=session_key,
+                        ts=ts,
+                        events=event_payloads,
+                        fallback_summary=fallback_summary,
+                    )
+                )
+            else:
+                db.refresh_recent_digests(session_key, days=3)
+                for digest in db.export_recent_digests(session_key, days=3):
+                    lancedb_entries.append(
+                        {
+                            "id": f"{session_key}:digest:{digest['day_key']}",
+                            "session_key": session_key,
+                            "layer": "surface",
+                            "kind": "digest",
+                            "fact_key": f"digest.{digest['day_key']}",
+                            "value": digest["digest_micro"],
+                            "text": digest["digest_meso"] or digest["digest_micro"],
+                            "summary": digest["digest_micro"],
+                            "importance": 0.8,
+                            "confidence": 1.0,
+                            "strength": 0.8,
+                            "timestamp": digest["updated_at"],
+                        }
+                    )
+        if memory_backend is not None and memory_backend.enabled() and lancedb_entries:
+            memory_backend.ingest_memories(lancedb_entries)
         return wrote
 
     def apply_merge_plan(self, db: MemqDB, *, session_key: str, plan: BrainMergePlan) -> dict[str, int]:

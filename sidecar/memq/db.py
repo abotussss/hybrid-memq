@@ -36,6 +36,185 @@ def _ngrams(text: str, n: int = 2) -> str:
     return " ".join(grams)
 
 
+def _dirty_profile_fact(fact_key: str, value: str = "", summary: str = "") -> bool:
+    fk = str(fact_key or "").strip().lower()
+    if not fk.startswith("profile."):
+        return False
+    cleaned_value = _clean_fact_value(fact_key, value)
+    payload = f"{cleaned_value or ''} {summary or ''}".lower()
+    if fk in {"profile.rules", "profile.memstyle"}:
+        return True
+    if "budget" in fk or fk.startswith("profile.memrule") or fk.startswith("profile.memstyle") or fk.startswith("profile.memctx"):
+        return True
+    if ".t.recent" in fk or ".t.digest" in fk or ".wm." in fk:
+        return True
+    for marker in ("<memrules", "<memstyle", "<memctx", "<qrule", "<qstyle", "<qctx", "budget_tokens=", "p.snapshot=", "t.recent=", "t.digest=", "wm.surf=", "wm.deep="):
+        if marker in payload:
+            return True
+    if fk == "profile.identity.card":
+        cleaned = _normalize_text(cleaned_value or summary)
+        if len(cleaned.strip()) < 3 or cleaned.lower().startswith("p.snapshot="):
+            return True
+    return False
+
+
+STYLE_ALLOWED_KEYS = {
+    "tone",
+    "persona",
+    "verbosity",
+    "speaking_style",
+    "callUser",
+    "firstPerson",
+}
+
+RULE_ALLOWED_PREFIXES = (
+    "security.",
+    "language.",
+    "procedure.",
+    "compliance.",
+    "output.",
+    "operation.",
+)
+
+STYLE_TECHNICAL_TERMS = (
+    "memory-lancedb-pro",
+    "lancedb",
+    "memq",
+    "qctx",
+    "qstyle",
+    "qrule",
+    "memctx",
+    "memstyle",
+    "memrule",
+    "openclaw",
+    "sqlite",
+    "ollama",
+    "backend",
+    "adapter",
+    "bridge",
+    "helper",
+)
+
+
+def _dirty_style_value(key: str, value: str) -> bool:
+    clean_key = str(key or "").strip()
+    clean_value = _normalize_text(value or "")
+    lowered = clean_value.lower()
+    if clean_key not in STYLE_ALLOWED_KEYS:
+        return True
+    if not clean_value:
+        return True
+    for marker in ("<memrules", "<memstyle", "<memctx", "<qrule", "<qstyle", "<qctx", "budget_tokens="):
+        if marker in lowered:
+            return True
+    if clean_key == "persona":
+        for term in STYLE_TECHNICAL_TERMS:
+            if term in lowered:
+                return True
+    return False
+
+
+def _dirty_rule_value(key: str, value: str) -> bool:
+    clean_key = str(key or "").strip()
+    clean_value = _normalize_text(value or "")
+    lowered = clean_value.lower()
+    if not any(clean_key.startswith(prefix) for prefix in RULE_ALLOWED_PREFIXES):
+        return True
+    if not clean_value:
+        return True
+    for marker in ("<memrules", "<memstyle", "<memctx", "<qrule", "<qstyle", "<qctx", "budget_tokens="):
+        if marker in lowered:
+            return True
+    strict_true_keys = {
+        "security.never_output_secrets",
+        "security.no_api_keys",
+        "security.no_api_tokens",
+        "output.redact_secret_like",
+    }
+    if clean_key in strict_true_keys and lowered not in {"true", "1", "yes"}:
+        return True
+    return False
+
+
+def _clean_fact_value(fact_key: str, value: str) -> str:
+    clean = _normalize_text(value or "")
+    fk = str(fact_key or "").strip()
+    if not clean:
+        return ""
+    prefix = f"{fk}:"
+    if fk and clean.lower().startswith(prefix.lower()):
+        clean = clean[len(prefix):].strip()
+    if clean.lower().startswith("p.snapshot="):
+        clean = clean.split("=", 1)[1].strip()
+    return clean
+
+
+def _prefer_human_anchor_text(fact_key: str, value: str, summary: str, text: str) -> str:
+    clean_value = _normalize_text(value or "")
+    clean_summary = _normalize_text(summary or "")
+    clean_text = _normalize_text(text or "")
+    lowered_summary = clean_summary.lower()
+    lowered_text = clean_text.lower()
+    lowered_value = clean_value.lower()
+    technical_terms = STYLE_TECHNICAL_TERMS + ("memory-lancedb-pro-adapted",)
+    summary_is_machineish = (
+        (fact_key and clean_summary.lower().startswith(f"{str(fact_key).lower()}:"))
+        or lowered_summary in {"true", "false", "exists"}
+        or lowered_summary == lowered_value
+        or any(term == lowered_summary or lowered_summary.endswith(f":{term}") for term in technical_terms)
+    )
+    text_is_human = bool(clean_text) and (
+        len(clean_text) >= 16
+        or any(ch in clean_text for ch in ("。", "、", " ", "，"))
+    ) and not any(term == lowered_text for term in technical_terms)
+    if clean_text and (
+        lowered_value in {"true", "false", "exists"}
+        or clean_summary.lower().endswith(":true")
+        or clean_summary.lower().endswith(":false")
+        or clean_summary.lower().endswith(":exists")
+    ):
+        return clean_text
+    if text_is_human and summary_is_machineish:
+        return clean_text
+    if clean_summary:
+        return clean_summary
+    if clean_text:
+        return clean_text
+    return clean_value
+
+
+def _anchor_candidate_score(fact_key: str, value: str, summary: str, text: str) -> float:
+    candidate = _prefer_human_anchor_text(fact_key, value, summary, text)
+    lowered = candidate.lower()
+    score = 0.0
+    if not candidate:
+        return score
+    score += min(len(candidate), 180) / 10.0
+    if any(ch in candidate for ch in ("。", "、", " ", "，")):
+        score += 4.0
+    if candidate == _normalize_text(text or ""):
+        score += 3.0
+    if not any(term == lowered or lowered.endswith(f":{term}") for term in STYLE_TECHNICAL_TERMS):
+        score += 2.0
+    if str(fact_key or "").startswith("profile."):
+        score -= 1.0
+    if str(fact_key or "").startswith("profile.task_") or str(fact_key or "").startswith("profile.memory_"):
+        score += 1.5
+    if lowered in {"true", "false", "exists", "memory-lancedb-pro", "memory-lancedb-pro-adapted"}:
+        score -= 10.0
+    return score
+
+
+def _rewrite_public_labels(text: str) -> str:
+    return (
+        _normalize_text(text or "")
+        .replace("MEMRULES", "QRULE")
+        .replace("MEMRULE", "QRULE")
+        .replace("MEMSTYLE", "QSTYLE")
+        .replace("MEMCTX", "QCTX")
+    )
+
+
 def _fts_match_query(text: str) -> str:
     terms: list[str] = []
     for token in _slug_tokens(text)[:8]:
@@ -50,6 +229,36 @@ def _fts_match_query(text: str) -> str:
         safe = _normalize_text(text).replace('"', "").strip()
         return f'"{safe}"' if safe else '""'
     return " OR ".join(dict.fromkeys(terms))
+
+
+def _dedupe_consecutive_strings(values: Iterable[str]) -> list[str]:
+    out: list[str] = []
+    previous = ""
+    for value in values:
+        clean = _normalize_text(value)
+        if not clean:
+            continue
+        marker = clean.lower()
+        if marker == previous:
+            continue
+        out.append(clean)
+        previous = marker
+    return out
+
+
+def _dedupe_consecutive_rows_by_summary(rows: Iterable[Any]) -> list[Any]:
+    out: list[Any] = []
+    previous = ""
+    for row in rows:
+        summary = _normalize_text(str(row["summary"] or ""))
+        if not summary:
+            continue
+        marker = summary.lower()
+        if marker == previous:
+            continue
+        out.append(row)
+        previous = marker
+    return out
 
 
 @dataclass
@@ -201,6 +410,8 @@ class MemqDB:
             """
         )
         self.conn.commit()
+        self.repair_style_and_rules_all()
+        self.repair_public_labels_all()
 
     def _row_to_search_result(self, row: sqlite3.Row, score: float) -> SearchResult:
         return SearchResult(
@@ -250,13 +461,17 @@ class MemqDB:
         self.conn.commit()
 
     def list_rules(self, session_key: str) -> dict[str, str]:
+        self.repair_rules(session_key)
         rows = self.conn.execute(
             "SELECT key, value FROM rules WHERE enabled=1 AND session_key IN (?, 'global') ORDER BY session_key='global', priority ASC, updated_at DESC",
             (session_key,),
         ).fetchall()
         out: dict[str, str] = {}
         for row in rows:
-            out[str(row["key"])] = str(row["value"])
+            key = str(row["key"])
+            if key in out:
+                continue
+            out[key] = str(row["value"])
         return out
 
     def upsert_style(self, session_key: str, key: str, value: str, *, updated_at: int | None = None) -> None:
@@ -273,14 +488,83 @@ class MemqDB:
         self.conn.commit()
 
     def list_style(self, session_key: str) -> dict[str, str]:
+        self.repair_style_profile(session_key)
         rows = self.conn.execute(
             "SELECT key, value FROM style_profile WHERE session_key IN (?, 'global') ORDER BY session_key='global', updated_at DESC",
             (session_key,),
         ).fetchall()
         out: dict[str, str] = {}
         for row in rows:
-            out[str(row["key"])] = str(row["value"])
+            key = str(row["key"])
+            if key in out:
+                continue
+            out[key] = str(row["value"])
         return out
+
+    def repair_style_profile(self, session_key: str) -> int:
+        rows = self.conn.execute(
+            "SELECT session_key, key, value FROM style_profile WHERE session_key IN (?, 'global')",
+            (session_key,),
+        ).fetchall()
+        dirty = [(str(row["session_key"]), str(row["key"])) for row in rows if _dirty_style_value(str(row["key"] or ""), str(row["value"] or ""))]
+        if not dirty:
+            return 0
+        self.conn.executemany("DELETE FROM style_profile WHERE session_key=? AND key=?", dirty)
+        self.conn.commit()
+        return len(dirty)
+
+    def repair_rules(self, session_key: str) -> int:
+        rows = self.conn.execute(
+            "SELECT session_key, key, value FROM rules WHERE session_key IN (?, 'global')",
+            (session_key,),
+        ).fetchall()
+        dirty = [(str(row["session_key"]), str(row["key"])) for row in rows if _dirty_rule_value(str(row["key"] or ""), str(row["value"] or ""))]
+        if not dirty:
+            return 0
+        self.conn.executemany("DELETE FROM rules WHERE session_key=? AND key=?", dirty)
+        self.conn.commit()
+        return len(dirty)
+
+    def repair_style_and_rules_all(self) -> dict[str, int]:
+        sessions = {"global"}
+        for row in self.conn.execute("SELECT DISTINCT session_key FROM style_profile").fetchall():
+            sessions.add(str(row["session_key"]))
+        for row in self.conn.execute("SELECT DISTINCT session_key FROM rules").fetchall():
+            sessions.add(str(row["session_key"]))
+        style_removed = 0
+        rules_removed = 0
+        for session_key in sessions:
+            style_removed += self.repair_style_profile(session_key)
+            rules_removed += self.repair_rules(session_key)
+        return {"style_removed": style_removed, "rules_removed": rules_removed}
+
+    def repair_public_labels_all(self) -> int:
+        rows = self.conn.execute(
+            "SELECT id, value, text, summary FROM memory_items WHERE tombstoned=0"
+        ).fetchall()
+        changed = 0
+        for row in rows:
+            value = _rewrite_public_labels(str(row["value"] or ""))
+            text = _rewrite_public_labels(str(row["text"] or ""))
+            summary = _rewrite_public_labels(str(row["summary"] or ""))
+            if (
+                value == str(row["value"] or "")
+                and text == str(row["text"] or "")
+                and summary == str(row["summary"] or "")
+            ):
+                continue
+            item_id = int(row["id"])
+            keywords = " ".join(dict.fromkeys(_slug_tokens(" ".join([summary, value]))))
+            ngrams = _ngrams(" ".join([summary, value]))
+            self.conn.execute(
+                "UPDATE memory_items SET value=?, text=?, summary=?, keywords=?, ngrams=?, updated_at=? WHERE id=?",
+                (value, text, summary, keywords, ngrams, _utc_now(), item_id),
+            )
+            self._upsert_memory_fts(item_id, summary or text or value, keywords, ngrams)
+            changed += 1
+        if changed:
+            self.conn.commit()
+        return changed
 
     def insert_memory(
         self,
@@ -305,7 +589,7 @@ class MemqDB:
         summary = _normalize_text(summary or text or value)
         text = _normalize_text(text or summary or value)
         fact_key = str(fact_key or "").strip()
-        value = _normalize_text(value or "")
+        value = _clean_fact_value(fact_key, value)
         keywords = " ".join(dict.fromkeys(_slug_tokens(" ".join([summary, value, fact_key]))))
         ngrams = _ngrams(" ".join([summary, value, fact_key]))
         cur = self.conn.execute(
@@ -482,6 +766,8 @@ class MemqDB:
             row = mapped.get(item_id)
             if not row:
                 continue
+            if _dirty_profile_fact(str(row["fact_key"] or ""), str(row["value"] or ""), str(row["summary"] or "")):
+                continue
             recency_bonus = 0.15 if int(row["updated_at"] or 0) >= now - 86400 * 14 else 0.0
             score = candidates[item_id] + float(row["confidence"] or 0.0) * 0.3 + float(row["importance"] or 0.0) * 0.2 + recency_bonus
             results.append(self._row_to_search_result(row, score))
@@ -538,7 +824,8 @@ class MemqDB:
             "SELECT summary, kind, salience FROM events WHERE session_key=? AND day_key=? ORDER BY salience DESC, ts DESC LIMIT 12",
             (session_key, day_key),
         ).fetchall()
-        bullets = [f"- [{row['kind']}] {str(row['summary'])[:140]}" for row in rows]
+        deduped_rows = _dedupe_consecutive_rows_by_summary(rows)
+        bullets = [f"- [{row['kind']}] {str(row['summary'])[:140]}" for row in deduped_rows]
         digest_micro = " | ".join(bullets[:4])
         digest_meso = "\n".join(bullets[:10])
         self.conn.execute(
@@ -558,9 +845,33 @@ class MemqDB:
             day_key = (today - timedelta(days=i)).strftime("%Y-%m-%d")
             self.refresh_daily_digest(session_key, day_key)
 
-    def recent_digest(self, session_key: str, days: int = 2) -> str:
+    def recent_digest(self, session_key: str, days: int = 2, max_items: int = 3) -> str:
         today = datetime.now(self.timezone).date()
-        rows = []
+        earliest = (today - timedelta(days=max(1, days) - 1)).strftime("%Y-%m-%d")
+        latest = today.strftime("%Y-%m-%d")
+        now = _utc_now()
+        recent_events = self.conn.execute(
+            """
+            SELECT day_key, kind, summary, ts, id
+            FROM events
+            WHERE session_key=? AND day_key BETWEEN ? AND ? AND (ttl_expires_at IS NULL OR ttl_expires_at > ?)
+            ORDER BY ts DESC, id DESC
+            LIMIT ?
+            """,
+            (session_key, earliest, latest, now, max(6, max_items * 4)),
+        ).fetchall()
+        event_entries: list[str] = []
+        for row in _dedupe_consecutive_rows_by_summary(recent_events):
+            summary = _normalize_text(str(row["summary"] or ""))[:140]
+            if not summary:
+                continue
+            event_entries.append(f"{row['day_key']}:- [{row['kind']}] {summary}")
+            if len(event_entries) >= max(1, max_items):
+                break
+        if event_entries:
+            return " | ".join(event_entries)
+
+        rows: list[str] = []
         for i in range(max(1, days)):
             day_key = (today - timedelta(days=i)).strftime("%Y-%m-%d")
             row = self.conn.execute(
@@ -568,8 +879,33 @@ class MemqDB:
                 (day_key, session_key),
             ).fetchone()
             if row and row["digest_micro"]:
-                rows.append(f"{day_key}:{row['digest_micro']}")
-        return " | ".join(rows[:2])
+                segments = _dedupe_consecutive_strings(str(row["digest_micro"]).split("|"))
+                for segment in segments:
+                    rows.append(f"{day_key}:{segment}")
+                    if len(rows) >= max(1, max_items):
+                        return " | ".join(rows)
+        return " | ".join(rows[: max(1, max_items)])
+
+    def export_recent_digests(self, session_key: str, days: int = 7) -> list[dict[str, Any]]:
+        today = datetime.now(self.timezone).date()
+        rows: list[dict[str, Any]] = []
+        for i in range(max(1, days)):
+            day_key = (today - timedelta(days=i)).strftime("%Y-%m-%d")
+            row = self.conn.execute(
+                "SELECT digest_micro, digest_meso, updated_at FROM daily_digests WHERE day_key=? AND session_key=?",
+                (day_key, session_key),
+            ).fetchone()
+            if not row or not row["digest_micro"]:
+                continue
+            rows.append(
+                {
+                    "day_key": day_key,
+                    "digest_micro": str(row["digest_micro"] or ""),
+                    "digest_meso": str(row["digest_meso"] or ""),
+                    "updated_at": int(row["updated_at"] or _utc_now()),
+                }
+            )
+        return rows
 
     def surface_anchor(self, session_key: str) -> str:
         row = self.conn.execute(
@@ -579,34 +915,54 @@ class MemqDB:
         return str(row["summary"]) if row else ""
 
     def deep_anchor(self, session_key: str) -> str:
-        row = self.conn.execute(
-            "SELECT summary FROM memory_items WHERE session_key IN (?, 'global') AND layer='deep' AND tombstoned=0 ORDER BY updated_at DESC LIMIT 1",
-            (session_key,),
-        ).fetchone()
-        return str(row["summary"]) if row else ""
+        rows = self.conn.execute(
+            """
+            SELECT fact_key, value, summary, text
+            FROM memory_items
+            WHERE session_key IN (?, 'global')
+              AND layer='deep'
+              AND tombstoned=0
+              AND (ttl_expires_at IS NULL OR ttl_expires_at > ?)
+            ORDER BY updated_at DESC
+            LIMIT 24
+            """,
+            (session_key, _utc_now()),
+        ).fetchall()
+        if not rows:
+            return ""
+        ranked: list[tuple[float, str]] = []
+        for row in rows:
+            fact_key = str(row["fact_key"] or "")
+            value = str(row["value"] or "")
+            summary = str(row["summary"] or "")
+            text = str(row["text"] or "")
+            candidate = _prefer_human_anchor_text(fact_key, value, summary, text)
+            if not candidate:
+                continue
+            score = _anchor_candidate_score(fact_key, value, summary, text)
+            if score <= 0:
+                continue
+            ranked.append((score, candidate))
+        if not ranked:
+            return ""
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return ranked[0][1]
 
     def profile_snapshot(self, session_key: str) -> str:
-        row = self.conn.execute(
-            """
-            SELECT value, summary FROM memory_items
-            WHERE session_key IN (?, 'global') AND fact_key='profile.snapshot' AND tombstoned=0
-            ORDER BY updated_at DESC LIMIT 1
-            """,
-            (session_key,),
-        ).fetchone()
-        if row:
-            snap = str(row["value"] or row["summary"] or "")
-            if snap.strip():
-                return snap
+        self.repair_profile_facts(session_key)
         return self.compute_profile_snapshot(session_key)
 
     def compute_profile_snapshot(self, session_key: str) -> str:
         style = self.list_style(session_key)
+        return self.compute_public_profile_snapshot(session_key, style)
+
+    def compute_public_profile_snapshot(self, session_key: str, style: dict[str, str] | None = None) -> str:
+        style = dict(style or {})
         facts = self.conn.execute(
             """
             SELECT fact_key, value FROM memory_items
             WHERE session_key IN (?, 'global') AND layer='deep' AND tombstoned=0 AND fact_key GLOB 'profile.*'
-            ORDER BY updated_at DESC LIMIT 10
+            ORDER BY updated_at DESC LIMIT 30
             """,
             (session_key,),
         ).fetchall()
@@ -616,30 +972,61 @@ class MemqDB:
             val = style.get(key)
             if val:
                 parts.append(f"{key}:{val}")
-        seen = set()
+        preferred = [
+            "profile.identity.card",
+            "profile.name",
+            "profile.display_name",
+            "profile.alias",
+            "profile.nickname",
+            "profile.role",
+            "profile.user_name",
+        ]
+        excluded_prefixes = (
+            "profile.spouse",
+            "profile.child",
+            "profile.pet",
+            "profile.family",
+            "profile.relationship",
+            "profile.task_",
+            "profile.timeline",
+        )
+        latest: dict[str, str] = {}
         for row in facts:
             fk = str(row["fact_key"] or "")
-            if fk in seen:
+            value = _clean_fact_value(fk, str(row["value"] or ""))
+            if _dirty_profile_fact(fk, value, ""):
                 continue
-            seen.add(fk)
-            parts.append(f"{fk}:{str(row['value'] or '')}")
-        return " | ".join(parts[:8])
+            if fk in latest:
+                continue
+            if value.strip():
+                latest[fk] = value
+        for fk in preferred:
+            value = latest.get(fk)
+            if value:
+                parts.append(f"{fk}:{value}")
+        return _rewrite_public_labels(" | ".join(parts[:8]))
 
     def refresh_profile_snapshot(self, session_key: str) -> str:
+        self.repair_profile_facts(session_key)
         snapshot = self.compute_profile_snapshot(session_key)
-        if not snapshot:
-            return ""
-        existing = self.conn.execute(
+        existing_rows = self.conn.execute(
             """
             SELECT id FROM memory_items
             WHERE session_key=? AND fact_key='profile.snapshot' AND tombstoned=0
-            ORDER BY updated_at DESC LIMIT 1
+            ORDER BY updated_at DESC
             """,
             (session_key,),
-        ).fetchone()
+        ).fetchall()
         ts = _utc_now()
-        if existing:
-            item_id = int(existing["id"])
+        if not snapshot:
+            if existing_rows:
+                ids = [int(row["id"]) for row in existing_rows]
+                placeholders = ",".join("?" for _ in ids)
+                self.conn.execute(f"UPDATE memory_items SET tombstoned=1, updated_at=? WHERE id IN ({placeholders})", [ts] + ids)
+                self.conn.commit()
+            return ""
+        if existing_rows:
+            item_id = int(existing_rows[0]["id"])
             keywords = " ".join(dict.fromkeys(_slug_tokens(snapshot)))
             ngrams = _ngrams(snapshot)
             self.conn.execute(
@@ -647,6 +1034,10 @@ class MemqDB:
                 (snapshot, snapshot, snapshot, keywords, ngrams, ts, item_id),
             )
             self._upsert_memory_fts(item_id, snapshot, keywords, ngrams)
+            if len(existing_rows) > 1:
+                ids = [int(row["id"]) for row in existing_rows[1:]]
+                placeholders = ",".join("?" for _ in ids)
+                self.conn.execute(f"UPDATE memory_items SET tombstoned=1, updated_at=? WHERE id IN ({placeholders})", [ts] + ids)
         else:
             self.insert_memory(
                 session_key=session_key,
@@ -664,6 +1055,24 @@ class MemqDB:
             return snapshot
         self.conn.commit()
         return snapshot
+
+    def repair_profile_facts(self, session_key: str) -> int:
+        rows = self.conn.execute(
+            """
+            SELECT id, fact_key, value, summary FROM memory_items
+            WHERE session_key IN (?, 'global') AND fact_key GLOB 'profile.*' AND tombstoned=0
+            """,
+            (session_key,),
+        ).fetchall()
+        dirty_ids = [int(row["id"]) for row in rows if _dirty_profile_fact(str(row["fact_key"] or ""), str(row["value"] or ""), str(row["summary"] or ""))]
+        if not dirty_ids:
+            return 0
+        ts = _utc_now()
+        placeholders = ",".join("?" for _ in dirty_ids)
+        self.conn.execute(f"UPDATE memory_items SET tombstoned=1, updated_at=? WHERE id IN ({placeholders})", [ts] + dirty_ids)
+        self.conn.execute(f"DELETE FROM fact_index WHERE item_id IN ({placeholders})", dirty_ids)
+        self.conn.commit()
+        return len(dirty_ids)
 
     def refresh_fact_index(self, session_key: str) -> int:
         rows = self.conn.execute(

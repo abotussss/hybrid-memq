@@ -1,12 +1,12 @@
 sidecarUrl: http://127.0.0.1:7781
 
 budgets:
-  memctxTokens: 120
-  rulesTokens: 80
-  styleTokens: 120
+  memctxTokens: 500
+  rulesTokens: 500
+  styleTokens: 500
 
 total:
-  maxInputTokens: 4200
+  maxInputTokens: 5200
   reserveTokens: 1800
   capSafetyRatio: 0.72
 
@@ -36,7 +36,7 @@ security:
 
 style:
   enabled: true
-  maxBudgetTokens: 120
+  maxBudgetTokens: 500
 
 archive:
   enabled: true

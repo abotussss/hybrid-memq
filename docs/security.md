@@ -4,7 +4,7 @@
 
 - Secrets are never promoted into memory channels.
 - Suspected prompt-injection or exfiltration-like content is quarantined.
-- Quarantined items are excluded from MEMCTX recall.
+- Quarantined items are excluded from QCTX recall.
 
 ## Output audit
 
@@ -17,9 +17,9 @@ Secondary audit is only called when risk score exceeds configured threshold.
 
 ## Rules/style separation
 
-- `MEMRULES`: strict operational/safety constraints only
-- `MEMSTYLE`: persona/tone/verbosity only
-- `MEMCTX`: memory context only
+- `QRULE`: strict operational/safety constraints only
+- `QSTYLE`: persona/tone/verbosity only
+- `QCTX`: memory context only
 
 This separation prevents cross-channel policy pollution.
 

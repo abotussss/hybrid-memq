@@ -57,6 +57,22 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, runtim
     }
 
     await sidecar.idleTick(Math.floor(Date.now() / 1000));
+    try {
+      const preview = await sidecar.previewPrompt(
+        {
+          sessionKey,
+          userText: prompt,
+          ts: Math.floor(Date.now() / 1000),
+        },
+        Number(env.MEMQ_BRAIN_TIMEOUT_MS)
+      );
+      if ((preview?.wrote?.style || 0) > 0 || (preview?.wrote?.rules || 0) > 0) {
+        const previewTraceId = String(preview?.traceId || "");
+        logInfo(api, `[memq][qbrain-proof] turn=before_prompt_build session=${sessionKey} trace_id=${previewTraceId} op=preview_ingest_plan model=${env.MEMQ_BRAIN_MODEL} ps_seen=1 wrote_style=${preview?.wrote?.style || 0} wrote_rules=${preview?.wrote?.rules || 0}`);
+      }
+    } catch (error) {
+      if (brainRequired || !degradedEnabled) throw error;
+    }
     let response;
     try {
       response = await sidecar.memctxQuery(
@@ -83,13 +99,16 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, runtim
       return {};
     }
 
+    const qrule = response.qrule || "";
+    const qstyle = response.qstyle || "";
+    const qctx = response.qctx || "";
     const enforced = enforceTotalInputCap(
       {
         prompt,
         recent: trim.kept,
-        memrules: response.memrules || "",
-        memstyle: response.memstyle || "",
-        memctx: response.memctx || "",
+        memrules: qrule,
+        memstyle: qstyle,
+        memctx: qctx,
       },
       {
         totalMaxInputTokens: Number(env.MEMQ_TOTAL_MAX_INPUT_TOKENS),
@@ -109,10 +128,10 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, runtim
       event.messages.splice(0, event.messages.length, ...keptRaw);
     }
 
-    runtime.lastMemstyleBySession.set(sessionKey, response.memstyle || "");
-    const prependContext = composeInjectedBlocks(response.memrules, response.memstyle, finalMemctx);
+    runtime.lastMemstyleBySession.set(sessionKey, qstyle);
+    const prependContext = composeInjectedBlocks(qrule, qstyle, finalMemctx);
     const traceId = String(response.meta?.debug?.trace_id ?? "");
-    logInfo(api, `[memq][brain-proof] turn=before_prompt_build session=${sessionKey} trace_id=${traceId} op=recall_plan model=${env.MEMQ_BRAIN_MODEL} ps_seen=${response.meta?.debug?.ps_seen ? 1 : 0}`);
+    logInfo(api, `[memq][qbrain-proof] turn=before_prompt_build session=${sessionKey} trace_id=${traceId} op=recall_plan model=${env.MEMQ_BRAIN_MODEL} ps_seen=${response.meta?.debug?.ps_seen ? 1 : 0}`);
     logInfo(
       api,
       `[memq-v3] session=${sessionKey} tokens.system=${enforced.breakdown.system} tokens.rules=${enforced.breakdown.rules} tokens.style=${enforced.breakdown.style} tokens.ctx=${enforced.breakdown.ctx} tokens.recent=${enforced.breakdown.recent} tokens.total=${enforced.breakdown.total} tokens.cap=${enforced.breakdown.cap} recent_kept=${finalKept.length}`

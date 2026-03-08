@@ -2,7 +2,7 @@
 
 Hybrid MEMQ v3 is a full rebuild of the OpenClaw memory plugin around one rule:
 
-- `MemBrain` decides what to remember, what to recall, and what to merge.
+- `QBRAIN` decides what to remember, what to recall, and what to merge.
 - deterministic code applies those plans.
 - OpenClaw remains the final answer model.
 
@@ -10,14 +10,14 @@ Hybrid MEMQ v3 is a full rebuild of the OpenClaw memory plugin around one rule:
 
 Each turn uses only three channels, in fixed order:
 
-1. `MEMRULES`
-2. `MEMSTYLE`
-3. `MEMCTX`
+1. `QRULE`
+2. `QSTYLE`
+3. `QCTX`
 
 Rules:
-- `MEMRULES`: strict safety, language, procedure, hard constraints
-- `MEMSTYLE`: persona, tone, speaking style, user naming, first person
-- `MEMCTX`: contextual memory only
+- `QRULE`: strict safety, language, procedure, hard constraints
+- `QSTYLE`: persona, tone, speaking style, user naming, first person
+- `QCTX`: contextual memory only
 
 Cross-channel contamination is rejected.
 
@@ -28,7 +28,7 @@ Cross-channel contamination is rejected.
   - computes total input budget
   - trims recent history dynamically
   - calls sidecar
-  - injects `MEMRULES -> MEMSTYLE -> MEMCTX`
+  - injects `QRULE -> QSTYLE -> QCTX`
 - `sidecar`
   - single source of truth
   - SQLite persistence
@@ -52,9 +52,9 @@ Two explicit profiles exist:
   - deterministic low-quality fallback is allowed
   - for OSS distribution/debugging only
 
-## MemBrain Responsibilities
+## QBRAIN Responsibilities
 
-MemBrain produces plans only:
+QBRAIN produces plans only:
 
 - `IngestPlan`
 - `RecallPlan`
@@ -78,7 +78,7 @@ The sidecar applies Brain plans deterministically:
 - recall
   - FTS/BM25 + `fact_index` + timeline range
   - rerank with confidence / recency / importance / strength / redundancy penalty
-  - pack bounded `MEMCTX`
+  - pack bounded `QCTX`
 - idle merge
   - merge duplicates
   - prune obsolete items
@@ -111,9 +111,36 @@ Retrieval uses:
 
 This keeps recall scalable without embedding dependencies.
 
+## Local Overrides
+
+Users can override `QSTYLE` and `QRULE` locally without editing SQLite:
+
+- `QSTYLE.local.json`
+- `QRULE.local.json`
+
+These files are merged on top of QBRAIN-managed values at injection time.
+Allowed `QSTYLE` keys:
+
+- `tone`
+- `persona`
+- `verbosity`
+- `speaking_style`
+- `callUser`
+- `firstPerson`
+- `prefix`
+
+Allowed `QRULE` prefixes:
+
+- `security.`
+- `language.`
+- `procedure.`
+- `compliance.`
+- `output.`
+- `operation.`
+
 ## Budget Model
 
-`MEMSTYLE` budget is fixed to `120`.
+`QSTYLE` budget is fixed to `120`.
 
 Every turn uses a total cap:
 
@@ -127,9 +154,9 @@ Every turn uses a total cap:
 Recent history is not fixed at 5000 forever.
 It gets the remaining budget after the fixed channels.
 
-## MEMCTX Rules
+## QCTX Rules
 
-`MEMCTX` may be null.
+`QCTX` may be null.
 
 When present, packing starts from:
 
@@ -175,7 +202,7 @@ Each turn records:
 
 The plugin logs:
 
-- `[memq][brain-proof] trace_id=... op=... model=... ps_seen=...`
+- `[memq][qbrain-proof] trace_id=... op=... model=... ps_seen=...`
 
 ## Quick Start
 
@@ -218,5 +245,5 @@ Acceptance:
 3. `昨日何した？` and `最近どうだった？` resolve from timeline memory
 4. `君は誰？` and `家族構成は？` resolve from stored profile memory
 5. total input tokens stay bounded
-6. MEMSTYLE budget never exceeds `120`
+6. QSTYLE budget never exceeds `120`
 7. no secret leakage

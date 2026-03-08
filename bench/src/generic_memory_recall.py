@@ -28,13 +28,13 @@ if __name__ == '__main__':
             'sessionKey': SESSION,
             'prompt': prompt,
             'recentMessages': [{'role': 'user', 'text': prompt}],
-            'budgets': {'memctxTokens':120,'rulesTokens':80,'styleTokens':120},
+            'budgets': {'memctxTokens':500,'rulesTokens':500,'styleTokens':500},
             'topK': 5,
         })
-        results[prompt] = {'memctx': res['memctx'], 'debug': res['meta']['debug']}
+        results[prompt] = {'qctx': res['qctx'], 'debug': res['meta']['debug']}
 
-    assert 'p.snapshot=' in results['君は誰？']['memctx']
-    assert 'p.snapshot=' in results['家族構成は？']['memctx']
-    assert 't.range=' in results['昨日何した？']['memctx']
-    assert 't.recent=' in results['最近の要点は？']['memctx']
+    assert 'p.snapshot=' in results['君は誰？']['qctx']
+    assert 'p.snapshot=' in results['家族構成は？']['qctx']
+    assert 't.range=' in results['昨日何した？']['qctx']
+    assert 't.recent=' in results['最近の要点は？']['qctx']
     print(json.dumps(results, ensure_ascii=False, indent=2))

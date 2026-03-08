@@ -64,11 +64,8 @@ function trimBlockToBudget(text: string, budget: number): string {
   let used = 0;
   for (const line of lines) {
     const cost = estimateTokens(line) + 1;
-    if (kept.length > 0 && used + cost > budget) break;
-    if (kept.length === 0 && cost > budget) {
-      kept.push(line.slice(0, Math.max(16, budget * 4)).trim());
-      break;
-    }
+    if (cost > budget) continue;
+    if (used + cost > budget) continue;
     kept.push(line);
     used += cost;
   }

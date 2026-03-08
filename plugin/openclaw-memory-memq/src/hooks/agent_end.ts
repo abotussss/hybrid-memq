@@ -42,6 +42,6 @@ export function createAgentEnd(api: any, sidecar: SidecarClient, runtime: Runtim
       Number(getCfg(api, "memq.brain.timeoutMs", defaults["memq.brain.timeoutMs"]))
     );
     const traceId = String(response?.traceId || "");
-    logInfo(api, `[memq][brain-proof] turn=agent_end session=${sessionKey} trace_id=${traceId} op=ingest_plan model=${getCfg(api, "memq.brain.model", defaults["memq.brain.model"])} ps_seen=1`);
+    logInfo(api, `[memq][qbrain-proof] turn=agent_end session=${sessionKey} trace_id=${traceId} op=ingest_plan model=${getCfg(api, "memq.brain.model", defaults["memq.brain.model"])} ps_seen=1`);
   };
 }

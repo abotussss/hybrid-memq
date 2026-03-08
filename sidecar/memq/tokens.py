@@ -16,12 +16,10 @@ def fit_lines(lines: list[str], budget_tokens: int) -> list[str]:
         if not line:
             continue
         cost = estimate_tokens(line) + 1
-        if out and used + cost > budget_tokens:
-            break
-        if not out and cost > budget_tokens:
-            trimmed = line[: max(24, budget_tokens * 4)]
-            out.append(trimmed)
-            break
+        if cost > budget_tokens:
+            continue
+        if used + cost > budget_tokens:
+            continue
         out.append(line)
         used += cost
     return out
