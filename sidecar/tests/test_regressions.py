@@ -176,6 +176,8 @@ class RegressionV3Test(unittest.TestCase):
         self.assertFalse(explicit_style_requested("今のstyleを見せて"))
         self.assertTrue(explicit_style_requested("これ記憶しろ。君の人格にインストールね"))
         self.assertTrue(explicit_style_requested("今後の一人称は僕。ヒロって呼んで"))
+        self.assertTrue(explicit_style_requested("callUserをひろにしろ"))
+        self.assertTrue(explicit_style_requested("QSTYLEを書き換えて。ロックマンEXEのロックマンとして振る舞って"))
 
     def test_extract_explicit_style_hints_prefers_user_name_statement(self) -> None:
         text = "QSTYLEを書き換えて。ロックマンEXEのロックマンとして振る舞って。俺の名前はヒロだよ。"
@@ -206,6 +208,7 @@ class RegressionV3Test(unittest.TestCase):
         self.assertFalse(explicit_rule_requested("MEMRULEは？"))
         self.assertFalse(explicit_rule_requested("今のルールを見せて"))
         self.assertTrue(explicit_rule_requested("APIキーとかトークンを外に出すな、それをルールに加えろ"))
+        self.assertTrue(explicit_rule_requested("QRULEを書き換えて。APIキーは外に出すな"))
 
     def test_apply_ingest_plan_style_rules_only_skips_memory_and_events(self) -> None:
         svc = BrainService(self.cfg)

@@ -97,6 +97,7 @@ STYLE_DOMAIN_MARKERS = (
     "で話して",
     "persona",
     "tone",
+    "calluser",
     "speaking style",
     "speaking_style",
     "memstyle",
@@ -149,9 +150,23 @@ def explicit_style_requested(text: str) -> bool:
         return False
     if _contains_any(s, ("人格にインストール", "このキャラで", "この口調で", "ロールプレイ", "なりきって")):
         return True
-    if _contains_any(s, ("一人称は", "呼び方は", "呼称は", "僕って呼んで", "私って呼んで", "ヒロって呼んで", "として話して", "として振る舞")):
+    if _contains_any(
+        lowered,
+        (
+            "一人称は",
+            "呼び方は",
+            "呼称は",
+            "僕って呼んで",
+            "私って呼んで",
+            "ヒロって呼んで",
+            "callUserを",
+            "calluserを",
+            "として話して",
+            "として振る舞",
+        ),
+    ):
         return True
-    return _contains_any(s, STYLE_DOMAIN_MARKERS) and _contains_any(s, UPDATE_MARKERS)
+    return _contains_any(lowered, STYLE_DOMAIN_MARKERS) and _contains_any(s, UPDATE_MARKERS)
 
 
 def explicit_rule_requested(text: str) -> bool:
@@ -163,7 +178,7 @@ def explicit_rule_requested(text: str) -> bool:
         return False
     if _contains_any(s, ("ルールに加えろ", "ルールに追加", "ルールとして覚えて", "これをルールに", "今後は必ず", "外に出すな", "公開するな")):
         return True
-    return _contains_any(s, RULE_DOMAIN_MARKERS) and _contains_any(s, UPDATE_MARKERS)
+    return _contains_any(lowered, RULE_DOMAIN_MARKERS) and _contains_any(s, UPDATE_MARKERS)
 
 
 def _compact_text(text: str, *, limit: int) -> str:
