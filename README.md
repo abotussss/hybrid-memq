@@ -199,6 +199,74 @@ No extra local override JSON files are required.
 - intended for general OSS/debug environments
 - lower quality fallback may be allowed
 
+## QBRAIN model recommendation
+
+### Recommended model
+
+- **Recommended QBRAIN model:** `gpt-oss:20b`
+
+Why this is the current recommendation:
+
+- it is the most reliable local model currently validated for strict `QBRAIN` plan generation in this OSS
+- it works with `brain-required`
+- it is more stable for immediate `QSTYLE` / `QRULE` updates and `QCTX` recall planning than the smaller alternatives tested so far
+
+### Compatible local LLMs
+
+Current implementation is centered on **Ollama-hosted local models**.
+
+Known options:
+
+- `gpt-oss:20b` via Ollama: **recommended**
+- `qwen3.5:9b` via Ollama: **experimental**
+
+### What is not recommended right now
+
+- models that cannot reliably produce strict structured plans
+- non-Ollama providers as the primary `QBRAIN` runtime path
+- smaller models for `brain-required` if plan stability is more important than raw speed
+
+### What is still not fully supported
+
+- OpenAI-compatible non-Ollama providers are not the primary supported `QBRAIN` path yet
+- smaller local models may work for some flows, but can still fail on strict `IngestPlan` / `RecallPlan` generation
+- `qwen3.5:9b` is not the default recommendation because current structured-output stability is weaker than `gpt-oss:20b`
+
+## Installing a local LLM for QBRAIN
+
+Recommended path:
+
+1. install [Ollama](https://ollama.com/)
+2. pull the recommended model:
+
+```bash
+ollama pull gpt-oss:20b
+```
+
+3. verify the model is installed:
+
+```bash
+ollama list
+```
+
+4. run setup:
+
+```bash
+scripts/memq-openclaw.sh setup
+```
+
+5. verify runtime state:
+
+```bash
+curl -sS http://127.0.0.1:7781/health
+```
+
+Expected:
+
+- `qbrain.mode = brain-required`
+- `qbrain.model = gpt-oss:20b`
+- `memoryBackend = memory-lancedb-pro`
+
 ## Main endpoints
 
 ### Public runtime endpoints
@@ -406,6 +474,74 @@ source of truth は `memory-lancedb-pro` と QBRAIN です。
 
 - OSS 配布や debug 向け
 - 品質は落ちるが fallback を許可できる
+
+## QBRAIN の推奨モデル
+
+### 現時点の推奨
+
+- **推奨 QBRAIN モデル:** `gpt-oss:20b`
+
+推奨理由:
+
+- この OSS で strict な `QBRAIN` plan 生成に最も安定している
+- `brain-required` 運用に向いている
+- これまで試した小型モデルより、`QSTYLE` / `QRULE` の即時更新や `QCTX` の recall plan が崩れにくい
+
+### 互換ローカル LLM
+
+現在の実装は **Ollama 上のローカルモデル**を前提にしています。
+
+既知の候補:
+
+- `gpt-oss:20b` via Ollama: **推奨**
+- `qwen3.5:9b` via Ollama: **試験的**
+
+### 現時点で非推奨なもの
+
+- strict な plan を安定して返せないモデル
+- Ollama 以外を主要な `QBRAIN` 実行基盤にする構成
+- `brain-required` で安定性より軽さを優先した小型モデル
+
+### まだ十分に対応していないもの
+
+- Ollama 以外の OpenAI互換 provider は、現時点では主要な `QBRAIN` 実行経路ではありません
+- 小型ローカルモデルは一部フローでは使えても、strict な `IngestPlan` / `RecallPlan` 生成で失敗することがあります
+- `qwen3.5:9b` は試験利用は可能ですが、現時点では `gpt-oss:20b` より structured-output 安定性が弱いです
+
+## QBRAIN 用ローカル LLM の導入
+
+推奨手順:
+
+1. [Ollama](https://ollama.com/) をインストール
+2. 推奨モデルを pull:
+
+```bash
+ollama pull gpt-oss:20b
+```
+
+3. モデルが入っているか確認:
+
+```bash
+ollama list
+```
+
+4. setup 実行:
+
+```bash
+scripts/memq-openclaw.sh setup
+```
+
+5. runtime 状態を確認:
+
+```bash
+curl -sS http://127.0.0.1:7781/health
+```
+
+期待値:
+
+- `qbrain.mode = brain-required`
+- `qbrain.model = gpt-oss:20b`
+- `memoryBackend = memory-lancedb-pro`
 
 ## 主な endpoint
 
