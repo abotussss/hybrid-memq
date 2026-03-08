@@ -1,0 +1,5 @@
+{
+  "language.allowed": "ja,en",
+  "security.never_output_secrets": "true",
+  "output.redact_secret_like": "true"
+}

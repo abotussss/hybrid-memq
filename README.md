@@ -119,6 +119,12 @@ Users can override `QSTYLE` and `QRULE` locally without editing SQLite:
 - `QRULE.local.json`
 
 These files are merged on top of QBRAIN-managed values at injection time.
+They are intended to be user-specific local files and are gitignored.
+Keep the real local files empty unless a specific machine/user needs an override.
+For OSS distribution, use the example templates:
+
+- `QSTYLE.local.example.json`
+- `QRULE.local.example.json`
 Allowed `QSTYLE` keys:
 
 - `tone`
