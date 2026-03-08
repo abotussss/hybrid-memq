@@ -140,6 +140,11 @@ STYLE_NOISE_TERMS = (
     "helper",
 )
 
+RUNTIME_BLOCK_RE = re.compile(
+    r"<(?:QSTYLE|QRULE|QCTX)\b[^>]*>[\s\S]*?</(?:QSTYLE|QRULE|QCTX)\b[^>]*>",
+    re.IGNORECASE,
+)
+
 
 def explicit_style_requested(text: str) -> bool:
     s = str(text or "").strip()
@@ -186,6 +191,12 @@ def _compact_text(text: str, *, limit: int) -> str:
     if len(raw) <= limit:
         return raw
     return raw[: max(0, limit - 1)].rstrip() + "…"
+
+
+def _strip_runtime_blocks(text: str) -> str:
+    raw = str(text or "")
+    stripped = RUNTIME_BLOCK_RE.sub(" ", raw)
+    return " ".join(stripped.split())
 
 
 def _extract_quoted_name(text: str) -> str:
@@ -597,7 +608,8 @@ class BrainService:
             {
                 "session_key": session_key,
                 "user_text": _compact_text(user_text, limit=960),
-                "assistant_text": _compact_text(assistant_text, limit=180),
+                # Assistant-side runtime dumps must not become new style/rule truth.
+                "assistant_text": _compact_text(_strip_runtime_blocks(assistant_text), limit=180),
                 "current_style": _compact_mapping(current_style, max_items=4, max_value_chars=72),
                 "current_rules": _compact_mapping(current_rules, max_items=4, max_value_chars=72),
                 "recent_summary": _compact_text(recent_summary, limit=180),

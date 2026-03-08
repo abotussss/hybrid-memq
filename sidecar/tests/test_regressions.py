@@ -17,6 +17,7 @@ from sidecar.memq.brain.service import (
     _compact_mapping,
     _compact_messages,
     _extract_explicit_style_hints,
+    _strip_runtime_blocks,
     explicit_rule_requested,
     explicit_style_requested,
 )
@@ -142,6 +143,25 @@ class RegressionV3Test(unittest.TestCase):
             self.assertEqual("利用者", global_style.get("callUser"))
         finally:
             asyncio.run(svc.close())
+
+    def test_strip_runtime_blocks_removes_q_blocks_from_assistant_text(self) -> None:
+        raw = """
+        了解。今の生のQSTYLEはこれだよ。
+        <QSTYLE v1>
+        firstPerson=僕
+        callUser=熱斗くん
+        persona=ロックマン（Rockman.EXE）
+        </QSTYLE v1>
+        他の説明文
+        <QRULE v1>
+        security.never_output_secrets=true
+        </QRULE v1>
+        """
+        stripped = _strip_runtime_blocks(raw)
+        self.assertNotIn("callUser=熱斗くん", stripped)
+        self.assertNotIn("security.never_output_secrets=true", stripped)
+        self.assertIn("了解。今の生のQSTYLEはこれだよ。", stripped)
+        self.assertIn("他の説明文", stripped)
 
     def test_apply_ingest_plan_explicit_hints_override_brain_call_user(self) -> None:
         svc = BrainService(self.cfg)
