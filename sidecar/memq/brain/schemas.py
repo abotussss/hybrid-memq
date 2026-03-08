@@ -110,6 +110,12 @@ class BrainIngestPlan(BaseModel):
         return out
 
 
+class BrainPreviewPlan(BaseModel):
+    version: str = "memq_brain_v3"
+    style_update: StyleUpdate | None = None
+    rules_update: RuleUpdate | None = None
+
+
 class IntentWeights(BaseModel):
     timeline: float = Field(default=0.0, ge=0.0, le=1.0)
     profile: float = Field(default=0.0, ge=0.0, le=1.0)

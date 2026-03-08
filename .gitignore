@@ -21,3 +21,6 @@ docs/reports/
 docs/runtime_persistence_*.json
 QSTYLE.local.json
 QRULE.local.json
+QSTYLE.current.json
+QRULE.current.json
+QCTX.current.txt

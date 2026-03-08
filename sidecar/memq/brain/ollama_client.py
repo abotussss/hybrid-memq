@@ -111,6 +111,31 @@ class OllamaClient:
         res.raise_for_status()
         return res.json()
 
+    async def _repair_with_model(self, *, broken_text: str, schema: dict[str, Any], max_tokens: int) -> dict[str, Any]:
+        repair_payload = {
+            "model": self.cfg.model,
+            "stream": False,
+            "keep_alive": self.cfg.keep_alive,
+            "format": schema,
+            "think": False,
+            "options": {
+                "temperature": 0,
+                "num_predict": min(max_tokens, 256),
+            },
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Return exactly one JSON object matching the provided schema. "
+                        "You are repairing a previous malformed JSON candidate. "
+                        "Do not explain. Do not add markdown."
+                    ),
+                },
+                {"role": "user", "content": broken_text},
+            ],
+        }
+        return await self._chat_once(repair_payload)
+
     async def chat_schema(self, *, system: str, user: str, schema_model: type[BaseModel], max_tokens: int | None = None) -> OllamaResult:
         schema = schema_model.model_json_schema()
         token_cap = int(max_tokens or self.cfg.max_tokens)
@@ -161,7 +186,18 @@ class OllamaClient:
                 try:
                     parsed = json.loads(repaired)
                 except json.JSONDecodeError:
-                    raise BrainUnavailable("brain_invalid_json") from exc
+                    try:
+                        repaired_body = await self._repair_with_model(
+                            broken_text=content_raw,
+                            schema=schema,
+                            max_tokens=token_cap,
+                        )
+                        repaired_raw = self._extract_json_text(repaired_body)
+                        repaired_text = self._repair_json_text(repaired_raw)
+                        parsed = json.loads(repaired_text)
+                        body = repaired_body
+                    except Exception:
+                        raise BrainUnavailable("brain_invalid_json") from exc
             validated = schema_model.model_validate(parsed)
             ps = await self._ps_snapshot()
             if ps is None:

@@ -16,6 +16,7 @@ from sidecar.memq.brain.service import (
     BrainService,
     _compact_mapping,
     _compact_messages,
+    _extract_explicit_style_hints,
     explicit_rule_requested,
     explicit_style_requested,
 )
@@ -142,11 +143,49 @@ class RegressionV3Test(unittest.TestCase):
         finally:
             asyncio.run(svc.close())
 
+    def test_apply_ingest_plan_explicit_hints_override_brain_call_user(self) -> None:
+        svc = BrainService(self.cfg)
+        try:
+            plan = BrainIngestPlan.model_validate(
+                {
+                    "style_update": {
+                        "apply": True,
+                        "explicit": True,
+                        "keys": {
+                            "persona": "ゲーム『ロックマンエグゼ』シリーズに登場するネットナビ「ロックマン（Rockman.EXE）」",
+                            "callUser": "熱斗くん",
+                        },
+                    }
+                }
+            )
+            svc.apply_ingest_plan(
+                self.db,
+                session_key="s1",
+                plan=plan,
+                ts=int(time.time()),
+                user_text="QSTYLEを書き換えて。ロックマンEXEのロックマンとして振る舞って。俺の名前はヒロだよ。",
+                style_rules_only=True,
+            )
+            style = self.db.list_style("s1")
+            self.assertEqual("ヒロ", style.get("callUser"))
+        finally:
+            asyncio.run(svc.close())
+
     def test_explicit_style_requested_ignores_inspection_queries(self) -> None:
         self.assertFalse(explicit_style_requested("君のMemstyleはどうなってる？"))
         self.assertFalse(explicit_style_requested("今のstyleを見せて"))
         self.assertTrue(explicit_style_requested("これ記憶しろ。君の人格にインストールね"))
         self.assertTrue(explicit_style_requested("今後の一人称は僕。ヒロって呼んで"))
+
+    def test_extract_explicit_style_hints_prefers_user_name_statement(self) -> None:
+        text = "QSTYLEを書き換えて。ロックマンEXEのロックマンとして振る舞って。俺の名前はヒロだよ。"
+        hints = _extract_explicit_style_hints(text)
+        self.assertEqual("ヒロ", hints.get("callUser"))
+
+    def test_extract_explicit_style_hints_preserves_specific_persona_identity(self) -> None:
+        text = "QSTYLEを書き換えて。あなたはゲーム『ロックマンエグゼ』シリーズに登場するネットナビ「ロックマン（Rockman.EXE）」として振る舞ってください。俺の名前はヒロだよ。"
+        hints = _extract_explicit_style_hints(text)
+        self.assertEqual("ロックマン（Rockman.EXE）", hints.get("persona"))
 
     def test_explicit_rule_requested_ignores_inspection_queries(self) -> None:
         self.assertFalse(explicit_rule_requested("MEMRULEは？"))

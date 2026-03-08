@@ -16,6 +16,7 @@ from sidecar.memq.brain.schemas import (
     BrainAuditPatchPlan,
     BrainIngestPlan,
     BrainMergePlan,
+    BrainPreviewPlan,
     BrainRecallPlan,
 )
 from sidecar.memq.brain.ollama_client import BrainUnavailable, OllamaClient, load_prompt
@@ -47,6 +48,10 @@ UPDATE_MARKERS = (
     "覚えて",
     "インストール",
     "設定して",
+    "書き換えて",
+    "書き換えろ",
+    "上書きして",
+    "上書きしろ",
     "固定して",
     "更新して",
     "変えて",
@@ -78,6 +83,7 @@ INSPECTION_MARKERS = (
 )
 
 STYLE_DOMAIN_MARKERS = (
+    "qstyle",
     "口調",
     "話し方",
     "キャラ",
@@ -98,6 +104,7 @@ STYLE_DOMAIN_MARKERS = (
 )
 
 RULE_DOMAIN_MARKERS = (
+    "qrule",
     "ルール",
     "禁止",
     "守って",
@@ -199,6 +206,10 @@ def _extract_explicit_style_hints(text: str) -> dict[str, str]:
             hints["callUser"] = candidate
     elif match := re.search(r"([^\s、。]{1,24})って呼んで", raw):
         hints["callUser"] = match.group(1).strip("「」\"' ")
+    elif match := re.search(r"(?:俺|ぼく|僕|私|わたし)の名前は\s*([^\s、。！!？?\n]{1,24})", raw):
+        candidate = match.group(1).strip("「」\"' ")
+        if candidate:
+            hints["callUser"] = candidate
 
     if match := re.search(r"ペルソナ(?:は|:|：)\s*([^\n。]{2,120})", raw):
         hints["persona"] = match.group(1).strip("「」\"' ")
@@ -211,7 +222,7 @@ def _extract_explicit_style_hints(text: str) -> dict[str, str]:
                     persona = persona.strip("。 ")
                     if persona:
                         quoted = _extract_quoted_name(persona)
-                        hints["persona"] = quoted or persona
+                        hints["persona"] = (quoted or persona)[:240]
                         break
         if "persona" not in hints:
             quoted = _extract_quoted_name(raw)
@@ -226,6 +237,7 @@ def _extract_explicit_style_hints(text: str) -> dict[str, str]:
 
     for key, value in list(hints.items()):
         clean = " ".join(str(value or "").split()).strip("「」\"' ")
+        clean = re.sub(r"(?:だよ|だね|です|だ|です。|だよ。|だね。)$", "", clean).strip()
         if not clean or _style_value_is_noise(key, clean):
             hints.pop(key, None)
         else:
@@ -505,14 +517,16 @@ class BrainService:
         is_explicit_style = explicit_style_requested(user_text)
         is_explicit_rule = explicit_rule_requested(user_text)
         style_or_rule_install = is_explicit_style or is_explicit_rule
+        explicit_style_hints = _extract_explicit_style_hints(user_text) if is_explicit_style else {}
         user = json.dumps(
             {
                 "session_key": session_key,
-                "user_text": _compact_text(user_text, limit=2200 if style_or_rule_install else 260),
-                "assistant_text": _compact_text(assistant_text, limit=160 if style_or_rule_install else 200),
-                "current_style": _compact_mapping(current_style, max_items=4 if style_or_rule_install else 6, max_value_chars=120 if style_or_rule_install else 80),
-                "current_rules": _compact_mapping(current_rules, max_items=4 if style_or_rule_install else 6, max_value_chars=120 if style_or_rule_install else 80),
-                "recent_summary": _compact_text(recent_summary, limit=120 if style_or_rule_install else 200),
+                "user_text": _compact_text(user_text, limit=1400 if style_or_rule_install else 260),
+                "assistant_text": "" if style_or_rule_install else _compact_text(assistant_text, limit=200),
+                "current_style": {} if style_or_rule_install else _compact_mapping(current_style, max_items=6, max_value_chars=80),
+                "current_rules": {} if style_or_rule_install else _compact_mapping(current_rules, max_items=6, max_value_chars=80),
+                "recent_summary": "" if style_or_rule_install else _compact_text(recent_summary, limit=200),
+                "style_install_hints": explicit_style_hints if style_or_rule_install else {},
                 "explicit_style_request": is_explicit_style,
                 "explicit_rule_request": is_explicit_rule,
             },
@@ -525,6 +539,43 @@ class BrainService:
             user_prompt=user,
             schema_model=BrainIngestPlan,
             max_tokens=self.cfg.brain.ingest_max_tokens,
+        )
+
+    async def build_preview_ingest_plan(
+        self,
+        *,
+        session_key: str,
+        user_text: str,
+        current_style: dict[str, str],
+        current_rules: dict[str, str],
+    ) -> tuple[BrainPreviewPlan, str, dict[str, Any]]:
+        system = self._prompt(
+            "preview_system.txt",
+            "Return JSON only. Extract only explicit style_update and rules_update for the current turn.",
+        )
+        is_explicit_style = explicit_style_requested(user_text)
+        is_explicit_rule = explicit_rule_requested(user_text)
+        explicit_style_hints = _extract_explicit_style_hints(user_text) if is_explicit_style else {}
+        user = json.dumps(
+            {
+                "session_key": session_key,
+                "style_text_excerpt": _compact_text(user_text, limit=520),
+                "current_style": _compact_mapping(current_style, max_items=2, max_value_chars=48),
+                "current_rules": _compact_mapping(current_rules, max_items=2, max_value_chars=48),
+                "style_install_hints": explicit_style_hints,
+                "explicit_style_request": is_explicit_style,
+                "explicit_rule_request": is_explicit_rule,
+                "preview_only": True,
+            },
+            ensure_ascii=False,
+        )
+        return await self._call(
+            session_key=session_key,
+            op="preview_ingest_plan",
+            system_prompt=system,
+            user_prompt=user,
+            schema_model=BrainPreviewPlan,
+            max_tokens=min(self.cfg.brain.ingest_max_tokens, 160),
         )
 
     async def build_recall_plan(
@@ -610,17 +661,22 @@ class BrainService:
         explicit_style_hints = _extract_explicit_style_hints(user_text) if explicit_style else {}
         lancedb_entries: list[dict[str, Any]] = []
         event_payloads: list[dict[str, Any]] = []
-        for fact in plan.facts:
+        plan_facts = list(getattr(plan, "facts", []) or [])
+        plan_events = list(getattr(plan, "events", []) or [])
+        plan_quarantine = list(getattr(plan, "quarantine", []) or [])
+        plan_style_update = getattr(plan, "style_update", None)
+        plan_rules_update = getattr(plan, "rules_update", None)
+        for fact in plan_facts:
             style_key = _style_key_alias(fact.fact_key)
             if style_key and fact.value:
                 style_fact_values[style_key] = fact.value
             if fact.fact_key.startswith(RULE_PREFIXES) and fact.value:
                 rule_fact_values[fact.fact_key] = fact.value
         if not style_rules_only:
-            for item in plan.quarantine:
+            for item in plan_quarantine:
                 db.insert_quarantine(session_key, item.raw_snippet, item.reason, item.risk)
                 wrote["quarantine"] += 1
-            for fact in plan.facts:
+            for fact in plan_facts:
                 if not fact.fact_key.startswith(FACT_KEY_PREFIXES):
                     db.insert_quarantine(session_key, fact.evidence_quote or fact.value, "unknown_fact_key", 0.8)
                     wrote["quarantine"] += 1
@@ -697,7 +753,7 @@ class BrainService:
                         }
                 )
                 wrote["facts"] += 1
-            for event in plan.events:
+            for event in plan_events:
                 if not lancedb_primary:
                     db.insert_event(
                         session_key=session_key,
@@ -776,8 +832,8 @@ class BrainService:
                     )
                     wrote["events"] += 1
         style_values_to_apply: dict[str, str] = {}
-        if plan.style_update and plan.style_update.apply and plan.style_update.explicit:
-            for key, value in plan.style_update.keys.items():
+        if plan_style_update and plan_style_update.apply and plan_style_update.explicit:
+            for key, value in plan_style_update.keys.items():
                 if key not in STYLE_KEYS:
                     continue
                 actual_value = _clean_style_value(key, value or style_fact_values.get(key) or "", user_text=user_text)
@@ -785,7 +841,7 @@ class BrainService:
                     continue
                 style_values_to_apply[key] = actual_value
         if explicit_style:
-            for fact in plan.facts:
+            for fact in plan_facts:
                 key = _style_key_alias(fact.fact_key)
                 if not key:
                     continue
@@ -796,6 +852,9 @@ class BrainService:
                 if not current or _style_value_is_noise(key, current):
                     style_values_to_apply[key] = actual_value
             for key, value in explicit_style_hints.items():
+                if key in {"callUser", "firstPerson", "persona", "tone", "speaking_style"}:
+                    style_values_to_apply[key] = value
+                    continue
                 current = style_values_to_apply.get(key, "")
                 if not current or _style_value_is_noise(key, current) or len(value) > len(current):
                     style_values_to_apply[key] = value
@@ -820,8 +879,8 @@ class BrainService:
                     }
                 )
             wrote["style"] += 1
-        if plan.rules_update and plan.rules_update.apply and plan.rules_update.explicit:
-            for key, value in plan.rules_update.rules.items():
+        if plan_rules_update and plan_rules_update.apply and plan_rules_update.explicit:
+            for key, value in plan_rules_update.rules.items():
                 if not key.startswith(RULE_PREFIXES):
                     continue
                 actual_value = _normalize_rule_value(key, value or rule_fact_values.get(key) or "")
@@ -848,7 +907,7 @@ class BrainService:
                     )
                 wrote["rules"] += 1
         if explicit_rule_requested(user_text):
-            for fact in plan.facts:
+            for fact in plan_facts:
                 if fact.fact_key.startswith(RULE_PREFIXES):
                     actual_value = _normalize_rule_value(fact.fact_key, fact.value)
                     if not actual_value:
