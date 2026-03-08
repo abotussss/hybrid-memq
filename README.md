@@ -226,7 +226,7 @@ Main verification scripts:
 ## Quick start
 
 ```bash
-cd /Users/hiroyukimiyake/Documents/New\ project
+cd /path/to/hybrid-memq
 scripts/memq-openclaw.sh setup
 scripts/memq-openclaw.sh status
 curl -sS http://127.0.0.1:7781/health
@@ -422,7 +422,7 @@ OSS 配布用には example を使います。
 ## クイックスタート
 
 ```bash
-cd /Users/hiroyukimiyake/Documents/New\ project
+cd /path/to/hybrid-memq
 scripts/memq-openclaw.sh setup
 scripts/memq-openclaw.sh status
 curl -sS http://127.0.0.1:7781/health
