@@ -79,16 +79,18 @@ class FakeLanceBackend:
 class FakeSearchLanceBackend:
     def __init__(self) -> None:
         self.search_calls: list[dict[str, object]] = []
+        self.memory_rows: list[dict[str, object]] = []
+        self.timeline_rows: list[dict[str, object]] = []
 
     def enabled(self) -> bool:
         return True
 
     def search_memories(self, **kwargs):
         self.search_calls.append(kwargs)
-        return []
+        return list(self.memory_rows)
 
     def list_entries(self, **kwargs):
-        return []
+        return list(self.timeline_rows)
 
 
 class RegressionV3Test(unittest.TestCase):
@@ -838,6 +840,55 @@ class RegressionV3Test(unittest.TestCase):
         retrieve_with_plan(self.db, session_key="s1", plan=plan, memory_backend=backend)
         self.assertEqual(["fact", "event", "digest"], backend.search_calls[0]["kinds"])
         self.assertEqual(["fact"], backend.search_calls[1]["kinds"])
+
+    def test_retrieve_with_plan_uses_backend_order_as_authority(self) -> None:
+        backend = FakeSearchLanceBackend()
+        now = int(time.time())
+        backend.memory_rows = [
+            {
+                "id": "m-1",
+                "numeric_id": 1,
+                "session_key": "s1",
+                "layer": "deep",
+                "kind": "fact",
+                "fact_key": "project.second",
+                "value": "2番目",
+                "text": "2番目",
+                "summary": "project.second:2番目",
+                "confidence": 0.8,
+                "importance": 0.8,
+                "strength": 0.8,
+                "timestamp": now,
+                "score": 0.95,
+            },
+            {
+                "id": "m-2",
+                "numeric_id": 2,
+                "session_key": "s1",
+                "layer": "deep",
+                "kind": "fact",
+                "fact_key": "project.first",
+                "value": "1番目",
+                "text": "1番目",
+                "summary": "project.first:1番目",
+                "confidence": 0.9,
+                "importance": 0.9,
+                "strength": 0.9,
+                "timestamp": now,
+                "score": 0.20,
+            },
+        ]
+        plan = BrainRecallPlan.model_validate(
+            {
+                "intent": {"fact": 0.9},
+                "fts_queries": ["順序確認"],
+                "retrieval": {"topk_surface": 1, "topk_deep": 2, "topk_events": 1},
+            }
+        )
+        bundle = retrieve_with_plan(self.db, session_key="s1", plan=plan, memory_backend=backend)
+        self.assertEqual("project.second", bundle.deep[0].fact_key)
+        self.assertEqual("project.first", bundle.deep[1].fact_key)
+        self.assertEqual("memory-lancedb-pro", bundle.debug["retrievalAuthority"])
 
     def test_prompt_blueprint_uses_topk_override_and_returns_debug_contract(self) -> None:
         now = int(time.time())

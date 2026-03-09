@@ -11,6 +11,9 @@ from sidecar.memq.brain.schemas import BrainRecallPlan
 from sidecar.memq.lancedb_bridge import LanceDbMemoryBackend
 from sidecar.memq.memory_source import deep_anchor, qctx_profile_snapshot, surface_anchor
 
+FORBIDDEN_MEMORY_FACT_PREFIXES = ("qstyle.", "qrule.")
+RULE_PREFIXES = ("security.", "language.", "procedure.", "compliance.", "output.", "operation.")
+
 
 @dataclass
 class RetrievalBundle:
@@ -390,6 +393,61 @@ def _search_memory(
     )
 
 
+def _backend_filter_memory_results(items: list[SearchResult]) -> list[SearchResult]:
+    kept: list[SearchResult] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in items:
+        if _memory_noise(item):
+            continue
+        fact_key = str(item.fact_key or "").lower()
+        if fact_key.startswith(FORBIDDEN_MEMORY_FACT_PREFIXES):
+            continue
+        payload = _result_text(item)
+        lowered = payload.lower()
+        if any(lowered.startswith(prefix) for prefix in RULE_PREFIXES):
+            continue
+        marker = (
+            str(item.layer or ""),
+            str(item.fact_key or ""),
+            str(item.value or payload),
+        )
+        if marker in seen:
+            continue
+        seen.add(marker)
+        kept.append(item)
+    return kept
+
+
+def _backend_select_memory_results(items: list[SearchResult], *, limit: int) -> list[SearchResult]:
+    if limit <= 0:
+        return []
+    return _backend_filter_memory_results(items)[:limit]
+
+
+def _backend_select_timeline_results(events: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    kept: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for event in events:
+        summary = str(event.get("text") or event.get("summary") or "").strip()
+        if not summary:
+            continue
+        lowered = summary.lower()
+        if "budget_tokens=" in lowered or "<qstyle" in lowered or "<qrule" in lowered or "<qctx" in lowered:
+            continue
+        if any(lowered.startswith(prefix) for prefix in RULE_PREFIXES):
+            continue
+        marker = " ".join(summary.split()).lower()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        kept.append(event)
+        if len(kept) >= limit:
+            break
+    return kept
+
+
 def _search_timeline(
     db: MemqDB,
     memory_backend: LanceDbMemoryBackend | None,
@@ -460,7 +518,16 @@ def retrieve_with_plan(
 ) -> RetrievalBundle:
     queries = [q for q in plan.fts_queries if str(q).strip()]
     fact_keys = [fk for fk in plan.fact_keys if str(fk).strip()]
-    limits = _adaptive_limits(plan, top_k)
+    backend_authoritative = memory_backend is not None and memory_backend.enabled()
+    limits = (
+        {
+            "surface": _resolve_limit(plan.retrieval.topk_surface, top_k),
+            "deep": _resolve_limit(plan.retrieval.topk_deep, top_k),
+            "events": _resolve_limit(plan.retrieval.topk_events, top_k),
+        }
+        if backend_authoritative
+        else _adaptive_limits(plan, top_k)
+    )
 
     surface_candidates = _search_memory(
         db,
@@ -469,11 +536,18 @@ def retrieve_with_plan(
         queries=queries,
         fact_keys=[],
         layer="surface",
-        limit=max(6, limits["surface"] * 4),
+        limit=limits["surface"] if backend_authoritative else max(6, limits["surface"] * 4),
         kinds=["fact", "event", "digest"],
         include_global=False,
     ) if plan.retrieval.allow_surface else []
-    surface = _rerank_memory_results(surface_candidates, plan, preferred_layer="surface", limit=limits["surface"]) if surface_candidates else []
+    if surface_candidates:
+        surface = (
+            _backend_select_memory_results(surface_candidates, limit=limits["surface"])
+            if backend_authoritative
+            else _rerank_memory_results(surface_candidates, plan, preferred_layer="surface", limit=limits["surface"])
+        )
+    else:
+        surface = []
 
     deep_candidates = _search_memory(
         db,
@@ -482,11 +556,18 @@ def retrieve_with_plan(
         queries=queries,
         fact_keys=fact_keys,
         layer="deep",
-        limit=max(6, limits["deep"] * 4),
+        limit=limits["deep"] if backend_authoritative else max(6, limits["deep"] * 4),
         kinds=["fact"],
         include_global=True,
     ) if plan.retrieval.allow_deep else []
-    deep = _rerank_memory_results(deep_candidates, plan, preferred_layer="deep", limit=limits["deep"]) if deep_candidates else []
+    if deep_candidates:
+        deep = (
+            _backend_select_memory_results(deep_candidates, limit=limits["deep"])
+            if backend_authoritative
+            else _rerank_memory_results(deep_candidates, plan, preferred_layer="deep", limit=limits["deep"])
+        )
+    else:
+        deep = []
 
     timeline: list[dict[str, Any]] = []
     if plan.retrieval.allow_timeline and plan.time_range is not None:
@@ -497,9 +578,13 @@ def retrieve_with_plan(
             queries=queries or [plan.time_range.label],
             start_day=plan.time_range.start_day,
             end_day=plan.time_range.end_day,
-            limit=max(6, limits["events"] * 4),
+            limit=limits["events"] if backend_authoritative else max(6, limits["events"] * 4),
         )
-        timeline = _rerank_events(timeline_candidates, plan, limit=limits["events"])
+        timeline = (
+            _backend_select_timeline_results(timeline_candidates, limit=limits["events"])
+            if backend_authoritative
+            else _rerank_events(timeline_candidates, plan, limit=limits["events"])
+        )
 
     qstyle_for_snapshot: dict[str, str] = {}
     if memory_backend is not None and memory_backend.enabled():
@@ -516,7 +601,7 @@ def retrieve_with_plan(
         "wm.deep": deep_anchor(db, memory_backend, session_key),
         "p.snapshot": qctx_profile_snapshot(db, memory_backend, session_key),
     }
-    if plan.intent.profile >= 0.45 and not deep:
+    if not backend_authoritative and plan.intent.profile >= 0.45 and not deep:
         fallback_candidates = _search_memory(
             db,
             memory_backend,
@@ -541,6 +626,7 @@ def retrieve_with_plan(
             "surfaceHits": len(surface),
             "deepHits": len(deep),
             "timelineHits": len(timeline),
+            "retrievalAuthority": "memory-lancedb-pro" if backend_authoritative else "python",
             "memoryBackend": "memory-lancedb-pro" if memory_backend is not None and memory_backend.enabled() else "sqlite",
         },
     )
