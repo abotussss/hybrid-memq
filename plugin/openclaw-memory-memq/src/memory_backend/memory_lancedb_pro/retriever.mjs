@@ -1,24 +1,10 @@
 import { filterNoise } from "./noise-filter.mjs";
 import { normalizeQuery, shouldSkipRetrieval } from "./adaptive-retrieval.mjs";
+import { selectFinalTopKSetwise } from "./final-selection.mjs";
 
 function clamp01(value, fallback = 0) {
   if (!Number.isFinite(value)) return fallback;
   return Math.min(1, Math.max(0, value));
-}
-
-function jaccardFingerprint(text) {
-  const clean = String(text || "").toLowerCase().replace(/\s+/g, " ").trim();
-  if (!clean) return new Set();
-  const grams = new Set();
-  for (let i = 0; i < Math.max(1, clean.length - 2); i += 1) grams.add(clean.slice(i, i + 3));
-  return grams;
-}
-
-function jaccard(a, b) {
-  if (!a.size || !b.size) return 0;
-  let intersection = 0;
-  for (const item of a) if (b.has(item)) intersection += 1;
-  return intersection / (a.size + b.size - intersection || 1);
 }
 
 export class MemoryRetriever {
@@ -35,6 +21,8 @@ export class MemoryRetriever {
       confidenceWeight: 0.1,
       strengthWeight: 0.1,
       lengthNormAnchor: 500,
+      timeDecayHalfLifeDays: 60,
+      sameKeyMultiplier: 0.12,
       ...config,
     };
   }
@@ -58,17 +46,43 @@ export class MemoryRetriever {
     return out * norm;
   }
 
-  dedupe(results, limit) {
-    const out = [];
-    const seen = [];
-    for (const result of results) {
-      const fp = jaccardFingerprint(result.entry.fact_key || result.entry.summary || result.entry.text);
-      if (seen.some((other) => jaccard(other, fp) > 0.9)) continue;
-      seen.push(fp);
-      out.push(result);
-      if (out.length >= limit) break;
-    }
-    return out;
+  applyTimeDecay(score, entry) {
+    const halfLifeDays = Math.max(0, Number(this.config.timeDecayHalfLifeDays || 0));
+    if (!halfLifeDays) return score;
+    const ageDays = Math.max(0, Date.now() / 1000 - Number(entry.timestamp || 0)) / 86400;
+    const multiplier = 0.5 + 0.5 * Math.exp(-ageDays / Math.max(1, halfLifeDays));
+    return score * multiplier;
+  }
+
+  selectResults(results, limit) {
+    const final = selectFinalTopKSetwise(
+      results.map((result) => {
+        const entry = result.entry || {};
+        const text = String(entry.summary || entry.text || entry.value || "");
+        return {
+          id: String(entry.id || ""),
+          text,
+          baseScore: Number(result.score || 0),
+          ts: Number(entry.timestamp || 0) * 1000,
+          normalizedKey: String(entry.fact_key || ""),
+          softKey: String(entry.fact_key || entry.summary || entry.text || ""),
+          category: String(entry.kind || ""),
+          scope: String(entry.session_key || ""),
+          sourceType: String(entry.layer || ""),
+          embedding: Array.isArray(entry.vector) ? entry.vector : [],
+          raw: result,
+        };
+      }),
+      {
+        finalLimit: limit,
+        shortlistLimit: Math.max(limit * 5, Number(this.config.candidatePoolSize || 20)),
+        freshnessHalfLifeMs: Math.max(1, Number(this.config.recencyHalfLifeDays || 14)) * 86400000,
+        penalties: {
+          sameKeyMultiplier: Number(this.config.sameKeyMultiplier || 0.12),
+        },
+      },
+    );
+    return final.map((item) => item.raw);
   }
 
   async retrieve({ query, limit, scopeFilter, layer, kinds, factKeys }) {
@@ -102,11 +116,14 @@ export class MemoryRetriever {
     const filtered = filterNoise([...map.values()], (item) => item.entry.keywords || item.entry.summary || item.entry.text)
       .map((result) => ({
         ...result,
-        score: this.applyMetadata(this.applyRecency(result.score, result.entry), result.entry, factKeys),
+        score: this.applyTimeDecay(
+          this.applyMetadata(this.applyRecency(result.score, result.entry), result.entry, factKeys),
+          result.entry,
+        ),
       }))
       .filter((result) => result.score >= Number(this.config.hardMinScore || 0.2))
       .sort((a, b) => b.score - a.score);
 
-    return this.dedupe(filtered, safeLimit);
+    return this.selectResults(filtered, safeLimit);
   }
 }

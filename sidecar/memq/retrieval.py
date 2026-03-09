@@ -78,6 +78,13 @@ def _recency_bonus(updated_at: int) -> float:
     return 0.22 / (1.0 + age_days / 7.0)
 
 
+def _time_decay_multiplier(updated_at: int, half_life_days: float = 60.0) -> float:
+    if updated_at <= 0 or half_life_days <= 0:
+        return 1.0
+    age_days = max(0.0, (max(0.0, time.time() - updated_at)) / 86400.0)
+    return 0.5 + 0.5 * pow(2.718281828459045, -(age_days / max(1.0, half_life_days)))
+
+
 def _adaptive_limits(plan: BrainRecallPlan, top_k: int | None) -> dict[str, int]:
     limits = {
         "surface": _resolve_limit(plan.retrieval.topk_surface, top_k),
@@ -161,6 +168,51 @@ def _diversify_results(items: list[SearchResult], limit: int) -> list[SearchResu
                 best_score = utility
                 best_index = index
         selected.append(remaining.pop(best_index))
+    return selected
+
+
+def _setwise_select_results(items: list[SearchResult], limit: int) -> list[SearchResult]:
+    if len(items) <= limit:
+        return items[:limit]
+    remaining = list(items)
+    selected: list[SearchResult] = []
+    seen_keys: set[str] = set()
+    seen_kinds: set[str] = set()
+    seen_scopes: set[str] = set()
+    while remaining and len(selected) < max(1, limit):
+        best_index = 0
+        best_score = float("-inf")
+        for index, candidate in enumerate(remaining):
+            payload = _result_text(candidate)
+            utility = float(candidate.score)
+            if candidate.kind and candidate.kind not in seen_kinds:
+                utility += 0.06
+            if candidate.session_key and candidate.session_key not in seen_scopes:
+                utility += 0.04
+            multiplier = 1.0
+            fact_key = str(candidate.fact_key or "").strip().lower()
+            if fact_key and fact_key in seen_keys:
+                multiplier *= 0.12
+            if selected:
+                redundancy = max(_semantic_overlap(payload, _result_text(existing)) for existing in selected)
+                if redundancy >= 0.92:
+                    multiplier *= 0.08
+                elif redundancy >= 0.80:
+                    multiplier *= 0.24
+                elif redundancy >= 0.68:
+                    multiplier *= 0.50
+            adjusted = utility * multiplier
+            if adjusted > best_score:
+                best_score = adjusted
+                best_index = index
+        chosen = remaining.pop(best_index)
+        selected.append(chosen)
+        if chosen.fact_key:
+            seen_keys.add(str(chosen.fact_key).strip().lower())
+        if chosen.kind:
+            seen_kinds.add(str(chosen.kind))
+        if chosen.session_key:
+            seen_scopes.add(str(chosen.session_key))
     return selected
 
 
@@ -250,12 +302,17 @@ def _memory_intent_bonus(item: SearchResult, plan: BrainRecallPlan, *, preferred
 
 def _rerank_memory_results(items: list[SearchResult], plan: BrainRecallPlan, *, preferred_layer: str, limit: int) -> list[SearchResult]:
     reranked = [
-        replace(item, score=item.score + _memory_intent_bonus(item, plan, preferred_layer=preferred_layer))
+        replace(
+            item,
+            score=(item.score + _memory_intent_bonus(item, plan, preferred_layer=preferred_layer))
+            * _time_decay_multiplier(int(item.updated_at or 0)),
+        )
         for item in items
         if _memory_allowed(item, plan)
     ]
     ranked = sorted(reranked, key=lambda item: (item.score, item.updated_at), reverse=True)
-    return _diversify_results(ranked, max(1, limit))
+    diversified = _diversify_results(ranked, max(1, limit * 3))
+    return _setwise_select_results(diversified, max(1, limit))
 
 
 def _event_intent_bonus(event: dict[str, Any], plan: BrainRecallPlan) -> float:

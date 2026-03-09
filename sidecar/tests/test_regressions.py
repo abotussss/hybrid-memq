@@ -1595,6 +1595,62 @@ class RegressionV3Test(unittest.TestCase):
         self.assertIn("project.current", deep_keys)
         self.assertIn("project.next", deep_keys)
 
+    def test_retrieve_with_plan_penalizes_stale_duplicate_keys(self) -> None:
+        now = int(time.time())
+        self.db.insert_memory(
+            session_key="s1",
+            layer="deep",
+            kind="fact",
+            fact_key="project.current",
+            value="最新の設計メモ",
+            text="最新の設計メモ",
+            summary="project.current:最新の設計メモ",
+            confidence=0.9,
+            importance=0.9,
+            strength=0.9,
+            created_at=now,
+        )
+        self.db.insert_memory(
+            session_key="s1",
+            layer="deep",
+            kind="fact",
+            fact_key="project.current",
+            value="古い設計メモ",
+            text="古い設計メモ",
+            summary="project.current:古い設計メモ",
+            confidence=0.9,
+            importance=0.6,
+            strength=0.6,
+            created_at=now - 86400 * 120,
+        )
+        self.db.insert_memory(
+            session_key="s1",
+            layer="deep",
+            kind="fact",
+            fact_key="project.next",
+            value="次の改善項目",
+            text="次の改善項目",
+            summary="project.next:次の改善項目",
+            confidence=0.8,
+            importance=0.8,
+            strength=0.8,
+            created_at=now,
+        )
+        plan = BrainRecallPlan.model_validate(
+            {
+                "intent": {"fact": 0.8},
+                "fts_queries": ["設計 メモ 改善"],
+                "budget_split": {"profile": 0, "timeline": 0, "surface": 20, "deep": 120, "ephemeral": 0},
+                "retrieval": {"allow_surface": False, "allow_deep": True, "allow_timeline": False, "topk_surface": 1, "topk_deep": 2, "topk_events": 1},
+            }
+        )
+        bundle = retrieve_with_plan(self.db, session_key="s1", plan=plan, top_k=2)
+        self.assertEqual(2, len(bundle.deep))
+        summaries = [item.summary for item in bundle.deep]
+        self.assertIn("project.current:最新の設計メモ", summaries)
+        self.assertIn("project.next:次の改善項目", summaries)
+        self.assertNotIn("project.current:古い設計メモ", summaries)
+
     class _Backend:
         def __init__(self, rows_by_kind: dict[str, list[dict[str, object]]]) -> None:
             self.rows_by_kind = rows_by_kind
@@ -1789,6 +1845,35 @@ def _cfg(root: Path) -> Config:
         self.assertIn("t.ev1=テレビの効果を予測モデル", out)
         self.assertNotIn("User asked which TV metrics", out)
         self.assertNotIn("s1=", out)
+
+    def test_build_memctx_profile_prefers_raw_profile_facts_over_snapshot(self):
+        from sidecar.memq.brain.schemas import BrainRecallPlan, IntentWeights, BudgetSplit, RetrievalSettings
+        from sidecar.memq.memctx_pack import build_memctx
+        from sidecar.memq.retrieval import RetrievalBundle
+        from sidecar.memq.db import SearchResult
+
+        plan = BrainRecallPlan(
+            intent=IntentWeights(profile=0.95),
+            time_range=None,
+            fact_keys=["profile.identity.card", "profile.name"],
+            fts_queries=["君は誰 名前"],
+            budget_split=BudgetSplit(profile=200, timeline=0, surface=40, deep=160, ephemeral=0),
+            retrieval=RetrievalSettings(topk_surface=1, topk_deep=3, topk_events=0, allow_deep=True, allow_surface=False, allow_timeline=False),
+        )
+        bundle = RetrievalBundle(
+            surface=[],
+            deep=[
+                SearchResult(id=1, session_key="global", layer="deep", kind="fact", text="ロックマン（Rockman.EXE）", fact_key="profile.identity.card", value="ロックマン（Rockman.EXE）", summary="profile.identity.card:ロックマン（Rockman.EXE）", confidence=1.0, importance=1.0, strength=1.0, updated_at=1, score=1.2),
+                SearchResult(id=2, session_key="global", layer="deep", kind="fact", text="ヒロ", fact_key="profile.name", value="ヒロ", summary="profile.name:ヒロ", confidence=1.0, importance=1.0, strength=1.0, updated_at=1, score=1.1),
+            ],
+            timeline=[],
+            anchors={"p.snapshot": "callUser:ひろ | persona:古い人格 | profile.name:ヒロ"},
+            debug={},
+        )
+        out = build_memctx(plan, bundle, 400)
+        self.assertIn("d1=ロックマン（Rockman.EXE）", out)
+        self.assertIn("d2=ヒロ", out)
+        self.assertNotIn("p.snapshot=", out)
 
     def test_build_memctx_excludes_json_like_deep_payloads(self):
         from sidecar.memq.brain.schemas import BrainRecallPlan, IntentWeights, BudgetSplit, RetrievalSettings

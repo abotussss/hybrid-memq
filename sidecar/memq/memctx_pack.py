@@ -335,6 +335,9 @@ def _profile_lines(plan: BrainRecallPlan, bundle: RetrievalBundle) -> list[str]:
     lines: list[str] = []
     if float(plan.intent.profile) < 0.25:
         return lines
+    has_profile_retrieval = any(str(item.fact_key or "").startswith("profile.") for item in bundle.deep)
+    if has_profile_retrieval:
+        return lines
     snapshot = _sanitize_mem_value(bundle.anchors.get("p.snapshot", ""), "p.snapshot")
     if snapshot:
         lines.append(f"p.snapshot={snapshot}")
@@ -403,7 +406,7 @@ def _deep_lines(plan: BrainRecallPlan, bundle: RetrievalBundle) -> list[str]:
         key=lambda item: (item.score + _line_overlap(plan, f"{item.fact_key} {getattr(item, 'text', '')} {item.value} {item.summary}"), item.updated_at),
         reverse=True,
     )
-    for idx, item in enumerate(deep_items[:4], start=1):
+    for idx, item in enumerate(deep_items[:6], start=1):
         payload = _memory_payload_text(item)
         if not payload:
             continue
