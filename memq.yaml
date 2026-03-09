@@ -1,7 +1,7 @@
 sidecarUrl: http://127.0.0.1:7781
 
 budgets:
-  qctxTokens: 500
+  qctxTokens: 1000
   qruleTokens: 500
   qstyleTokens: 500
 

@@ -1790,6 +1790,33 @@ def _cfg(root: Path) -> Config:
         self.assertNotIn("User asked which TV metrics", out)
         self.assertNotIn("s1=", out)
 
+    def test_build_memctx_excludes_json_like_deep_payloads(self):
+        from sidecar.memq.brain.schemas import BrainRecallPlan, IntentWeights, BudgetSplit, RetrievalSettings
+        from sidecar.memq.memctx_pack import build_memctx
+        from sidecar.memq.retrieval import RetrievalBundle
+
+        plan = BrainRecallPlan(
+            intent=IntentWeights(fact=0.8),
+            time_range=None,
+            fact_keys=[],
+            fts_queries=["memory architecture"],
+            budget_split=BudgetSplit(profile=0, timeline=0, surface=80, deep=200, ephemeral=0),
+            retrieval=RetrievalSettings(topk_surface=2, topk_deep=2, topk_events=0, allow_deep=True, allow_surface=True, allow_timeline=False),
+        )
+        bundle = RetrievalBundle(
+            surface=[],
+            deep=[
+                SearchResult(id=1, session_key="s", layer="deep", kind="fact", text='{"session_key": "lancedb-proof-session"}', fact_key="profile.debug", value='{"session_key": "lancedb-proof-session"}', summary='{"session_key": "lancedb-proof-session"}', confidence=1.0, importance=1.0, strength=1.0, updated_at=1, score=1.0),
+                SearchResult(id=2, session_key="s", layer="deep", kind="fact", text="昨日はOpenClawのrecent contextはそのまま使い、QCTXには必要なヒントだけを渡す設計に整理した。", fact_key="project.design.qctx_bridge", value="昨日はOpenClawのrecent contextはそのまま使い、QCTXには必要なヒントだけを渡す設計に整理した。", summary="昨日はOpenClawのrecent contextはそのまま使い、QCTXには必要なヒントだけを渡す設計に整理した。", confidence=1.0, importance=1.0, strength=1.0, updated_at=2, score=0.9),
+            ],
+            timeline=[],
+            anchors={"wm.surf": "", "wm.deep": "", "p.snapshot": ""},
+            debug={},
+        )
+        out = build_memctx(plan, bundle, 1000)
+        self.assertNotIn('{"session_key"', out)
+        self.assertIn("d1=昨日はOpenClawのrecent contextはそのまま使い", out)
+
 
 
 if __name__ == "__main__":

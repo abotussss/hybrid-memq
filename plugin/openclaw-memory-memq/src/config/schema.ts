@@ -7,7 +7,7 @@ export const defaults = {
   "memq.brain.model": "gpt-oss:20b",
   "memq.brain.keepAlive": "30m",
   "memq.brain.timeoutMs": 60000,
-  "memq.budgets.qctxTokens": 500,
+  "memq.budgets.qctxTokens": 1000,
   "memq.budgets.qruleTokens": 500,
   "memq.budgets.qstyleTokens": 500,
   "memq.total.maxInputTokens": 5200,

@@ -353,6 +353,10 @@ def _memory_payload_text(item) -> str:
         lowered = cleaned.lower()
         if lowered in TECHNICAL_ANCHOR_VALUES:
             continue
+        if cleaned.startswith("{") or cleaned.startswith("["):
+            continue
+        if '"session_key"' in cleaned or "'session_key'" in cleaned:
+            continue
         if _looks_machine_key(cleaned) and " " not in cleaned and "。" not in cleaned and "、" not in cleaned:
             continue
         return cleaned

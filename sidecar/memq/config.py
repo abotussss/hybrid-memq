@@ -128,7 +128,7 @@ def load_config() -> Config:
         port=_env_int("MEMQ_PORT", 7781),
         timezone=_env_str("MEMQ_TIMEZONE", "Asia/Tokyo"),
         budgets=Budgets(
-            qctx_tokens=_env_int("MEMQ_QCTX_TOKENS", _env_int("MEMQ_MEMCTX_TOKENS", 500)),
+            qctx_tokens=_env_int("MEMQ_QCTX_TOKENS", _env_int("MEMQ_MEMCTX_TOKENS", 1000)),
             qrule_tokens=_env_int("MEMQ_QRULE_TOKENS", _env_int("MEMQ_RULES_TOKENS", 500)),
             qstyle_tokens=_env_int("MEMQ_QSTYLE_TOKENS", _env_int("MEMQ_STYLE_TOKENS", 500)),
         ),
