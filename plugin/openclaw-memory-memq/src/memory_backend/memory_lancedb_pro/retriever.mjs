@@ -1,6 +1,7 @@
 import { filterNoise } from "./noise-filter.mjs";
 import { normalizeQuery, shouldSkipRetrieval } from "./adaptive-retrieval.mjs";
 import { selectFinalTopKSetwise } from "./final-selection.mjs";
+import { expandQuery } from "./query-expander.mjs";
 
 function clamp01(value, fallback = 0) {
   if (!Number.isFinite(value)) return fallback;
@@ -87,13 +88,14 @@ export class MemoryRetriever {
 
   async retrieve({ query, limit, scopeFilter, layer, kinds, factKeys }) {
     const normalizedQuery = normalizeQuery(query || "");
+    const expandedQuery = expandQuery(normalizedQuery);
     if (!factKeys?.length && shouldSkipRetrieval(normalizedQuery)) return [];
     const safeLimit = Math.max(1, Math.min(Number(limit || 5), 20));
     const candidatePool = Math.max(safeLimit * 4, Number(this.config.candidatePoolSize || 20));
-    const vector = normalizedQuery ? this.embedder.embedQuery(normalizedQuery) : [];
+    const vector = expandedQuery ? this.embedder.embedQuery(expandedQuery) : [];
     const [vectorResults, bm25Results] = await Promise.all([
-      normalizedQuery ? this.store.vectorSearch(vector, candidatePool, scopeFilter, layer, kinds) : [],
-      normalizedQuery ? this.store.bm25Search(normalizedQuery, candidatePool, scopeFilter, layer, kinds) : [],
+      expandedQuery ? this.store.vectorSearch(vector, candidatePool, scopeFilter, layer, kinds) : [],
+      expandedQuery ? this.store.bm25Search(expandedQuery, candidatePool, scopeFilter, layer, kinds) : [],
     ]);
 
     const map = new Map();
