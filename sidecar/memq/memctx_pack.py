@@ -30,6 +30,50 @@ TECHNICAL_ANCHOR_VALUES = {
 FORBIDDEN_QCTX_FACT_PREFIXES = ("qstyle.", "qrule.")
 
 
+def _contains_cjk(text: str) -> bool:
+    return bool(re.search(r"[぀-ヿ㐀-鿿]", str(text or "")))
+
+
+def _semantic_dedupe_values(values: list[str], threshold: float = 0.72) -> list[str]:
+    kept: list[str] = []
+    for value in values:
+        clean = " ".join(str(value or "").split())
+        if not clean:
+            continue
+        if any(_semantic_overlap_text(clean, existing) >= threshold for existing in kept):
+            continue
+        kept.append(clean)
+    return kept
+
+
+def _semantic_overlap_text(left: str, right: str) -> float:
+    left_tokens = set(re.findall(r"[0-9A-Za-z぀-ヿ㐀-鿿_-]+", str(left or "").lower()))
+    right_tokens = set(re.findall(r"[0-9A-Za-z぀-ヿ㐀-鿿_-]+", str(right or "").lower()))
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / max(1, len(left_tokens | right_tokens))
+
+
+def _prefer_event_payload(item: dict) -> str:
+    raw = _sanitize_mem_value(item.get("text") or "")
+    summary = _sanitize_mem_value(item.get("summary") or "")
+    candidates = [candidate for candidate in (raw, summary) if candidate]
+    if not candidates:
+        return ""
+    scored = []
+    for candidate in candidates:
+        score = 0.0
+        if _contains_cjk(candidate):
+            score += 2.0
+        if "[chat]" not in candidate.lower() and "[digest]" not in candidate.lower():
+            score += 0.6
+        if len(candidate) >= 24:
+            score += 0.2
+        scored.append((score, candidate))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored[0][1]
+
+
 
 def _compact(text: str, limit: int = 120) -> str:
     return " ".join(str(text or "").split())
@@ -380,12 +424,12 @@ def _timeline_lines(plan: BrainRecallPlan, bundle: RetrievalBundle) -> list[str]
         lines.append(f"t.range={plan.time_range.start_day}..{plan.time_range.end_day}")
         lines.append(f"t.label={plan.time_range.label}")
     if bundle.timeline:
-        timeline_items = _dedupe_consecutive_texts([
-            str(item.get("text") or item.get("summary") or "").strip()
-            for item in bundle.timeline[:4]
-            if str(item.get("text") or item.get("summary") or "").strip()
+        timeline_items = _semantic_dedupe_values([
+            _prefer_event_payload(item)
+            for item in bundle.timeline[:6]
+            if _prefer_event_payload(item)
         ])
-        for idx, summary in enumerate(timeline_items, start=1):
+        for idx, summary in enumerate(timeline_items[:4], start=1):
             cleaned = _sanitize_mem_value(summary)
             if cleaned and not _forbidden_qctx_payload(cleaned):
                 lines.append(f"t.ev{idx}={cleaned}")
@@ -404,7 +448,7 @@ def _timeline_lines(plan: BrainRecallPlan, bundle: RetrievalBundle) -> list[str]
                 payload = _memory_payload_text(item)
                 if payload and not _forbidden_qctx_payload(payload):
                     fallback_items.append(payload)
-        for idx, payload in enumerate(_dedupe_consecutive_texts(fallback_items)[:3], start=1):
+        for idx, payload in enumerate(_semantic_dedupe_values(fallback_items)[:3], start=1):
             cleaned = _sanitize_mem_value(payload)
             if cleaned and not _forbidden_qctx_payload(cleaned):
                 lines.append(f"t.ev{idx}={cleaned}")
@@ -500,15 +544,20 @@ def build_memctx(plan: BrainRecallPlan, bundle: RetrievalBundle, budget_tokens: 
             seen.add(priority_timeline)
             sections["timeline"] = [line for line in sections["timeline"] if line != priority_timeline]
     timeline_values = {_line_value(line) for line in selected if line.startswith("t.ev")}
+    has_timeline_payload = bool(timeline_values) or any(line.startswith("t.range=") for line in selected)
     if timeline_values:
         sections["surface"] = [
             line for line in sections["surface"]
             if _line_value(line) not in timeline_values
+            and max((_semantic_overlap_text(_line_value(line), value) for value in timeline_values), default=0.0) < 0.72
         ]
         sections["deep"] = [
             line for line in sections["deep"]
             if _line_value(line) not in timeline_values
+            and max((_semantic_overlap_text(_line_value(line), value) for value in timeline_values), default=0.0) < 0.72
         ]
+    if dominant == "timeline" and has_timeline_payload:
+        sections["surface"] = []
     for line in primary_anchors:
         if line in seen:
             continue
@@ -555,6 +604,16 @@ def build_memctx(plan: BrainRecallPlan, bundle: RetrievalBundle, budget_tokens: 
 
     selected = _filter_memctx_lines(selected)
     selected = _dedupe_lines(selected)
+    timeline_payloads = [_line_value(line) for line in selected if line.startswith("t.ev")]
+    if timeline_payloads:
+        selected = [
+            line for line in selected
+            if not (
+                (line.startswith("s") or line.startswith("d"))
+                and max((_semantic_overlap_text(_line_value(line), payload) for payload in timeline_payloads), default=0.0) >= 0.72
+            )
+        ]
+        selected = _dedupe_lines(selected)
     if not selected:
         return ""
     final_lines = fit_lines(_dedupe_lines(selected), budget_tokens)

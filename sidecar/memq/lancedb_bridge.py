@@ -48,6 +48,7 @@ class LanceDbMemoryBackend:
         fact_keys: list[str],
         layer: str,
         limit: int,
+        kinds: list[str] | None = None,
         include_global: bool = True,
     ) -> list[dict[str, Any]]:
         data = self._run(
@@ -58,6 +59,7 @@ class LanceDbMemoryBackend:
                 "factKeys": fact_keys,
                 "layer": layer,
                 "limit": limit,
+                "kinds": kinds or [],
                 "includeGlobal": include_global,
             },
         )

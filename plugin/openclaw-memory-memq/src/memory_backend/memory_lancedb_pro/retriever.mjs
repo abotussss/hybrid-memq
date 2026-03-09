@@ -71,15 +71,15 @@ export class MemoryRetriever {
     return out;
   }
 
-  async retrieve({ query, limit, scopeFilter, layer, factKeys }) {
+  async retrieve({ query, limit, scopeFilter, layer, kinds, factKeys }) {
     const normalizedQuery = normalizeQuery(query || "");
     if (!factKeys?.length && shouldSkipRetrieval(normalizedQuery)) return [];
     const safeLimit = Math.max(1, Math.min(Number(limit || 5), 20));
     const candidatePool = Math.max(safeLimit * 4, Number(this.config.candidatePoolSize || 20));
     const vector = normalizedQuery ? this.embedder.embedQuery(normalizedQuery) : [];
     const [vectorResults, bm25Results] = await Promise.all([
-      normalizedQuery ? this.store.vectorSearch(vector, candidatePool, scopeFilter, layer) : [],
-      normalizedQuery ? this.store.bm25Search(normalizedQuery, candidatePool, scopeFilter, layer) : [],
+      normalizedQuery ? this.store.vectorSearch(vector, candidatePool, scopeFilter, layer, kinds) : [],
+      normalizedQuery ? this.store.bm25Search(normalizedQuery, candidatePool, scopeFilter, layer, kinds) : [],
     ]);
 
     const map = new Map();

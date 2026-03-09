@@ -173,10 +173,13 @@ def _diversify_events(events: list[dict[str, Any]], limit: int) -> list[dict[str
         best_index = 0
         best_score = float("-inf")
         for index, candidate in enumerate(remaining):
-            cand_text = str(candidate.get("summary") or "")
+            cand_text = str(candidate.get("text") or candidate.get("summary") or "")
             redundancy = 0.0
             if selected:
-                redundancy = max(_semantic_overlap(cand_text, str(existing.get("summary") or "")) for existing in selected)
+                redundancy = max(
+                    _semantic_overlap(cand_text, str(existing.get("text") or existing.get("summary") or ""))
+                    for existing in selected
+                )
             utility = float(candidate.get("_rank_score") or 0.0) - redundancy * 0.30
             if utility > best_score:
                 best_score = utility
@@ -256,7 +259,7 @@ def _rerank_memory_results(items: list[SearchResult], plan: BrainRecallPlan, *, 
 
 
 def _event_intent_bonus(event: dict[str, Any], plan: BrainRecallPlan) -> float:
-    summary = str(event.get("summary") or "")
+    summary = str(event.get("text") or event.get("summary") or "")
     score = float(event.get("salience") or 0.0) * 0.60
     score += _lexical_overlap(plan.fts_queries, summary) * 0.50
     if plan.time_range is not None and str(event.get("day_key") or "") in {plan.time_range.start_day, plan.time_range.end_day}:
@@ -306,6 +309,7 @@ def _search_memory(
     fact_keys: list[str],
     layer: str,
     limit: int,
+    kinds: list[str] | None,
     include_global: bool,
 ) -> list[SearchResult]:
     if memory_backend is not None and memory_backend.enabled():
@@ -315,6 +319,7 @@ def _search_memory(
             fact_keys=fact_keys,
             layer=layer,
             limit=limit,
+            kinds=kinds,
             include_global=include_global,
         )
         return [_dict_to_search_result(row) for row in rows]
@@ -345,7 +350,8 @@ def _search_timeline(
             include_global=False,
             limit=max(12, limit * 6),
         )
-        out: list[dict[str, Any]] = []
+        event_rows: list[dict[str, Any]] = []
+        digest_rows: list[dict[str, Any]] = []
         for row in rows:
             ts = int(row.get("timestamp") or 0)
             if not ts:
@@ -353,12 +359,14 @@ def _search_timeline(
             day_key = datetime.fromtimestamp(ts, tz=db.timezone).strftime("%Y-%m-%d")
             if day_key < start_day or day_key > end_day:
                 continue
-            summary = str(row.get("summary") or row.get("text") or "").strip()
-            if not summary:
+            raw_text = str(row.get("text") or "").strip()
+            summary = str(row.get("summary") or raw_text).strip()
+            if not raw_text and not summary:
                 continue
-            out.append(
+            entry = (
                 {
                     "id": row.get("id"),
+                    "text": raw_text,
                     "summary": summary,
                     "ts": ts,
                     "day_key": day_key,
@@ -367,6 +375,11 @@ def _search_timeline(
                     "salience": float(row.get("importance") or row.get("strength") or 0.5),
                 }
             )
+            if str(row.get("kind") or "event") == "event":
+                event_rows.append(entry)
+            else:
+                digest_rows.append(entry)
+        out = event_rows if event_rows else digest_rows
         if out:
             return out[: max(1, limit * 4)]
         return []
@@ -400,6 +413,7 @@ def retrieve_with_plan(
         fact_keys=[],
         layer="surface",
         limit=max(6, limits["surface"] * 4),
+        kinds=["fact", "event", "digest"],
         include_global=False,
     ) if plan.retrieval.allow_surface else []
     surface = _rerank_memory_results(surface_candidates, plan, preferred_layer="surface", limit=limits["surface"]) if surface_candidates else []
@@ -412,6 +426,7 @@ def retrieve_with_plan(
         fact_keys=fact_keys,
         layer="deep",
         limit=max(6, limits["deep"] * 4),
+        kinds=["fact"],
         include_global=True,
     ) if plan.retrieval.allow_deep else []
     deep = _rerank_memory_results(deep_candidates, plan, preferred_layer="deep", limit=limits["deep"]) if deep_candidates else []
@@ -453,6 +468,7 @@ def retrieve_with_plan(
             fact_keys=["profile.identity.card"],
             layer="deep",
             limit=max(2, limits["deep"] * 2),
+            kinds=["fact"],
             include_global=True,
         )
         deep = _rerank_memory_results(fallback_candidates, plan, preferred_layer="deep", limit=limits["deep"]) or deep

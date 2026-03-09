@@ -76,6 +76,79 @@ def _strip_runtime_blocks(text: str) -> str:
     return " ".join(stripped.split())
 
 
+def _turn_event_text(text: str) -> str:
+    return " ".join(_strip_runtime_blocks(text).split()).strip()
+
+
+def _append_turn_event(
+    *,
+    lancedb_primary: bool,
+    db: MemqDB,
+    session_key: str,
+    lancedb_entries: list[dict[str, Any]],
+    event_payloads: list[dict[str, Any]],
+    wrote: dict[str, int],
+    ts: int,
+    actor: str,
+    text: str,
+    kind: str = "chat",
+    salience: float = 0.45,
+) -> None:
+    raw_text = _turn_event_text(text)[:400]
+    if len(raw_text) < 8:
+        return
+    summary = raw_text[:160]
+    duplicate = next(
+        (
+            True
+            for item in event_payloads
+            if str(item.get("actor") or "") == actor
+            and str(item.get("text") or "") == raw_text
+        ),
+        False,
+    )
+    if duplicate:
+        return
+    if not lancedb_primary:
+        db.insert_event(
+            session_key=session_key,
+            ts=ts,
+            actor=actor,
+            kind=kind,
+            summary=summary,
+            salience=salience,
+            keywords=[],
+            ttl_days=21,
+        )
+    event_payloads.append(
+        {
+            "summary": summary,
+            "kind": kind,
+            "actor": actor,
+            "ts": ts,
+            "salience": salience,
+            "text": raw_text,
+        }
+    )
+    lancedb_entries.append(
+        {
+            "id": f"{session_key}:event:{kind}:{actor}:{ts}:raw:{wrote['events']}",
+            "session_key": session_key,
+            "layer": "surface",
+            "kind": "event",
+            "fact_key": f"event.{kind}.{actor}",
+            "value": summary,
+            "text": raw_text,
+            "summary": summary,
+            "importance": salience,
+            "confidence": 1.0,
+            "strength": salience,
+            "timestamp": ts,
+        }
+    )
+    wrote["events"] += 1
+
+
 def _extract_quoted_name(text: str) -> str:
     for pattern in (r"「([^」]{2,80})」", r'"([^"]{2,80})"'):
         match = re.search(pattern, text)
@@ -836,6 +909,7 @@ class BrainService:
         plan: BrainIngestPlan,
         ts: int,
         user_text: str = "",
+        assistant_text: str = "",
         style_rules_only: bool = False,
         memory_backend: "LanceDbMemoryBackend | None" = None,
     ) -> dict[str, int]:
@@ -942,11 +1016,17 @@ class BrainService:
                 raw_event_text = ""
                 actor_name = str(event.actor or "").lower()
                 if actor_name == "user":
-                    raw_event_text = " ".join(str(user_text or "").split())[:400]
+                    raw_event_text = _turn_event_text(user_text)[:400]
                 elif actor_name == "assistant":
-                    raw_event_text = " ".join(str(assistant_text or "").split())[:400]
+                    raw_event_text = _turn_event_text(assistant_text)[:400]
                 if not raw_event_text:
                     raw_event_text = event.summary
+                # When LanceDB is the memory authority, prefer raw turn events over
+                # model-generated synthetic event summaries. Those summaries can stay
+                # in the plan for metadata/debug purposes, but QCTX should retrieve
+                # actual remembered text rather than compressed paraphrases.
+                if lancedb_primary:
+                    continue
                 if not lancedb_primary:
                     db.insert_event(
                         session_key=session_key,
@@ -985,10 +1065,36 @@ class BrainService:
                     }
                 )
                 wrote["events"] += 1
+            _append_turn_event(
+                lancedb_primary=lancedb_primary,
+                db=db,
+                session_key=session_key,
+                lancedb_entries=lancedb_entries,
+                event_payloads=event_payloads,
+                wrote=wrote,
+                ts=ts,
+                actor="user",
+                text=user_text,
+                kind="chat",
+                salience=0.52,
+            )
+            _append_turn_event(
+                lancedb_primary=lancedb_primary,
+                db=db,
+                session_key=session_key,
+                lancedb_entries=lancedb_entries,
+                event_payloads=event_payloads,
+                wrote=wrote,
+                ts=ts,
+                actor="assistant",
+                text=assistant_text,
+                kind="chat",
+                salience=0.36,
+            )
             if wrote["events"] == 0:
-                fallback_summary = " ".join(str(user_text or "").split())[:160]
+                fallback_summary = _turn_event_text(user_text)[:160]
                 if fallback_summary:
-                    raw_event_text = " ".join(str(user_text or "").split())[:400]
+                    raw_event_text = _turn_event_text(user_text)[:400]
                     if not lancedb_primary:
                         db.insert_event(
                             session_key=session_key,

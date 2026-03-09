@@ -76,6 +76,21 @@ class FakeLanceBackend:
         self.entries.extend(entries)
 
 
+class FakeSearchLanceBackend:
+    def __init__(self) -> None:
+        self.search_calls: list[dict[str, object]] = []
+
+    def enabled(self) -> bool:
+        return True
+
+    def search_memories(self, **kwargs):
+        self.search_calls.append(kwargs)
+        return []
+
+    def list_entries(self, **kwargs):
+        return []
+
+
 class RegressionV3Test(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -480,6 +495,27 @@ class RegressionV3Test(unittest.TestCase):
         finally:
             asyncio.run(svc.close())
 
+    def test_apply_ingest_plan_always_persists_raw_turn_events_for_lancedb(self) -> None:
+        svc = BrainService(self.cfg)
+        backend = FakeLanceBackend()
+        try:
+            plan = BrainIngestPlan.model_validate({"facts": [], "events": []})
+            wrote = svc.apply_ingest_plan(
+                self.db,
+                session_key="s1",
+                plan=plan,
+                ts=int(time.time()),
+                user_text="テレビ効果を予測モデルに組み込むとき、GRPと有効リーチのどちらを重視するべきですか？",
+                assistant_text="有効リーチ、フリークエンシー、Adstock化GRPの3つを主軸にすると整理しやすいです。",
+                memory_backend=backend,
+            )
+            self.assertGreaterEqual(wrote["events"], 2)
+            event_texts = [str(entry.get("text") or "") for entry in backend.entries if entry.get("kind") == "event"]
+            self.assertTrue(any("テレビ効果を予測モデル" in text for text in event_texts))
+            self.assertTrue(any("有効リーチ、フリークエンシー" in text for text in event_texts))
+        finally:
+            asyncio.run(svc.close())
+
     def test_apply_ingest_plan_qwen_style_key_list_uses_fact_values(self) -> None:
         svc = BrainService(self.cfg)
         try:
@@ -788,6 +824,20 @@ class RegressionV3Test(unittest.TestCase):
         )
         bundle = retrieve_with_plan(self.db, session_key="s1", plan=plan, top_k=4)
         self.assertTrue(all(not item.fact_key.startswith("qstyle.") and not item.fact_key.startswith("qrule.") for item in bundle.deep))
+
+    def test_retrieve_with_plan_requests_memory_kinds_for_qctx_search(self) -> None:
+        backend = FakeSearchLanceBackend()
+        plan = BrainRecallPlan.model_validate(
+            {
+                "intent": {"profile": 0.7, "fact": 0.2},
+                "fact_keys": ["profile.identity.card"],
+                "fts_queries": ["ロックマン EXE"],
+                "retrieval": {"topk_surface": 2, "topk_deep": 2, "topk_events": 2},
+            }
+        )
+        retrieve_with_plan(self.db, session_key="s1", plan=plan, memory_backend=backend)
+        self.assertEqual(["fact", "event", "digest"], backend.search_calls[0]["kinds"])
+        self.assertEqual(["fact"], backend.search_calls[1]["kinds"])
 
     def test_prompt_blueprint_uses_topk_override_and_returns_debug_contract(self) -> None:
         now = int(time.time())
@@ -1376,7 +1426,7 @@ class RegressionV3Test(unittest.TestCase):
         memctx = build_memctx(plan, bundle, 240)
         self.assertNotIn("qstyle.", memctx.lower())
         self.assertNotIn("qrule.", memctx.lower())
-        self.assertIn("通常の要約", memctx)
+        self.assertNotIn("通常の要約", memctx)
         self.assertIn("昨日は設計変更をした", memctx)
 
     def test_build_memctx_excludes_rule_payloads_from_wm_deep(self) -> None:
@@ -1709,6 +1759,37 @@ def _cfg(root: Path) -> Config:
             allowed_languages_default=("ja", "en"),
         ),
     )
+
+
+    def test_build_memctx_timeline_prefers_raw_event_and_drops_surface_duplicates(self):
+        from sidecar.memq.brain.schemas import BrainRecallPlan, IntentWeights, TimeRange, BudgetSplit, RetrievalSettings
+        from sidecar.memq.memctx_pack import build_memctx
+        from sidecar.memq.retrieval import RetrievalBundle
+        from sidecar.memq.db import SearchResult
+
+        plan = BrainRecallPlan(
+            intent=IntentWeights(timeline=0.9),
+            time_range=TimeRange(start_day="2026-03-09", end_day="2026-03-09", label="today"),
+            fact_keys=[],
+            fts_queries=["テレビ 指標 DLM"],
+            budget_split=BudgetSplit(profile=0, timeline=300, surface=120, deep=120, ephemeral=0),
+            retrieval=RetrievalSettings(topk_surface=3, topk_deep=2, topk_events=3, allow_deep=True, allow_surface=True, allow_timeline=True),
+        )
+        bundle = RetrievalBundle(
+            surface=[SearchResult(id=1, session_key="s", layer="surface", kind="fact", text="", fact_key="profile.note", value="", summary="User asked which TV metrics should be used in a predictive model with Bayesian DLM", confidence=1.0, importance=1.0, strength=1.0, updated_at=1, score=1.0)],
+            deep=[],
+            timeline=[
+                {"text": "テレビの効果を予測モデルに組み込んでいる場合に、テレビはどの指標を使うべき？ KPIじゃなくてKPIに寄与するTV指標やDLMの前提を話した。", "summary": "User asked which TV metrics should be used in a predictive model with Bayesian DLM", "day_key": "2026-03-09", "ts": 1, "kind": "event", "salience": 0.9},
+                {"text": "", "summary": "User asked which TV metrics should be used in a predictive model with Bayesian DLM", "day_key": "2026-03-09", "ts": 2, "kind": "event", "salience": 0.8},
+            ],
+            anchors={"wm.surf": "", "wm.deep": "", "p.snapshot": ""},
+            debug={},
+        )
+        out = build_memctx(plan, bundle, 500)
+        self.assertIn("t.ev1=テレビの効果を予測モデル", out)
+        self.assertNotIn("User asked which TV metrics", out)
+        self.assertNotIn("s1=", out)
+
 
 
 if __name__ == "__main__":

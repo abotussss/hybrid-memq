@@ -113,7 +113,7 @@ export class MemoryStore {
     return rows;
   }
 
-  async vectorSearch(vector, limit = 5, scopeFilter, layer) {
+  async vectorSearch(vector, limit = 5, scopeFilter, layer, kinds) {
     await this.ensureInitialized();
     const safeLimit = clampInt(limit, 1, 50);
     let query = this.table.vectorSearch(vector).limit(Math.max(safeLimit * 6, 24));
@@ -122,6 +122,7 @@ export class MemoryStore {
       clauses.push(`(${scopeFilter.map((scope) => `session_key = '${escapeSqlLiteral(scope)}'`).join(" OR ")})`);
     }
     if (layer) clauses.push(`layer = '${escapeSqlLiteral(layer)}'`);
+    if (kinds?.length) clauses.push(`(${kinds.map((kind) => `kind = '${escapeSqlLiteral(kind)}'`).join(" OR ")})`);
     if (clauses.length) query = query.where(clauses.join(" AND "));
     const results = await query.toArray().catch(() => []);
     return results.map((row) => ({
@@ -145,7 +146,7 @@ export class MemoryStore {
     }));
   }
 
-  async bm25Search(queryText, limit = 5, scopeFilter, layer) {
+  async bm25Search(queryText, limit = 5, scopeFilter, layer, kinds) {
     await this.ensureInitialized();
     if (!this.ftsIndexCreated) return [];
     const safeLimit = clampInt(limit, 1, 50);
@@ -155,6 +156,7 @@ export class MemoryStore {
       clauses.push(`(${scopeFilter.map((scope) => `session_key = '${escapeSqlLiteral(scope)}'`).join(" OR ")})`);
     }
     if (layer) clauses.push(`layer = '${escapeSqlLiteral(layer)}'`);
+    if (kinds?.length) clauses.push(`(${kinds.map((kind) => `kind = '${escapeSqlLiteral(kind)}'`).join(" OR ")})`);
     if (clauses.length) query = query.where(clauses.join(" AND "));
     const results = await query.toArray().catch(() => []);
     return results.map((row) => ({

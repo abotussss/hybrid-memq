@@ -40,12 +40,14 @@ async function query(payload) {
   const scopes = payload.includeGlobal === false ? [sessionKey] : [sessionKey, "global"];
   const queryText = normalizeText([...(payload.queries || []), ...(payload.factKeys || [])].join(" "));
   const limit = Math.max(1, Number(payload.limit || 5));
+  const kinds = Array.isArray(payload.kinds) ? payload.kinds.map((item) => String(item || "")) : [];
   const { retriever } = createBackend(payload.dbPath);
   const results = await retriever.retrieve({
     query: queryText,
     limit,
     scopeFilter: scopes,
     layer: payload.layer,
+    kinds,
     factKeys: payload.factKeys || [],
   });
   const items = results.map((result) => ({
