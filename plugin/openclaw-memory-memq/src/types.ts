@@ -35,4 +35,5 @@ export interface RuntimeState {
   lastUserBySession: Map<string, string>;
   lastPromptBySession: Map<string, string>;
   lastMemstyleBySession: Map<string, string>;
+  lastSessionSanitizeAtMs: number;
 }

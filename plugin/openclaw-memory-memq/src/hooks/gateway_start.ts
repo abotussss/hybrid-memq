@@ -1,5 +1,6 @@
 import { defaults, getCfg, logInfo } from "../config/schema.js";
 import { SidecarClient } from "../lib/sidecar_client.js";
+import { sanitizeOpenClawSessions } from "../lib/session_sanitizer.js";
 
 export function createGatewayStart(api: any, sidecar: SidecarClient) {
   return async (): Promise<void> => {
@@ -12,9 +13,16 @@ export function createGatewayStart(api: any, sidecar: SidecarClient) {
       MEMQ_BRAIN_KEEP_ALIVE: String(getCfg(api, "memq.brain.keepAlive", defaults["memq.brain.keepAlive"])),
       MEMQ_BRAIN_TIMEOUT_MS: String(getCfg(api, "memq.brain.timeoutMs", defaults["memq.brain.timeoutMs"])),
     };
+    const sessionRepair = await sanitizeOpenClawSessions();
     const ok = await sidecar.ensureUp(workspaceRoot, env);
     if (!ok) throw new Error("memq_sidecar_start_failed");
     await sidecar.bootstrapImportMd(workspaceRoot);
     logInfo(api, `[memq-v3] gateway_start sidecar_ready=1 brain_model=${env.MEMQ_BRAIN_MODEL}`);
+    if (sessionRepair.filesChanged > 0) {
+      logInfo(
+        api,
+        `[memq-v3] session_sanitizer files_scanned=${sessionRepair.filesScanned} files_changed=${sessionRepair.filesChanged} ids_normalized=${sessionRepair.idsNormalized}`
+      );
+    }
   };
 }

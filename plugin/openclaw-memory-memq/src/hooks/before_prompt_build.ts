@@ -1,5 +1,6 @@
 import { defaults, getCfg, logInfo } from "../config/schema.js";
 import { composeInjectedBlocks } from "../lib/memctx_blocks.js";
+import { sanitizeOpenClawSessions } from "../lib/session_sanitizer.js";
 import { SidecarClient } from "../lib/sidecar_client.js";
 import { enforceTotalInputCap, trimRecentToBudget } from "../lib/token_budget.js";
 import { normalizeMessages } from "../lib/token_estimate.js";
@@ -14,6 +15,14 @@ export function createBeforePromptBuild(api: any, sidecar: SidecarClient, runtim
     const sessionKey = sessionKeyOf(event, hookCtx);
     const prompt = String(event?.prompt ?? "");
     runtime.lastPromptBySession.set(sessionKey, prompt);
+    if (Date.now() - runtime.lastSessionSanitizeAtMs > 60_000) {
+      runtime.lastSessionSanitizeAtMs = Date.now();
+      try {
+        await sanitizeOpenClawSessions({ maxAgeHours: 48 });
+      } catch {
+        // best-effort; never block prompt building on log repair
+      }
+    }
     const messages = normalizeMessages(Array.isArray(event?.messages) ? event.messages : []);
     const lastUser = [...messages].reverse().find((message) => message.role === "user");
     if (lastUser?.text) runtime.lastUserBySession.set(sessionKey, lastUser.text);

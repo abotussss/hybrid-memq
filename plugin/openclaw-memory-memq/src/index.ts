@@ -13,6 +13,7 @@ export default function register(api: any): void {
     lastUserBySession: new Map(),
     lastPromptBySession: new Map(),
     lastMemstyleBySession: new Map(),
+    lastSessionSanitizeAtMs: 0,
   };
   const on = typeof api.on === "function"
     ? api.on.bind(api)
