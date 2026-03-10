@@ -18,10 +18,10 @@ Upstream reference for the memory backend:
 
 Credit:
 
-- This sidecar uses a bundled/adapted integration derived from `memory-lancedb-pro`.
+- This sidecar vendors and uses the upstream `memory-lancedb-pro` source directly as the memory backend.
 - Thanks to the upstream author and contributors for the original work.
 
-This repo uses a bundled/adapted integration of that backend. Users normally do not install the upstream repository separately.
+This repo vendors that upstream backend directly. Users normally do not install the upstream repository separately.
 
 Main endpoints:
 
@@ -53,10 +53,10 @@ memory backend の上流リポジトリ:
 
 謝辞:
 
-- この sidecar は `memory-lancedb-pro` をもとにした bundled / adapted integration を利用しています。
+- この sidecar は、上流 `memory-lancedb-pro` source を vendor して、そのまま memory backend として使います。
 - 元の実装を公開している作者と貢献者に感謝します。
 
-この repo では、その backend を bundled / adapted integration として含めています。
+この repo では、その backend の上流 source を vendor して含めています。
 通常利用では、上流リポジトリを別途 install しません。
 
 主な endpoint:

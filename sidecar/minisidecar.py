@@ -218,7 +218,7 @@ async def health() -> dict[str, Any]:
             "path": str(cfg.lancedb_path),
             "helper": str(cfg.lancedb_helper),
             "enabled": memory_backend.enabled(),
-            "implementation": "memory-lancedb-pro-adapted" if memory_backend.enabled() else "disabled",
+            "implementation": "memory-lancedb-pro" if memory_backend.enabled() else "disabled",
         },
         "idle": {
             "enabled": cfg.idle_enabled,

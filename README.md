@@ -60,11 +60,11 @@ Upstream project:
 
 Credit:
 
-- This project uses a bundled/adapted integration derived from `memory-lancedb-pro`.
+- This project vendors and uses the upstream `memory-lancedb-pro` source directly as the memory backend.
 - Thanks to the upstream author and contributors of `win4r/memory-lancedb-pro` for the original design and implementation work.
 
 This OSS does not require users to clone that upstream repository as a separate step.
-Instead, this repo includes a bundled and adapted integration based on that project, and `setup` enables that integration automatically.
+Instead, this repo vendors the upstream source under `vendor/memory-lancedb-pro`, and `setup` enables that backend automatically.
 
 It stores:
 
@@ -301,14 +301,14 @@ scripts/memq-openclaw.sh status
 curl -sS http://127.0.0.1:7781/health
 ```
 
-`scripts/memq-openclaw.sh setup` configures the plugin and sidecar to use the bundled `memory-lancedb-pro` integration automatically.
+`scripts/memq-openclaw.sh setup` configures the plugin and sidecar to use the vendored upstream `memory-lancedb-pro` backend automatically.
 
 Upstream reference:
 
 - [win4r/memory-lancedb-pro](https://github.com/win4r/memory-lancedb-pro)
 
 For this OSS, users normally do **not** perform a separate install of the upstream repository.
-The adapted integration used by MEMQ is already included in this repo and is enabled by `setup`.
+The upstream source is vendored into this repo and is enabled by `setup`.
 
 ---
 
@@ -369,11 +369,11 @@ sidecar は実行時の制御面です。
 
 謝辞:
 
-- この OSS では `memory-lancedb-pro` をもとにした bundled / adapted integration を利用しています。
+- この OSS では `memory-lancedb-pro` の上流 source を vendor して、そのまま memory backend として使います。
 - 元の設計と実装を公開している `win4r/memory-lancedb-pro` の作者と貢献者に感謝します。
 
 この OSS では、上流リポジトリを別途 clone / install する前提ではありません。
-代わりに、この repo 内に上流をもとにした bundled / adapted integration を含めており、`setup` がそれを有効化します。
+代わりに、この repo 内の `vendor/memory-lancedb-pro` に上流 source を同梱し、`setup` がそれを有効化します。
 
 保持対象:
 
@@ -582,4 +582,4 @@ curl -sS http://127.0.0.1:7781/health
 - [win4r/memory-lancedb-pro](https://github.com/win4r/memory-lancedb-pro)
 
 この OSS の通常利用では、上流リポジトリを別途 install する必要はありません。
-この repo に含まれている adapted integration をそのまま使います。
+この repo に vendor した upstream source をそのまま使います。

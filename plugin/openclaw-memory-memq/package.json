@@ -13,7 +13,10 @@
     ]
   },
   "dependencies": {
-    "@lancedb/lancedb": "^0.26.2"
+    "@lancedb/lancedb": "^0.26.2",
+    "@sinclair/typebox": "^0.34.48",
+    "jiti": "^2.6.0",
+    "openai": "^6.21.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

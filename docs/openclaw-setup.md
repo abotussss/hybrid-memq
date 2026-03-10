@@ -22,10 +22,10 @@ Upstream reference:
 
 Credit:
 
-- This setup enables a bundled/adapted integration derived from `memory-lancedb-pro`.
+- This setup enables the vendored upstream `memory-lancedb-pro` backend.
 - Thanks to the upstream author and contributors.
 
-This setup uses the bundled/adapted integration included in this repo.
+This setup uses the vendored upstream source included in this repo.
 You do not normally install the upstream repository separately for this OSS.
 
 ## 日本語
@@ -50,8 +50,8 @@ curl -sS http://127.0.0.1:7781/health
 
 謝辞:
 
-- この setup は `memory-lancedb-pro` をもとにした bundled / adapted integration を有効化します。
+- この setup は、repo 内に vendor した upstream `memory-lancedb-pro` backend を有効化します。
 - 上流の作者と貢献者に感謝します。
 
-この setup は、この repo に同梱されている bundled / adapted integration を有効化します。
+この setup は、この repo に同梱されている upstream source を有効化します。
 この OSS の通常利用では、上流リポジトリを別途 install する必要はありません。

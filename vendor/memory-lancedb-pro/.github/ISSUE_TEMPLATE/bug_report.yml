@@ -1,0 +1,81 @@
+name: 🐛 Bug Report
+description: Report a bug or unexpected behavior
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill out the sections below.
+
+  - type: input
+    id: version
+    attributes:
+      label: Plugin Version
+      description: "Run `openclaw memory-pro version` to check"
+      placeholder: "e.g. 1.0.22"
+    validations:
+      required: true
+
+  - type: input
+    id: openclaw-version
+    attributes:
+      label: OpenClaw Version
+      description: "Run `openclaw --version` to check"
+      placeholder: "e.g. 2026.3.1"
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear description of what happened
+      placeholder: "When I run `openclaw memory-pro search ...`, it throws..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal steps to reproduce the issue
+      placeholder: |
+        1. Set config ...
+        2. Run command ...
+        3. See error ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error Logs / Screenshots
+      description: Paste relevant error output or screenshots
+      render: shell
+
+  - type: dropdown
+    id: embedding
+    attributes:
+      label: Embedding Provider
+      options:
+        - OpenAI
+        - Jina
+        - Gemini
+        - Ollama
+        - Other
+    validations:
+      required: false
+
+  - type: input
+    id: os
+    attributes:
+      label: OS / Platform
+      placeholder: "e.g. Ubuntu 24.04, macOS 15, Windows 11"

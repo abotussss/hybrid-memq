@@ -19,7 +19,6 @@ PUBLIC_LABEL_REWRITES = (
 )
 TECHNICAL_ANCHOR_VALUES = {
     "memory-lancedb-pro",
-    "memory-lancedb-pro-adapted",
     "lancedb",
     "sqlite",
     "qctx",

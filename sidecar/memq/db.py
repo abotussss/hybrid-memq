@@ -172,7 +172,7 @@ def _prefer_human_anchor_text(fact_key: str, value: str, summary: str, text: str
     lowered_summary = clean_summary.lower()
     lowered_text = clean_text.lower()
     lowered_value = clean_value.lower()
-    technical_terms = STYLE_TECHNICAL_TERMS + ("memory-lancedb-pro-adapted",)
+    technical_terms = STYLE_TECHNICAL_TERMS
     summary_is_machineish = (
         (fact_key and clean_summary.lower().startswith(f"{str(fact_key).lower()}:"))
         or lowered_summary in {"true", "false", "exists"}
@@ -216,7 +216,7 @@ def _anchor_candidate_score(fact_key: str, value: str, summary: str, text: str) 
         score -= 1.0
     if str(fact_key or "").startswith("profile.task_") or str(fact_key or "").startswith("profile.memory_"):
         score += 1.5
-    if lowered in {"true", "false", "exists", "memory-lancedb-pro", "memory-lancedb-pro-adapted"}:
+    if lowered in {"true", "false", "exists", "memory-lancedb-pro"}:
         score -= 10.0
     return score
 
