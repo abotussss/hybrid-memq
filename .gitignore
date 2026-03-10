@@ -22,3 +22,5 @@ docs/runtime_persistence_*.json
 QSTYLE.current.json
 QRULE.current.json
 QCTX.current.txt
+memories.lance/
+vendor/memory-lancedb-pro/node_modules

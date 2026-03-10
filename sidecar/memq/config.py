@@ -31,7 +31,7 @@ def _env_str(name: str, default: str) -> str:
 
 def _normalize_qctx_backend(value: str) -> str:
     clean = str(value or "").strip().lower()
-    if clean in {"", "lancedb", "memory-lancedb-pro-adapted"}:
+    if clean in {"", "lancedb"}:
         return "memory-lancedb-pro"
     return clean
 

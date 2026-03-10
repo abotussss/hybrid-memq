@@ -448,6 +448,87 @@ def _backend_select_timeline_results(events: list[dict[str, Any]], *, limit: int
     return kept
 
 
+def _backend_bundle(
+    db: MemqDB,
+    *,
+    session_key: str,
+    plan: BrainRecallPlan,
+    queries: list[str],
+    fact_keys: list[str],
+    limits: dict[str, int],
+    memory_backend: LanceDbMemoryBackend,
+) -> RetrievalBundle:
+    surface = []
+    if plan.retrieval.allow_surface:
+        surface = _backend_select_memory_results(
+            _search_memory(
+                db,
+                memory_backend,
+                session_key=session_key,
+                queries=queries,
+                fact_keys=[],
+                layer="surface",
+                limit=limits["surface"],
+                kinds=["fact", "event", "digest"],
+                include_global=False,
+            ),
+            limit=limits["surface"],
+        )
+
+    deep = []
+    if plan.retrieval.allow_deep:
+        deep = _backend_select_memory_results(
+            _search_memory(
+                db,
+                memory_backend,
+                session_key=session_key,
+                queries=queries,
+                fact_keys=fact_keys,
+                layer="deep",
+                limit=limits["deep"],
+                kinds=["fact"],
+                include_global=True,
+            ),
+            limit=limits["deep"],
+        )
+
+    timeline: list[dict[str, Any]] = []
+    if plan.retrieval.allow_timeline and plan.time_range is not None:
+        timeline = _backend_select_timeline_results(
+            _search_timeline(
+                db,
+                memory_backend,
+                session_key=session_key,
+                queries=queries or [plan.time_range.label],
+                start_day=plan.time_range.start_day,
+                end_day=plan.time_range.end_day,
+                limit=limits["events"],
+            ),
+            limit=limits["events"],
+        )
+
+    return RetrievalBundle(
+        surface=surface,
+        deep=deep,
+        timeline=timeline,
+        anchors={
+            "wm.surf": surface_anchor(db, memory_backend, session_key),
+            "wm.deep": deep_anchor(db, memory_backend, session_key),
+            "p.snapshot": qctx_profile_snapshot(db, memory_backend, session_key),
+        },
+        debug={
+            "limits": limits,
+            "queryCount": len(queries),
+            "factKeyCount": len(fact_keys),
+            "surfaceHits": len(surface),
+            "deepHits": len(deep),
+            "timelineHits": len(timeline),
+            "retrievalAuthority": "memory-lancedb-pro",
+            "memoryBackend": "memory-lancedb-pro",
+        },
+    )
+
+
 def _search_timeline(
     db: MemqDB,
     memory_backend: LanceDbMemoryBackend | None,
@@ -458,6 +539,15 @@ def _search_timeline(
     end_day: str,
     limit: int,
 ) -> list[dict[str, Any]]:
+    def _normalize_timestamp(value: Any) -> int:
+        ts = int(value or 0)
+        if ts <= 0:
+            return 0
+        # LanceDB metadata can carry millisecond timestamps; Python timeline logic uses seconds.
+        if ts > 10_000_000_000:
+            ts //= 1000
+        return ts
+
     if memory_backend is not None and memory_backend.enabled():
         rows = memory_backend.list_entries(
             session_key=session_key,
@@ -468,7 +558,7 @@ def _search_timeline(
         event_rows: list[dict[str, Any]] = []
         digest_rows: list[dict[str, Any]] = []
         for row in rows:
-            ts = int(row.get("timestamp") or 0)
+            ts = _normalize_timestamp(row.get("timestamp"))
             if not ts:
                 continue
             day_key = datetime.fromtimestamp(ts, tz=db.timezone).strftime("%Y-%m-%d")
@@ -519,15 +609,22 @@ def retrieve_with_plan(
     queries = [q for q in plan.fts_queries if str(q).strip()]
     fact_keys = [fk for fk in plan.fact_keys if str(fk).strip()]
     backend_authoritative = memory_backend is not None and memory_backend.enabled()
-    limits = (
-        {
-            "surface": _resolve_limit(plan.retrieval.topk_surface, top_k),
-            "deep": _resolve_limit(plan.retrieval.topk_deep, top_k),
-            "events": _resolve_limit(plan.retrieval.topk_events, top_k),
-        }
-        if backend_authoritative
-        else _adaptive_limits(plan, top_k)
-    )
+    limits = {
+        "surface": _resolve_limit(plan.retrieval.topk_surface, top_k),
+        "deep": _resolve_limit(plan.retrieval.topk_deep, top_k),
+        "events": _resolve_limit(plan.retrieval.topk_events, top_k),
+    } if backend_authoritative else _adaptive_limits(plan, top_k)
+
+    if backend_authoritative and memory_backend is not None:
+        return _backend_bundle(
+            db,
+            session_key=session_key,
+            plan=plan,
+            queries=queries,
+            fact_keys=fact_keys,
+            limits=limits,
+            memory_backend=memory_backend,
+        )
 
     surface_candidates = _search_memory(
         db,
@@ -586,16 +683,6 @@ def retrieve_with_plan(
             else _rerank_events(timeline_candidates, plan, limit=limits["events"])
         )
 
-    qstyle_for_snapshot: dict[str, str] = {}
-    if memory_backend is not None and memory_backend.enabled():
-        rows = memory_backend.list_entries(session_key=session_key, kinds=["style"], include_global=True, limit=64)
-        for row in rows:
-            fact_key = str(row.get("fact_key") or "")
-            if not fact_key.startswith("qstyle."):
-                continue
-            key = fact_key.replace("qstyle.", "", 1)
-            if key and key not in qstyle_for_snapshot:
-                qstyle_for_snapshot[key] = str(row.get("value") or "")
     anchors = {
         "wm.surf": surface_anchor(db, memory_backend, session_key),
         "wm.deep": deep_anchor(db, memory_backend, session_key),

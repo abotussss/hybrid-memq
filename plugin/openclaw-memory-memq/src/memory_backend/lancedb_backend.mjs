@@ -1,11 +1,25 @@
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, symlinkSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import createJiti from "jiti";
 
-const HERE = new URL(".", import.meta.url).pathname;
+const HERE = fileURLToPath(new URL(".", import.meta.url));
 const ROOT = resolve(HERE, "../../../../");
+const PLUGIN_ROOT = resolve(HERE, "../../");
+const PLUGIN_NODE_MODULES = resolve(PLUGIN_ROOT, "node_modules");
+const VENDOR_ROOT = resolve(ROOT, "vendor/memory-lancedb-pro");
 const VENDOR_SRC = resolve(ROOT, "vendor/memory-lancedb-pro/src");
 const DEFAULT_DB_PATH = resolve(ROOT, ".memq/lancedb");
+
+function ensureVendorNodeModules() {
+  const target = resolve(VENDOR_ROOT, "node_modules");
+  if (existsSync(target)) return;
+  mkdirSync(dirname(target), { recursive: true });
+  symlinkSync(PLUGIN_NODE_MODULES, target, "dir");
+}
+
+ensureVendorNodeModules();
 
 const jiti = createJiti(import.meta.url, { interopDefault: true });
 
@@ -13,6 +27,11 @@ const { MemoryStore, validateStoragePath } = jiti(resolve(VENDOR_SRC, "store.ts"
 const { createEmbedder } = jiti(resolve(VENDOR_SRC, "embedder.ts"));
 const { createRetriever, DEFAULT_RETRIEVAL_CONFIG } = jiti(resolve(VENDOR_SRC, "retriever.ts"));
 const { AccessTracker } = jiti(resolve(VENDOR_SRC, "access-tracker.ts"));
+
+const NOOP_LOGGER = {
+  warn: () => {},
+  info: () => {},
+};
 
 const VECTOR_DIM = Number(process.env.MEMQ_LANCEDB_EMBED_DIMENSIONS || 768);
 const EMBED_BASE_URL = process.env.MEMQ_LANCEDB_EMBED_BASE_URL || "http://127.0.0.1:11434/v1";
@@ -143,7 +162,12 @@ async function createContext(dbPath) {
     rerankEndpoint: process.env.MEMQ_LANCEDB_RERANK_ENDPOINT || undefined,
     rerankProvider: process.env.MEMQ_LANCEDB_RERANK_PROVIDER || undefined,
   });
-  retriever.setAccessTracker(new AccessTracker(store.dbPath));
+  retriever.setAccessTracker(
+    new AccessTracker({
+      store,
+      logger: NOOP_LOGGER,
+    }),
+  );
   return { store, embedder, retriever };
 }
 
